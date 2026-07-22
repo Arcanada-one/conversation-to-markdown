@@ -1,0 +1,11 @@
+{
+  "name": "conversation-to-markdown",
+  "version": "1.1.2",
+  "private": true,
+  "description": "Copy a complete ChatGPT conversation as clean Markdown.",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "check": "node --check content.js && node --check popup.js"
+  }
+}

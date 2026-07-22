@@ -1,0 +1,13 @@
+.DS_Store
+node_modules/
+coverage/
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.crt
+.idea/
+.vscode/
+*.swp
+*~

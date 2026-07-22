@@ -1,0 +1,87 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const root = path.resolve(__dirname, '..');
+
+const requiredFiles = [
+  '.github/CODEOWNERS',
+  '.github/dependabot.yml',
+  '.github/workflows/ci.yml',
+  'CODE_OF_CONDUCT.md',
+  'CONTRIBUTING.md',
+  'LICENSE',
+  'PRIVACY.md',
+  'README.md',
+  'SECURITY.md',
+  'assets/conversation-to-markdown-hero.png',
+  'public-files.allowlist',
+];
+
+function read(relativePath) {
+  const absolutePath = path.join(root, relativePath);
+  assert.ok(fs.existsSync(absolutePath), `${relativePath} must exist`);
+  return fs.readFileSync(absolutePath, 'utf8');
+}
+
+test('ships every public document and repository policy', () => {
+  const missing = requiredFiles.filter((file) => !fs.existsSync(path.join(root, file)));
+  assert.deepEqual(missing, []);
+});
+
+test('uses a neutral public identity without changing the release version', () => {
+  const manifest = JSON.parse(read('manifest.json'));
+  assert.equal(manifest.name, 'Conversation to Markdown');
+  assert.equal(manifest.version, '1.1.2');
+});
+
+test('README states independence and non-affiliation', () => {
+  const readme = read('README.md');
+  assert.match(readme, /Independent open-source project/);
+  assert.match(readme, /not affiliated with, endorsed by, or sponsored by OpenAI/);
+});
+
+test('allowlisted text files contain no private or internal material', () => {
+  const files = read('public-files.allowlist').trim().split('\n');
+  const textFiles = files.filter((file) => !file.endsWith('.png') && file !== 'tests/public-surface.test.js');
+  const forbidden = [
+    /\b(?:AGENT|CONTENT|INFRA|QCK|TUNE)-\d{4}\b/,
+    /\/(?:Users|home)\/[A-Za-z0-9._-]+\//,
+    /[A-Za-z]:\\Users\\[^\\]+\\/,
+    /https:\/\/chatgpt\.com\/c\/[A-Za-z0-9-]+/,
+    /[?&](?:sig|signature|token|expires|x-amz-[^=]+)=/i,
+    /\b(?:DESIGN|PLAN)\.md\b/,
+    /(?:^|\/)examples\//,
+  ];
+
+  for (const file of textFiles) {
+    const body = read(file);
+    for (const pattern of forbidden) {
+      assert.doesNotMatch(body, pattern, `${file} matches ${pattern}`);
+    }
+  }
+});
+
+test('shipped JavaScript has no network, storage, or analytics calls', () => {
+  const javascript = `${read('content.js')}\n${read('popup.js')}`;
+  const forbidden = [
+    /\bfetch\s*\(/,
+    /\bXMLHttpRequest\b/,
+    /\bWebSocket\b/,
+    /\bchrome\.storage\b/,
+    /\b(?:gtag|ga|mixpanel|amplitude|analytics)\s*\(/,
+  ];
+
+  for (const pattern of forbidden) assert.doesNotMatch(javascript, pattern);
+});
+
+test('CI is read-only and pins every action by full commit SHA', () => {
+  const workflow = read('.github/workflows/ci.yml');
+  assert.match(workflow, /permissions:\s*\n\s+contents: read/);
+  assert.doesNotMatch(workflow, /pull_request_target/);
+
+  const uses = [...workflow.matchAll(/^\s*uses:\s*([^\s#]+)/gm)].map((match) => match[1]);
+  assert.ok(uses.length > 0, 'workflow must use at least one action');
+  for (const action of uses) assert.match(action, /@[a-f0-9]{40}$/);
+});

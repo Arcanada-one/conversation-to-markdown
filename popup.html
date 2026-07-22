@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ChatGPT → Markdown</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      width: 280px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0d0d0d;
+      color: #e8e8e8;
+      padding: 20px;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+
+    .logo-icon {
+      font-size: 24px;
+      line-height: 1;
+    }
+
+    .logo-text {
+      font-size: 15px;
+      font-weight: 600;
+      color: #fff;
+      letter-spacing: -0.3px;
+    }
+
+    .logo-sub {
+      font-size: 11px;
+      color: #666;
+      margin-top: 1px;
+    }
+
+    #btn-copy {
+      width: 100%;
+      padding: 11px 16px;
+      background: #19c37d;
+      color: #000;
+      border: none;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s, transform 0.1s;
+      letter-spacing: -0.2px;
+    }
+
+    #btn-copy:hover { background: #1ed88a; }
+    #btn-copy:active { transform: scale(0.97); }
+    #btn-copy:disabled { background: #333; color: #666; cursor: default; }
+
+    #status {
+      margin-top: 14px;
+      font-size: 12px;
+      min-height: 36px;
+      padding: 8px 12px;
+      border-radius: 8px;
+      display: none;
+      line-height: 1.4;
+    }
+
+    #status.success {
+      display: block;
+      background: #0d2a1e;
+      color: #19c37d;
+      border: 1px solid #19c37d33;
+    }
+
+    #status.error {
+      display: block;
+      background: #2a0d0d;
+      color: #e05252;
+      border: 1px solid #e0525233;
+    }
+
+    .hint {
+      margin-top: 14px;
+      font-size: 11px;
+      color: #444;
+      line-height: 1.5;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="logo">
+    <span class="logo-icon">📋</span>
+    <div>
+      <div class="logo-text">ChatGPT → Markdown</div>
+      <div class="logo-sub">Copy conversation to clipboard</div>
+    </div>
+  </div>
+
+  <button id="btn-copy">Copy as Markdown</button>
+
+  <div id="status"></div>
+
+  <p class="hint">Open a ChatGPT conversation,<br>then click the button.</p>
+
+  <script src="popup.js"></script>
+</body>
+</html>

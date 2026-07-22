@@ -13,6 +13,8 @@ The extension:
 - does not sell or share data; and
 - gives the developer no access to your conversations or clipboard.
 
+Before a link or image URL is added to Markdown, credential-like query parameters such as signatures, tokens, expiry values, and cloud credentials are removed. A temporary image link may stop working after those parameters are removed; protecting access credentials takes priority over preserving that remote link.
+
 Your browser, the ChatGPT website, clipboard manager, operating system, and the application where you paste the result may have their own privacy behavior. Those products are outside this extension's control.
 
 The source code is available in this repository so the behavior can be inspected directly. For a security concern, follow [SECURITY.md](SECURITY.md).

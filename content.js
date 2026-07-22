@@ -8,12 +8,26 @@
  */
 
 /** Convert an HTML element's content to plain Markdown text. */
+function sanitizeExportUrl(url) {
+  const sensitiveNames = new Set([
+    'access_token', 'credential', 'expires', 'key', 'signature', 'sig', 'token',
+  ]);
+  for (const name of Array.from(url.searchParams.keys())) {
+    const lowerName = name.toLowerCase();
+    if (sensitiveNames.has(lowerName) || lowerName.startsWith('x-amz-')) {
+      url.searchParams.delete(name);
+    }
+  }
+  return url;
+}
+
 function resolveHttpUrl(rawUrl) {
   if (!rawUrl) return null;
   try {
     const baseUrl = typeof location !== 'undefined' ? location.href : 'https://chatgpt.com/';
     const resolved = new URL(rawUrl, baseUrl);
-    return resolved.protocol === 'http:' || resolved.protocol === 'https:' ? resolved.href : null;
+    if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') return null;
+    return sanitizeExportUrl(resolved).href;
   } catch (_error) {
     return null;
   }

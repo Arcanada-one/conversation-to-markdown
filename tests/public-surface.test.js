@@ -30,16 +30,23 @@ test('ships every public document and repository policy', () => {
   assert.deepEqual(missing, []);
 });
 
-test('uses a neutral public identity without changing the release version', () => {
+test('uses a neutral public identity throughout the extension', () => {
   const manifest = JSON.parse(read('manifest.json'));
+  const popup = read('popup.html');
   assert.equal(manifest.name, 'Conversation to Markdown');
   assert.equal(manifest.version, '1.1.2');
+  assert.match(popup, /Conversation to Markdown/);
+  assert.doesNotMatch(popup, /ChatGPT\s*→\s*Markdown/);
+  assert.deepEqual([...manifest.permissions].sort(), ['clipboardWrite', 'scripting']);
 });
 
 test('README states independence and non-affiliation', () => {
   const readme = read('README.md');
   assert.match(readme, /Independent open-source project/);
   assert.match(readme, /not affiliated with, endorsed by, or sponsored by OpenAI/);
+  assert.match(readme, /#### You said:/);
+  assert.match(readme, /#### ChatGPT said:/);
+  assert.doesNotMatch(readme, /^## (?:User|Assistant)$/m);
 });
 
 test('allowlisted text files contain no private or internal material', () => {

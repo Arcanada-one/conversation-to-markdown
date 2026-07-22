@@ -14,6 +14,7 @@ Long conversations are difficult to archive when the page keeps only part of the
 
 - Captures user and assistant turns across a virtualized conversation.
 - Preserves paragraphs, headings, lists, blockquotes, links, code, tables, and visible generated images.
+- Removes credential-like query parameters from exported links and image URLs.
 - Combines multiple message segments from one turn instead of keeping only the first paragraph.
 - Restores the original scroll position after success or failure.
 - Processes everything locally in the browser with no telemetry, storage, or server.
@@ -43,13 +44,13 @@ After pulling an update, open `chrome://extensions`, press the extension's reloa
 The output uses role headings and separators:
 
 ```markdown
-## User
+#### You said:
 
 How should I archive this conversation?
 
 ---
 
-## Assistant
+#### ChatGPT said:
 
 Copy it as structured Markdown.
 ```
@@ -59,7 +60,6 @@ Copy it as structured Markdown.
 The extension asks only for permissions used by the export flow:
 
 - `clipboardWrite` writes the finished Markdown to your clipboard.
-- `activeTab` lets the popup act on the ChatGPT tab you chose.
 - `scripting` runs the extraction entrypoint in that tab when requested.
 - Host access is limited to `https://chatgpt.com/*` and `https://chat.openai.com/*`.
 - The content script loads at `document_idle` on those two hosts so it can observe the conversation DOM; extraction begins only after you press the copy button.
@@ -72,6 +72,7 @@ See [PRIVACY.md](PRIVACY.md) for the complete data-handling statement.
 - The tab must stay open while scanning; very long conversations can take longer.
 - Only content rendered by the conversation page can be exported.
 - Unsafe executable link schemes are intentionally omitted.
+- Temporary or authenticated generated-image links may expire or stop working after credential-like URL parameters are removed.
 
 ## Development
 

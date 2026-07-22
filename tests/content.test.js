@@ -618,6 +618,32 @@ test('does not emit executable link schemes into Markdown', () => {
   }
 });
 
+test('removes credential-like query parameters from exported image URLs', () => {
+  assert.equal(typeof parser.nodeToMarkdown, 'function');
+  const previousNode = global.Node;
+  const previousLocation = global.location;
+  global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
+  global.location = { href: 'https://chatgpt.com/' };
+  try {
+    const sensitiveQuery = [
+      ['sig', 'SECRET'],
+      ['expires', '999'],
+      ['X-Amz-Credential', 'SECRET'],
+      ['token', 'SECRET'],
+    ].map(([key, value]) => `${key}=${value}`).join('&');
+    const generated = element('img', [], {
+      alt: 'Generated',
+      src: `https://cdn.example.com/image.png?id=file_demo&${sensitiveQuery}`,
+    });
+    const markdown = parser.nodeToMarkdown(generated);
+    assert.match(markdown, /id=file_demo/);
+    assert.doesNotMatch(markdown, /SECRET|sig=|expires=|X-Amz-|token=/i);
+  } finally {
+    global.Node = previousNode;
+    global.location = previousLocation;
+  }
+});
+
 test('browser entrypoint scans all windows and returns the established result shape', async () => {
   assert.equal(typeof parser.getConversationMarkdown, 'function');
   const turns = [

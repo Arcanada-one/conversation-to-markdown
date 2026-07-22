@@ -1,6 +1,6 @@
 # Conversation to Markdown
 
-![A voice waveform and conversation becoming a structured document](assets/conversation-to-markdown-hero.png)
+![A voice waveform and conversation becoming a structured document](assets/conversation-to-markdown-hero.jpg)
 
 Export your own ChatGPT conversations as clean Markdown with one click. The extension gently scans the full virtualized conversation, groups every message by role, preserves useful formatting, and writes one Markdown document to your clipboard.
 

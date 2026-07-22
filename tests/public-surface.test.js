@@ -15,7 +15,7 @@ const requiredFiles = [
   'PRIVACY.md',
   'README.md',
   'SECURITY.md',
-  'assets/conversation-to-markdown-hero.png',
+  'assets/conversation-to-markdown-hero.jpg',
   'public-files.allowlist',
 ];
 
@@ -28,6 +28,17 @@ function read(relativePath) {
 test('ships every public document and repository policy', () => {
   const missing = requiredFiles.filter((file) => !fs.existsSync(path.join(root, file)));
   assert.deepEqual(missing, []);
+});
+
+test('ships an optimized JPEG documentation hero', () => {
+  const heroPath = path.join(root, 'assets/conversation-to-markdown-hero.jpg');
+  const legacyPngPath = path.join(root, 'assets/conversation-to-markdown-hero.png');
+  const hero = fs.readFileSync(heroPath);
+
+  assert.equal(hero[0], 0xff);
+  assert.equal(hero[1], 0xd8);
+  assert.ok(hero.byteLength <= 200 * 1024, `hero is ${hero.byteLength} bytes`);
+  assert.equal(fs.existsSync(legacyPngPath), false);
 });
 
 test('uses a neutral public identity throughout the extension', () => {
@@ -51,7 +62,9 @@ test('README states independence and non-affiliation', () => {
 
 test('allowlisted text files contain no private or internal material', () => {
   const files = read('public-files.allowlist').trim().split('\n');
-  const textFiles = files.filter((file) => !file.endsWith('.png') && file !== 'tests/public-surface.test.js');
+  const textFiles = files.filter(
+    (file) => !/\.(?:jpe?g|png)$/i.test(file) && file !== 'tests/public-surface.test.js',
+  );
   const forbidden = [
     /\b(?:AGENT|CONTENT|INFRA|QCK|TUNE)-\d{4}\b/,
     /\/(?:Users|home)\/[A-Za-z0-9._-]+\//,

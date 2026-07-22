@@ -635,6 +635,8 @@ test('removes every query parameter except the generated-media id', () => {
       ['se', '999'],
       ['Policy', 'SECRET'],
       ['customSecret', 'SECRET'],
+      ['ID', 'SECRET'],
+      ['Id', 'SECRET'],
     ].map(([key, value]) => `${key}=${value}`).join('&');
     const generated = element('img', [], {
       alt: 'Generated',

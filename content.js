@@ -1,5 +1,5 @@
 /**
- * ChatGPT → Markdown
+ * Conversation to Markdown
  * Content script: parses the live ChatGPT conversation and returns clean Markdown.
  *
  * Iterates [data-turn-id] sections (not just [data-message-author-role]) so that
@@ -11,7 +11,7 @@
 function stripUrlQuery(url, allowedQueryNames) {
   const allowedNames = new Set(allowedQueryNames || []);
   for (const name of Array.from(url.searchParams.keys())) {
-    if (!allowedNames.has(name.toLowerCase())) url.searchParams.delete(name);
+    if (!allowedNames.has(name)) url.searchParams.delete(name);
   }
   return url;
 }

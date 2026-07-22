@@ -618,7 +618,7 @@ test('does not emit executable link schemes into Markdown', () => {
   }
 });
 
-test('removes credential-like query parameters from exported image URLs', () => {
+test('removes every query parameter except the generated-media id', () => {
   assert.equal(typeof parser.nodeToMarkdown, 'function');
   const previousNode = global.Node;
   const previousLocation = global.location;
@@ -630,14 +630,23 @@ test('removes credential-like query parameters from exported image URLs', () => 
       ['expires', '999'],
       ['X-Amz-Credential', 'SECRET'],
       ['token', 'SECRET'],
+      ['api_key', 'SECRET'],
+      ['X-Goog-Credential', 'SECRET'],
+      ['se', '999'],
+      ['Policy', 'SECRET'],
+      ['customSecret', 'SECRET'],
     ].map(([key, value]) => `${key}=${value}`).join('&');
     const generated = element('img', [], {
       alt: 'Generated',
       src: `https://cdn.example.com/image.png?id=file_demo&${sensitiveQuery}`,
     });
     const markdown = parser.nodeToMarkdown(generated);
-    assert.match(markdown, /id=file_demo/);
-    assert.doesNotMatch(markdown, /SECRET|sig=|expires=|X-Amz-|token=/i);
+    assert.equal(markdown, '![Generated](https://cdn.example.com/image.png?id=file_demo)\n\n');
+
+    const linked = element('a', [textNode('example')], {
+      href: 'https://example.com/path?ordinary=value&customSecret=SECRET',
+    });
+    assert.equal(parser.nodeToMarkdown(linked), '[example](https://example.com/path)');
   } finally {
     global.Node = previousNode;
     global.location = previousLocation;

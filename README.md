@@ -14,7 +14,7 @@ Long conversations are difficult to archive when the page keeps only part of the
 
 - Captures user and assistant turns across a virtualized conversation.
 - Preserves paragraphs, headings, lists, blockquotes, links, code, tables, and visible generated images.
-- Removes credential-like query parameters from exported links and image URLs.
+- Removes all query parameters from exported links; generated-media URLs retain only their non-credential `id` parameter.
 - Combines multiple message segments from one turn instead of keeping only the first paragraph.
 - Restores the original scroll position after success or failure.
 - Processes everything locally in the browser with no telemetry, storage, or server.
@@ -72,7 +72,7 @@ See [PRIVACY.md](PRIVACY.md) for the complete data-handling statement.
 - The tab must stay open while scanning; very long conversations can take longer.
 - Only content rendered by the conversation page can be exported.
 - Unsafe executable link schemes are intentionally omitted.
-- Temporary or authenticated generated-image links may expire or stop working after credential-like URL parameters are removed.
+- Temporary or authenticated links may stop working after URL query parameters are removed.
 
 ## Development
 

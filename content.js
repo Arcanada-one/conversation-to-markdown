@@ -8,26 +8,21 @@
  */
 
 /** Convert an HTML element's content to plain Markdown text. */
-function sanitizeExportUrl(url) {
-  const sensitiveNames = new Set([
-    'access_token', 'credential', 'expires', 'key', 'signature', 'sig', 'token',
-  ]);
+function stripUrlQuery(url, allowedQueryNames) {
+  const allowedNames = new Set(allowedQueryNames || []);
   for (const name of Array.from(url.searchParams.keys())) {
-    const lowerName = name.toLowerCase();
-    if (sensitiveNames.has(lowerName) || lowerName.startsWith('x-amz-')) {
-      url.searchParams.delete(name);
-    }
+    if (!allowedNames.has(name.toLowerCase())) url.searchParams.delete(name);
   }
   return url;
 }
 
-function resolveHttpUrl(rawUrl) {
+function resolveHttpUrl(rawUrl, allowedQueryNames) {
   if (!rawUrl) return null;
   try {
     const baseUrl = typeof location !== 'undefined' ? location.href : 'https://chatgpt.com/';
     const resolved = new URL(rawUrl, baseUrl);
     if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') return null;
-    return sanitizeExportUrl(resolved).href;
+    return stripUrlQuery(resolved, allowedQueryNames).href;
   } catch (_error) {
     return null;
   }
@@ -111,7 +106,7 @@ function nodeToMarkdown(node, depth) {
       if (!src || src.startsWith('data:') || src.startsWith('blob:')) return '';
       // Skip small favicons (google s2 favicons, etc.)
       if (src.includes('favicon') || src.includes('s2/favicons')) return '';
-      const absSrc = resolveHttpUrl(src);
+      const absSrc = resolveHttpUrl(src, ['id']);
       if (!absSrc) return '';
       const alt = (node.getAttribute('alt') || '').trim();
       return '![' + alt + '](' + absSrc + ')\n\n';
@@ -154,7 +149,7 @@ function extractImages(section) {
     if (!src) continue;
 
     // Deduplicate by file ID
-    const absSrc = resolveHttpUrl(src);
+    const absSrc = resolveHttpUrl(src, ['id']);
     if (!absSrc) continue;
     const fileIdMatch = absSrc.match(/[?&]id=(file_[^&#]+)/);
     const fileId = fileIdMatch ? fileIdMatch[1] : absSrc;

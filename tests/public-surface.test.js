@@ -45,10 +45,10 @@ test('uses a neutral public identity throughout the extension', () => {
   const manifest = JSON.parse(read('manifest.json'));
   const popup = read('popup.html');
   assert.equal(manifest.name, 'Conversation to Markdown');
-  assert.equal(manifest.version, '1.1.2');
+  assert.equal(manifest.version, '1.1.6');
   assert.match(popup, /Conversation to Markdown/);
   assert.doesNotMatch(popup, /ChatGPT\s*→\s*Markdown/);
-  assert.deepEqual([...manifest.permissions].sort(), ['clipboardWrite', 'scripting']);
+  assert.deepEqual([...manifest.permissions].sort(), ['activeTab', 'clipboardWrite', 'downloads', 'scripting']);
 });
 
 test('README states independence and non-affiliation', () => {
@@ -84,16 +84,25 @@ test('allowlisted text files contain no private or internal material', () => {
 });
 
 test('shipped JavaScript has no network, storage, or analytics calls', () => {
-  const javascript = `${read('content.js')}\n${read('popup.js')}`;
+  const popupJs = read('popup.js');
+  const contentJs = read('content.js');
   const forbidden = [
-    /\bfetch\s*\(/,
     /\bXMLHttpRequest\b/,
     /\bWebSocket\b/,
     /\bchrome\.storage\b/,
     /\b(?:gtag|ga|mixpanel|amplitude|analytics)\s*\(/,
   ];
 
-  for (const pattern of forbidden) assert.doesNotMatch(javascript, pattern);
+  for (const pattern of forbidden) {
+    assert.doesNotMatch(popupJs, pattern, `popup.js matches ${pattern}`);
+    assert.doesNotMatch(contentJs, pattern, `content.js matches ${pattern}`);
+  }
+
+  // fetch() is allowed in content.js only — used by fetchImageDataUrls
+  // for image downloading via declared host_permissions.
+  assert.doesNotMatch(popupJs, /\bfetch\s*\(/, 'popup.js must not use fetch');
+  assert.match(contentJs, /\bfetch\s*\(/, 'content.js must use fetch for image download');
+  assert.match(contentJs, /fetchImageDataUrls/, 'fetch must be wrapped in fetchImageDataUrls');
 });
 
 test('CI is read-only and pins every action by full commit SHA', () => {

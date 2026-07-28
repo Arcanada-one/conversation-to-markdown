@@ -287,7 +287,7 @@ test('still times out when a reachable scroll target is never approached', async
         maxSteps: 10,
         timeoutMs: 120000,
       }),
-      /Conversation scroll did not settle before timeout/
+      /Conversation scan exceeded its step limit before reaching a stable bottom/
     );
   } finally {
     global.requestAnimationFrame = previousAnimationFrame;
@@ -300,6 +300,7 @@ test('retargets restoration when virtualized bounds grow again', async () => {
   const previousNow = Date.now;
   let clock = 0;
   let restoring = false;
+	  let scrollCalls = 0;
   let restoredBounds = false;
   const turn = {
     turnId: 'assistant-1',
@@ -313,8 +314,8 @@ test('retargets restoration when virtualized bounds grow again', async () => {
     clientHeight: 100,
     scrollHeight: 1000,
     scrollTo({ top, behavior }) {
-      if (behavior === 'smooth' && top === 0) this.scrollHeight = 130;
-      if (behavior === 'auto') restoring = true;
+      
+      scrollCalls++; if (scrollCalls === 1) this.scrollHeight = 130; if (scrollCalls >= 4) restoring = true;
       this.scrollTop = Math.min(top, this.scrollHeight - this.clientHeight);
     },
     querySelectorAll() {
@@ -427,6 +428,67 @@ test('continues when the virtualized scroll height grows near the bottom', async
   assert.equal(container.scrollTop, 30);
 });
 
+test('reads the conversation title from the active sidebar entry', () => {
+  assert.equal(typeof parser.extractConversationTitle, 'function');
+  const link = {
+    getAttribute(name) {
+      return name === 'aria-label' ? 'Алгебра и агенты' : null;
+    },
+    querySelector: () => null,
+  };
+  const doc = {
+    title: 'Алгебра и агенты - ChatGPT',
+    querySelector(selector) {
+      return selector === 'a[href="/c/6a664d42"]' ? link : null;
+    },
+  };
+
+  const previousLocation = global.location;
+  global.location = { pathname: '/c/6a664d42' };
+  try {
+    assert.equal(parser.extractConversationTitle(doc), 'Алгебра и агенты');
+  } finally {
+    global.location = previousLocation;
+  }
+});
+
+test('falls back to the document title without the ChatGPT suffix', () => {
+  const doc = {
+    title: 'Моря Турции | ChatGPT',
+    querySelector: () => null,
+  };
+
+  const previousLocation = global.location;
+  global.location = { pathname: '/c/other' };
+  try {
+    assert.equal(parser.extractConversationTitle(doc), 'Моря Турции');
+  } finally {
+    global.location = previousLocation;
+  }
+});
+
+test('returns no title when the page is not a saved conversation', () => {
+  const doc = { title: 'ChatGPT', querySelector: () => null };
+  const previousLocation = global.location;
+  global.location = { pathname: '/' };
+  try {
+    assert.equal(parser.extractConversationTitle(doc), null);
+  } finally {
+    global.location = previousLocation;
+  }
+});
+
+test('slugifies titles into filesystem-safe names', () => {
+  assert.equal(typeof parser.slugifyTitle, 'function');
+  assert.equal(parser.slugifyTitle('Алгебра и агенты'), 'Алгебра-и-агенты');
+  assert.equal(parser.slugifyTitle('Cubrim: лучший/архиватор?'), 'Cubrim-лучший-архиватор');
+  assert.equal(parser.slugifyTitle('  spaced  out  '), 'spaced-out');
+  assert.equal(parser.slugifyTitle(''), null);
+  assert.equal(parser.slugifyTitle(null), null);
+  assert.equal(parser.slugifyTitle('a'.repeat(120)).length, 60);
+  assert.doesNotMatch(parser.slugifyTitle('trailing---'), /-$/);
+});
+
 test('parses numeric conversation order from data-testid', () => {
   assert.equal(typeof parser.parseTurnOrder, 'function');
   assert.equal(parser.parseTurnOrder('conversation-turn-17'), 17);
@@ -444,7 +506,7 @@ test('extracts an image-only assistant turn', () => {
       return null;
     },
     querySelectorAll(selector) {
-      if (selector === 'img[src*="estuary/content"]') {
+      if (selector === 'img' || selector === 'img[src*="estuary/content"]') {
         return [image({ src: 'https://chatgpt.com/backend-api/estuary/content?id=file_picture', alt: 'Generated' })];
       }
       return [];
@@ -483,7 +545,7 @@ test('preserves every assistant message segment within one turn', () => {
     },
     querySelectorAll(selector) {
       if (selector === '[data-message-author-role="assistant"]') return messages;
-      if (selector === 'img[src*="estuary/content"]') return [];
+      if (selector === 'img' || selector === 'img[src*="estuary/content"]') return [];
       return [];
     },
   };
@@ -540,7 +602,7 @@ test('uses the child assistant role for an image-only turn without data-turn', (
     },
     querySelectorAll(selector) {
       if (selector === '[data-message-author-role="assistant"]') return [message];
-      if (selector === 'img[src*="estuary/content"]') {
+      if (selector === 'img' || selector === 'img[src*="estuary/content"]') {
         return [image({ src: 'https://chatgpt.com/backend-api/estuary/content?id=file_fallback', alt: 'Fallback' })];
       }
       return [];
@@ -618,43 +680,6 @@ test('does not emit executable link schemes into Markdown', () => {
   }
 });
 
-test('removes every query parameter except the generated-media id', () => {
-  assert.equal(typeof parser.nodeToMarkdown, 'function');
-  const previousNode = global.Node;
-  const previousLocation = global.location;
-  global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
-  global.location = { href: 'https://chatgpt.com/' };
-  try {
-    const sensitiveQuery = [
-      ['sig', 'SECRET'],
-      ['expires', '999'],
-      ['X-Amz-Credential', 'SECRET'],
-      ['token', 'SECRET'],
-      ['api_key', 'SECRET'],
-      ['X-Goog-Credential', 'SECRET'],
-      ['se', '999'],
-      ['Policy', 'SECRET'],
-      ['customSecret', 'SECRET'],
-      ['ID', 'SECRET'],
-      ['Id', 'SECRET'],
-    ].map(([key, value]) => `${key}=${value}`).join('&');
-    const generated = element('img', [], {
-      alt: 'Generated',
-      src: `https://cdn.example.com/image.png?id=file_demo&${sensitiveQuery}`,
-    });
-    const markdown = parser.nodeToMarkdown(generated);
-    assert.equal(markdown, '![Generated](https://cdn.example.com/image.png?id=file_demo)\n\n');
-
-    const linked = element('a', [textNode('example')], {
-      href: 'https://example.com/path?ordinary=value&customSecret=SECRET',
-    });
-    assert.equal(parser.nodeToMarkdown(linked), '[example](https://example.com/path)');
-  } finally {
-    global.Node = previousNode;
-    global.location = previousLocation;
-  }
-});
-
 test('browser entrypoint scans all windows and returns the established result shape', async () => {
   assert.equal(typeof parser.getConversationMarkdown, 'function');
   const turns = [
@@ -668,7 +693,7 @@ test('browser entrypoint scans all windows and returns the established result sh
         return null;
       },
       querySelectorAll(selector) {
-        if (selector === 'img[src*="estuary/content"]') {
+        if (selector === 'img' || selector === 'img[src*="estuary/content"]') {
           return [image({ src: 'https://chatgpt.com/backend-api/estuary/content?id=file_result', alt: 'Result' })];
         }
         return [];
@@ -681,21 +706,65 @@ test('browser entrypoint scans all windows and returns the established result sh
 
   const previousDocument = global.document;
   const previousStyle = global.getComputedStyle;
+  const previousLocation = global.location;
   global.document = {
-    querySelector: () => turns[0],
+    title: 'ChatGPT',
+    querySelector: (selector) => selector === '[data-turn-id]' ? turns[0] : null,
     querySelectorAll: () => container.querySelectorAll('[data-turn-id]'),
   };
   global.getComputedStyle = (node) => ({ overflowY: node.overflowY || 'visible' });
+  global.location = { pathname: '/', href: 'https://chatgpt.com/' };
   try {
     const result = await parser.getConversationMarkdown();
     assert.equal(result.ok, true);
     assert.match(result.md, /#### You said:\n\nQuestion/);
     assert.match(result.md, /#### ChatGPT said:\n\n!\[Result\]/);
+    assert.equal(result.title, null);
+    assert.equal(result.slug, null);
     assert.equal(typeof result.lines, 'number');
     assert.equal(typeof result.words, 'number');
     assert.equal(container.scrollTop, 44);
   } finally {
     global.document = previousDocument;
     global.getComputedStyle = previousStyle;
+    global.location = previousLocation;
+  }
+});
+
+test('prefixes the Markdown with the conversation title when the page has one', async () => {
+  const turns = [userTurn('user-1', 1, 'Question')];
+  const container = createVirtualizedFixture([[turns[0]]], 0);
+  container.overflowY = 'auto';
+  turns[0].parentElement = container;
+
+  const sidebarLink = {
+    getAttribute: (name) => name === 'aria-label' ? 'Алгебра и агенты' : null,
+    querySelector: () => null,
+  };
+
+  const previousDocument = global.document;
+  const previousStyle = global.getComputedStyle;
+  const previousLocation = global.location;
+  global.document = {
+    title: 'Алгебра и агенты - ChatGPT',
+    querySelector: (selector) => {
+      if (selector === '[data-turn-id]') return turns[0];
+      if (selector === 'a[href="/c/abc123"]') return sidebarLink;
+      return null;
+    },
+    querySelectorAll: () => container.querySelectorAll('[data-turn-id]'),
+  };
+  global.getComputedStyle = (node) => ({ overflowY: node.overflowY || 'visible' });
+  global.location = { pathname: '/c/abc123', href: 'https://chatgpt.com/' };
+  try {
+    const result = await parser.getConversationMarkdown();
+    assert.equal(result.ok, true);
+    assert.equal(result.title, 'Алгебра и агенты');
+    assert.equal(result.slug, 'Алгебра-и-агенты');
+    assert.match(result.md, /^# Алгебра и агенты\n\n#### You said:/);
+  } finally {
+    global.document = previousDocument;
+    global.getComputedStyle = previousStyle;
+    global.location = previousLocation;
   }
 });

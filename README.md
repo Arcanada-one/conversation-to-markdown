@@ -12,9 +12,11 @@ Long conversations are difficult to archive when the page keeps only part of the
 
 ## Features
 
-- Captures user and assistant turns across a virtualized conversation.
+- Captures user and assistant turns across a virtualized conversation, including very long threads.
+- Names the export after the conversation title shown in the sidebar, and adds that title as the document's `#` heading.
+- Optionally downloads every image to `chatgpt-export/<title>/` and rewrites the Markdown to point at the local copies.
 - Preserves paragraphs, headings, lists, blockquotes, links, code, tables, and visible generated images.
-- Removes all query parameters from exported links; generated-media URLs retain only their non-credential `id` parameter.
+- Removes query parameters from exported page links; image URLs keep the parameters their host requires to serve the file.
 - Combines multiple message segments from one turn instead of keeping only the first paragraph.
 - Restores the original scroll position after success or failure.
 - Processes everything locally in the browser with no telemetry, storage, or server.
@@ -41,9 +43,11 @@ After pulling an update, open `chrome://extensions`, press the extension's reloa
 4. Keep the conversation tab open while the page scrolls. The extension returns it to the starting position.
 5. Paste the Markdown into your editor, notes app, or repository.
 
-The output uses role headings and separators:
+The output starts with the conversation title, then uses role headings and separators:
 
 ```markdown
+# How to archive a conversation
+
 #### You said:
 
 How should I archive this conversation?
@@ -55,14 +59,30 @@ How should I archive this conversation?
 Copy it as structured Markdown.
 ```
 
+### Saving images alongside the Markdown
+
+Tick **Save .md + images to chatgpt-export/** before pressing the button. The extension then downloads the conversation and every image it references into your Downloads folder:
+
+```
+Downloads/chatgpt-export/How-to-archive-a-conversation/
+├── How-to-archive-a-conversation.md
+├── image_001.png
+└── image_002.jpg
+```
+
+Image references in the saved Markdown point at the local files, so the document renders offline. Images the browser cannot fetch keep their original URLs, and the status message reports how many were saved. Without a conversation title — a brand-new, unnamed chat — files land directly in `chatgpt-export/` as `conversation.md`.
+
+The clipboard always receives the same Markdown that was written to disk.
+
 ## Permissions
 
 The extension asks only for permissions used by the export flow:
 
 - `clipboardWrite` writes the finished Markdown to your clipboard.
 - `scripting` runs the extraction entrypoint in that tab when requested.
-- Host access is limited to `https://chatgpt.com/*` and `https://chat.openai.com/*`.
-- The content script loads at `document_idle` on those two hosts so it can observe the conversation DOM; extraction begins only after you press the copy button.
+- `downloads` saves the Markdown file and images to your Downloads folder — used only when you tick the save checkbox.
+- Host access covers `https://chatgpt.com/*`, `https://chat.openai.com/*`, and `https://files.oaiusercontent.com/*`. The third host serves conversation images and is contacted only while downloading them.
+- The content script loads at `document_idle` on the two conversation hosts so it can observe the DOM; extraction begins only after you press the copy button.
 
 See [PRIVACY.md](PRIVACY.md) for the complete data-handling statement.
 
@@ -72,7 +92,9 @@ See [PRIVACY.md](PRIVACY.md) for the complete data-handling statement.
 - The tab must stay open while scanning; very long conversations can take longer.
 - Only content rendered by the conversation page can be exported.
 - Unsafe executable link schemes are intentionally omitted.
-- Temporary or authenticated links may stop working after URL query parameters are removed.
+- Temporary or authenticated page links may stop working after URL query parameters are removed.
+- Image URLs are time-limited. Download them while the conversation is open; links left in the Markdown expire.
+- Chrome appends `(1)`, `(2)`, … when a filename already exists, so re-exporting the same conversation creates a new copy rather than overwriting the old one.
 
 ## Development
 

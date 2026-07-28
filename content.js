@@ -1,10 +1,10 @@
 /**
- * Conversation to Markdown
+ * ChatGPT → Markdown v1.1.6
  * Content script: parses the live ChatGPT conversation and returns clean Markdown.
  *
  * Iterates [data-turn-id] sections (not just [data-message-author-role]) so that
  * generated images — which live outside the message div but inside the turn section —
- * are correctly captured.
+ * are correctly captured. Strips query parameters from exported URLs (privacy).
  */
 
 /** Convert an HTML element's content to plain Markdown text. */
@@ -23,6 +23,19 @@ function resolveHttpUrl(rawUrl, allowedQueryNames) {
     const resolved = new URL(rawUrl, baseUrl);
     if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') return null;
     return stripUrlQuery(resolved, allowedQueryNames).href;
+  } catch (_error) {
+    return null;
+  }
+}
+
+/** Resolve an image URL preserving query parameters (SAS tokens etc. needed for fetch). */
+function resolveImageUrl(rawUrl) {
+  if (!rawUrl) return null;
+  try {
+    const baseUrl = typeof location !== 'undefined' ? location.href : 'https://chatgpt.com/';
+    const resolved = new URL(rawUrl, baseUrl);
+    if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') return null;
+    return resolved.href;
   } catch (_error) {
     return null;
   }
@@ -106,7 +119,7 @@ function nodeToMarkdown(node, depth) {
       if (!src || src.startsWith('data:') || src.startsWith('blob:')) return '';
       // Skip small favicons (google s2 favicons, etc.)
       if (src.includes('favicon') || src.includes('s2/favicons')) return '';
-      const absSrc = resolveHttpUrl(src, ['id']);
+      const absSrc = resolveImageUrl(src);
       if (!absSrc) return '';
       const alt = (node.getAttribute('alt') || '').trim();
       return '![' + alt + '](' + absSrc + ')\n\n';
@@ -135,26 +148,34 @@ function nodeToMarkdown(node, depth) {
   }
 }
 
-/** Extract unique generated images from a turn section. */
+/** Extract images from a turn section that live OUTSIDE the .markdown prose
+ *  container (nodeToMarkdown handles images inside .markdown). Captures all
+ *  visible images regardless of CDN path. */
 function extractImages(section) {
-  const seenFileIds = new Set();
+  const seenSrcs = new Set();
   const results = [];
 
-  const imgEls = section.querySelectorAll('img[src*="estuary/content"]');
+  const imgEls = section.querySelectorAll('img');
   for (const img of imgEls) {
-    // Skip aria-hidden duplicates (blurred background copies)
     if (img.getAttribute('aria-hidden') === 'true') continue;
 
     const src = img.getAttribute('src') || '';
-    if (!src) continue;
+    if (!src || src.startsWith('data:') || src.startsWith('blob:')) continue;
+    if (src.includes('favicon') || src.includes('s2/favicons')) continue;
 
-    // Deduplicate by file ID
-    const absSrc = resolveHttpUrl(src, ['id']);
+    // Skip images already inside a markdown/prose container —
+    // nodeToMarkdown will emit them with their surrounding context.
+    if (typeof img.closest === 'function' &&
+        (img.closest('.markdown') || img.closest('[class*="prose"]'))) continue;
+
+    // All image URLs: preserve query params — estuary needs p+ts,
+    // CDN needs SAS tokens. fetchImageDataUrls replaces them with
+    // local paths after download.
+    const absSrc = resolveImageUrl(src);
     if (!absSrc) continue;
-    const fileIdMatch = absSrc.match(/[?&]id=(file_[^&#]+)/);
-    const fileId = fileIdMatch ? fileIdMatch[1] : absSrc;
-    if (seenFileIds.has(fileId)) continue;
-    seenFileIds.add(fileId);
+
+    if (seenSrcs.has(absSrc)) continue;
+    seenSrcs.add(absSrc);
 
     const alt = (img.getAttribute('alt') || '').trim();
     results.push('![' + alt + '](' + absSrc + ')');
@@ -228,8 +249,13 @@ function extractTurn(section, discoveryIndex) {
       message.querySelector('.whitespace-pre-wrap') || message.querySelector('[dir="auto"]') || message
     );
     const text = bubble ? bubble.textContent.trim() : '';
-    if (!text) return null;
-    return createTurn(turnId, section, discoveryIndex, role, text);
+    // Capture user-uploaded images that textContent would miss
+    const userImages = extractImages(section);
+    if (!text && !userImages.length) return null;
+    const parts = [];
+    if (text) parts.push(text);
+    if (userImages.length) parts.push(userImages.join('\n\n'));
+    return createTurn(turnId, section, discoveryIndex, role, parts.join('\n\n'));
   }
 
   if (role === 'assistant') {
@@ -293,8 +319,14 @@ function waitForScrollPosition(target, requestedTop, behavior, timeoutMs) {
         target.scrollTo({ top: reachableTop, behavior: behavior });
       }
       const currentTop = target.scrollTop;
-      stableFrames = !targetChanged && Math.abs(currentTop - previousTop) < 1
-        ? stableFrames + 1 : 0;
+      // Only reset stability when scrollTop is actively moving, not when
+      // scrollHeight merely grows (content still loading — images, lazy renders).
+      const topMoved = Math.abs(currentTop - previousTop) >= 1;
+      if (!topMoved) {
+        stableFrames += 1;
+      } else {
+        stableFrames = 0;
+      }
       if (Math.abs(currentTop - reachableTop) < 2 && stableFrames >= 2) return resolve();
       if (Date.now() - startedAt >= timeoutMs) {
         return reject(new Error('Conversation scroll did not settle before timeout.'));
@@ -310,7 +342,15 @@ async function scrollToConversationPosition(target, top, behavior) {
   const maxTop = Math.max(0, target.scrollHeight - target.clientHeight);
   const expectedTop = Math.max(0, Math.min(top, maxTop));
   target.scrollTo({ top: expectedTop, behavior: behavior });
-  await waitForScrollPosition(target, top, behavior, 3000);
+  try {
+    await waitForScrollPosition(target, top, behavior, 8000);
+  } catch (_e) {
+    // Smooth scroll didn't settle — force instant jump to target so we
+    // don't start scanning from mid-conversation. Then wait for the DOM.
+    const curMaxTop = Math.max(0, target.scrollHeight - target.clientHeight);
+    target.scrollTo({ top: Math.max(0, Math.min(top, curMaxTop)), behavior: 'auto' });
+    await new Promise(function(r) { return setTimeout(r, 1500); });
+  }
 }
 
 function waitForRenderQuiet(target) {
@@ -394,6 +434,8 @@ async function scanTurns(container, options) {
   const startedAt = settings.now();
 
   try {
+    // Smooth scroll to top triggers ChatGPT's virtualization to mount
+    // the earliest turns. Fallback delay catches any timeout.
     await settings.scrollTo(container, 0, 'smooth');
     await settings.settle(container);
     for (let step = 0; step < settings.maxSteps; step += 1) {
@@ -409,7 +451,7 @@ async function scanTurns(container, options) {
       lastHeight = container.scrollHeight;
       const target = observation.unresolved > 0
         ? container.scrollTop : nextScrollTop(container, atBottom);
-      await settings.scrollTo(container, target, 'smooth');
+      await settings.scrollTo(container, target, 'auto');
       await settings.settle(container);
     }
     throw new Error('Conversation scan exceeded its step limit before reaching a stable bottom.');
@@ -451,6 +493,53 @@ function extractConversationLegacy() {
   return parts.length ? parts.join('\n\n---\n\n') : null;
 }
 
+/** Read the conversation title from the page.
+ *  Primary source: the active sidebar entry for the current /c/{id} route
+ *  (its aria-label and inner text both carry the title). Falls back to the
+ *  document title with the site suffix stripped. */
+function extractConversationTitle(doc) {
+  const root = doc || (typeof document !== 'undefined' ? document : null);
+  if (!root) return null;
+
+  const idMatch = (typeof location !== 'undefined' ? location.pathname : '')
+    .match(/\/c\/([A-Za-z0-9-]+)/);
+
+  const candidates = [];
+  if (idMatch) candidates.push('a[href="/c/' + idMatch[1] + '"]');
+  candidates.push('a[data-active][href^="/c/"]');
+
+  for (const selector of candidates) {
+    const link = root.querySelector(selector);
+    if (!link) continue;
+    const label = (link.getAttribute('aria-label') || '').trim();
+    if (label) return label;
+    const inner = link.querySelector ? link.querySelector('.truncate') : null;
+    const text = inner ? (inner.textContent || '').trim() : '';
+    if (text) return text;
+  }
+
+  const title = (root.title || '').trim();
+  if (!title) return null;
+  const cleaned = title.replace(/\s*[|-]\s*ChatGPT\s*$/i, '').trim();
+  return cleaned && cleaned.toLowerCase() !== 'chatgpt' ? cleaned : null;
+}
+
+/** Turn a conversation title into a filesystem-safe slug.
+ *  Keeps Unicode letters (Cyrillic titles stay readable), collapses the rest
+ *  to single hyphens, and caps the length so the download path stays sane. */
+function slugifyTitle(title, maxLength) {
+  const limit = maxLength || 60;
+  if (!title) return null;
+  const slug = String(title)
+    .normalize('NFC')
+    .replace(/[\\/:*?"<>|]+/g, ' ')
+    .replace(/[\s_]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, limit)
+    .replace(/-+$/g, '');
+  return slug || null;
+}
+
 /** Called by popup via chrome.scripting.executeScript — returns text, does NOT write clipboard. */
 async function getConversationMarkdown() {
   try {
@@ -468,9 +557,13 @@ async function getConversationMarkdown() {
       md = buildConversationMarkdown(turns);
     }
     if (!md) return { ok: false, error: 'No conversation found on this page.' };
+    const title = extractConversationTitle();
+    if (title) md = '# ' + title + '\n\n' + md;
     return {
       ok: true,
       md: md,
+      title: title,
+      slug: slugifyTitle(title),
       lines: md.split('\n').length,
       words: md.split(/\s+/).filter(Boolean).length,
     };
@@ -479,10 +572,37 @@ async function getConversationMarkdown() {
   }
 }
 
+/** Fetch image data URLs from remote URLs using fetch().
+ *  Extension host_permissions for image CDNs bypass CORS.
+ *  Returns {url, dataUrl} for successfully fetched images; null on error. */
+async function fetchImageDataUrls(urls) {
+  const results = [];
+  for (const url of urls) {
+    try {
+      const response = await fetch(url);
+      if (!response.ok) { results.push(null); continue; }
+      const blob = await response.blob();
+      const dataUrl = await new Promise(function(resolve, reject) {
+        const reader = new FileReader();
+        reader.onload = function() { resolve(reader.result); };
+        reader.onerror = function() { reject(reader.error); };
+        reader.readAsDataURL(blob);
+      });
+      results.push({ url: url, dataUrl: dataUrl });
+    } catch (_e) {
+      results.push(null);
+    }
+  }
+  return results;
+}
+
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     buildConversationMarkdown: buildConversationMarkdown,
+    extractConversationTitle: extractConversationTitle,
     extractImages: extractImages,
+    fetchImageDataUrls: fetchImageDataUrls,
+    slugifyTitle: slugifyTitle,
     extractTurn: extractTurn,
     findScrollContainer: findScrollContainer,
     getConversationMarkdown: getConversationMarkdown,

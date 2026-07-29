@@ -66,11 +66,11 @@ Tick **Save .md + images to chatgpt-export/** before pressing the button. The ex
 ```
 Downloads/chatgpt-export/How-to-archive-a-conversation/
 ├── How-to-archive-a-conversation.md
-├── image_001.png
-└── image_002.jpg
+├── How-to-archive-a-conversation-image_001.png
+└── How-to-archive-a-conversation-image_002.jpg
 ```
 
-Image references in the saved Markdown point at the local files, so the document renders offline. Images the browser cannot fetch keep their original URLs, and the status message reports how many were saved. Without a conversation title — a brand-new, unnamed chat — files land directly in `chatgpt-export/` as `conversation.md`.
+Images carry the conversation name too, so they stay unique even if exports from different conversations end up in the same folder. Image references in the saved Markdown point at the local files, so the document renders offline. Images the browser cannot fetch keep their original URLs, and the status message reports how many were saved. Without a conversation title — a brand-new, unnamed chat — files land directly in `chatgpt-export/` as `conversation.md` and `image_001.png`.
 
 The clipboard always receives the same Markdown that was written to disk.
 

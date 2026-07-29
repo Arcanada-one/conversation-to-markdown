@@ -6,10 +6,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function createPopupHarness(runScan) {
+function createPopupHarness(runScan, options = {}) {
   let clickHandler;
   let clipboardValue = null;
   let scriptCalls = 0;
+  const downloads = [];
   const button = {
     disabled: false,
     textContent: 'Copy as Markdown',
@@ -18,17 +19,33 @@ function createPopupHarness(runScan) {
     },
   };
   const status = { className: '', textContent: '' };
+  // The image checkbox only exists when a test opts into the download path.
+  const checkbox = options.downloadImages ? { checked: true } : null;
   const context = {
-    document: { getElementById: (id) => id === 'btn-copy' ? button : status },
+    document: {
+      getElementById: (id) => {
+        if (id === 'btn-copy') return button;
+        if (id === 'chk-images') return checkbox;
+        return status;
+      },
+    },
     chrome: {
       tabs: { query: async () => [{ id: 7, url: 'https://chatgpt.com/' }] },
       scripting: {
-        executeScript: async (options) => {
+        executeScript: async (opts) => {
           scriptCalls += 1;
-          if (options.files) return [];
-          return runScan(options, button);
+          if (opts.files) return [];
+          if (opts.args) return [{ result: options.extracted || [] }];
+          return runScan(opts, button);
         },
       },
+      downloads: {
+        download: (opts, callback) => {
+          downloads.push(opts);
+          callback(downloads.length);
+        },
+      },
+      runtime: { lastError: null },
     },
     navigator: {
       clipboard: {
@@ -37,6 +54,10 @@ function createPopupHarness(runScan) {
         },
       },
     },
+    setTimeout,
+    clearTimeout,
+    URL,
+    encodeURIComponent,
   };
   const source = fs.readFileSync(path.join(__dirname, '..', 'popup.js'), 'utf8');
   vm.runInNewContext(source, context);
@@ -46,6 +67,7 @@ function createPopupHarness(runScan) {
     click: () => clickHandler(),
     clipboardValue: () => clipboardValue,
     scriptCalls: () => scriptCalls,
+    downloads: () => downloads,
   };
 }
 
@@ -87,6 +109,50 @@ test('shows an incomplete-scan error without touching the clipboard', async () =
   assert.equal(harness.status.className, 'error');
   assert.equal(harness.status.textContent, 'Conversation scan is incomplete.');
   assert.equal(harness.button.disabled, false);
+});
+
+test('prefixes downloaded image names with the conversation slug', async () => {
+  const md = '# Агент Аркана\n\n![first](https://files.oaiusercontent.com/a.png?v=1)\n'
+    + '![second](https://files.oaiusercontent.com/b.jpg?v=2)';
+  const harness = createPopupHarness(async () => [{
+    result: { ok: true, md, title: 'Агент Аркана', slug: 'Агент-Аркана', lines: 3, words: 5 },
+  }], {
+    downloadImages: true,
+    extracted: [
+      { url: 'https://files.oaiusercontent.com/a.png?v=1', dataUrl: 'data:image/png;base64,AAA' },
+      { url: 'https://files.oaiusercontent.com/b.jpg?v=2', dataUrl: 'data:image/jpeg;base64,BBB' },
+    ],
+  });
+
+  await harness.click();
+
+  const paths = harness.downloads().map((d) => d.filename);
+  assert.deepEqual(paths, [
+    'chatgpt-export/Агент-Аркана/Агент-Аркана-image_001.png',
+    'chatgpt-export/Агент-Аркана/Агент-Аркана-image_002.jpg',
+    'chatgpt-export/Агент-Аркана/Агент-Аркана.md',
+  ]);
+
+  // The saved Markdown must point at the same slug-prefixed local files.
+  assert.match(harness.clipboardValue(), /!\[first\]\(\.\/Агент-Аркана-image_001\.png\)/);
+  assert.match(harness.clipboardValue(), /!\[second\]\(\.\/Агент-Аркана-image_002\.jpg\)/);
+});
+
+test('falls back to unprefixed image names when the conversation has no title', async () => {
+  const md = '![only](https://files.oaiusercontent.com/c.png?v=3)';
+  const harness = createPopupHarness(async () => [{
+    result: { ok: true, md, title: null, slug: null, lines: 1, words: 1 },
+  }], {
+    downloadImages: true,
+    extracted: [{ url: 'https://files.oaiusercontent.com/c.png?v=3', dataUrl: 'data:image/png;base64,CCC' }],
+  });
+
+  await harness.click();
+
+  assert.deepEqual(harness.downloads().map((d) => d.filename), [
+    'chatgpt-export/image_001.png',
+    'chatgpt-export/conversation.md',
+  ]);
 });
 
 test('shows an execution failure and restores the button', async () => {

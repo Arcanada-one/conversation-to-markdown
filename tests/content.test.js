@@ -432,12 +432,12 @@ test('reads the conversation title from the active sidebar entry', () => {
   assert.equal(typeof parser.extractConversationTitle, 'function');
   const link = {
     getAttribute(name) {
-      return name === 'aria-label' ? 'Алгебра и агенты' : null;
+      return name === 'aria-label' ? 'Агент Аркана' : null;
     },
     querySelector: () => null,
   };
   const doc = {
-    title: 'Алгебра и агенты - ChatGPT',
+    title: 'Агент Аркана - ChatGPT',
     querySelector(selector) {
       return selector === 'a[href="/c/6a664d42"]' ? link : null;
     },
@@ -446,7 +446,7 @@ test('reads the conversation title from the active sidebar entry', () => {
   const previousLocation = global.location;
   global.location = { pathname: '/c/6a664d42' };
   try {
-    assert.equal(parser.extractConversationTitle(doc), 'Алгебра и агенты');
+    assert.equal(parser.extractConversationTitle(doc), 'Агент Аркана');
   } finally {
     global.location = previousLocation;
   }
@@ -480,7 +480,7 @@ test('returns no title when the page is not a saved conversation', () => {
 
 test('slugifies titles into filesystem-safe names', () => {
   assert.equal(typeof parser.slugifyTitle, 'function');
-  assert.equal(parser.slugifyTitle('Алгебра и агенты'), 'Алгебра-и-агенты');
+  assert.equal(parser.slugifyTitle('Агент Аркана'), 'Агент-Аркана');
   assert.equal(parser.slugifyTitle('Cubrim: лучший/архиватор?'), 'Cubrim-лучший-архиватор');
   assert.equal(parser.slugifyTitle('  spaced  out  '), 'spaced-out');
   assert.equal(parser.slugifyTitle(''), null);
@@ -738,7 +738,7 @@ test('prefixes the Markdown with the conversation title when the page has one', 
   turns[0].parentElement = container;
 
   const sidebarLink = {
-    getAttribute: (name) => name === 'aria-label' ? 'Алгебра и агенты' : null,
+    getAttribute: (name) => name === 'aria-label' ? 'Агент Аркана' : null,
     querySelector: () => null,
   };
 
@@ -746,7 +746,7 @@ test('prefixes the Markdown with the conversation title when the page has one', 
   const previousStyle = global.getComputedStyle;
   const previousLocation = global.location;
   global.document = {
-    title: 'Алгебра и агенты - ChatGPT',
+    title: 'Агент Аркана - ChatGPT',
     querySelector: (selector) => {
       if (selector === '[data-turn-id]') return turns[0];
       if (selector === 'a[href="/c/abc123"]') return sidebarLink;
@@ -759,9 +759,9 @@ test('prefixes the Markdown with the conversation title when the page has one', 
   try {
     const result = await parser.getConversationMarkdown();
     assert.equal(result.ok, true);
-    assert.equal(result.title, 'Алгебра и агенты');
-    assert.equal(result.slug, 'Алгебра-и-агенты');
-    assert.match(result.md, /^# Алгебра и агенты\n\n#### You said:/);
+    assert.equal(result.title, 'Агент Аркана');
+    assert.equal(result.slug, 'Агент-Аркана');
+    assert.match(result.md, /^# Агент Аркана\n\n#### You said:/);
   } finally {
     global.document = previousDocument;
     global.getComputedStyle = previousStyle;

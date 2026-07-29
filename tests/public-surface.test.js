@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 
 const root = path.resolve(__dirname, '..');
 
@@ -45,7 +46,7 @@ test('uses a neutral public identity throughout the extension', () => {
   const manifest = JSON.parse(read('manifest.json'));
   const popup = read('popup.html');
   assert.equal(manifest.name, 'Conversation to Markdown');
-  assert.equal(manifest.version, '1.1.6');
+  assert.equal(manifest.version, '1.1.7');
   assert.match(popup, /Conversation to Markdown/);
   assert.doesNotMatch(popup, /ChatGPT\s*→\s*Markdown/);
   assert.deepEqual([...manifest.permissions].sort(), ['activeTab', 'clipboardWrite', 'downloads', 'scripting']);
@@ -81,6 +82,61 @@ test('allowlisted text files contain no private or internal material', () => {
       assert.doesNotMatch(body, pattern, `${file} matches ${pattern}`);
     }
   }
+});
+
+// Credential shapes that must never reach a public repository. Kept separate
+// from the internal-material list above because these are scanned across EVERY
+// tracked file, not just the allowlist — a leaked key in an unlisted file is
+// still published.
+const CREDENTIAL_PATTERNS = [
+  [/-----BEGIN (?:RSA |EC |OPENSSH |PGP |DSA )?PRIVATE KEY-----/, 'private key block'],
+  [/\bAKIA[0-9A-Z]{16}\b/, 'AWS access key id'],
+  [/\bgh[pousr]_[A-Za-z0-9]{36,}\b/, 'GitHub token'],
+  [/\bgithub_pat_[A-Za-z0-9_]{22,}\b/, 'GitHub fine-grained PAT'],
+  [/\bsk-[A-Za-z0-9]{20,}\b/, 'OpenAI-style secret key'],
+  [/\bsk-ant-[A-Za-z0-9-]{20,}\b/, 'Anthropic API key'],
+  [/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/, 'Slack token'],
+  [/\bAIza[0-9A-Za-z_-]{35}\b/, 'Google API key'],
+  [/\bhv[sb]\.[A-Za-z0-9_-]{20,}\b/, 'Vault token'],
+  [/\bcfut_[A-Za-z0-9_-]{20,}\b/, 'Cloudflare token'],
+  [/\bglpat-[A-Za-z0-9_-]{20,}\b/, 'GitLab PAT'],
+  [/\b\d{6,}:AA[A-Za-z0-9_-]{30,}\b/, 'Telegram bot token'],
+  [/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/, 'JWT'],
+  [/(?:api[_-]?key|secret|passwd|password|access[_-]?token)\s*[:=]\s*['"][^'"\s]{12,}['"]/i, 'assigned secret literal'],
+];
+
+function trackedFiles() {
+  return execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' })
+    .split('\0')
+    .filter(Boolean);
+}
+
+test('no tracked file carries a credential', () => {
+  const binary = /\.(?:jpe?g|png|gif|webp|ico|woff2?|zip|pdf)$/i;
+  const findings = [];
+
+  for (const file of trackedFiles()) {
+    if (binary.test(file)) continue;
+    const body = fs.readFileSync(path.join(root, file), 'utf8');
+    for (const [pattern, label] of CREDENTIAL_PATTERNS) {
+      const hit = body.match(pattern);
+      // Report the file, the rule and the match length — never the value itself.
+      if (hit) findings.push(`${file}: ${label} (${hit[0].length} chars)`);
+    }
+  }
+
+  assert.deepEqual(findings, [], `credential material in tracked files:\n${findings.join('\n')}`);
+});
+
+test('every tracked file is declared in the allowlist', () => {
+  const declared = new Set(read('public-files.allowlist').trim().split('\n'));
+  const undeclared = trackedFiles().filter((file) => !declared.has(file));
+
+  assert.deepEqual(
+    undeclared,
+    [],
+    `tracked but not allowlisted — review before publishing:\n${undeclared.join('\n')}`,
+  );
 });
 
 test('shipped JavaScript has no network, storage, or analytics calls', () => {

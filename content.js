@@ -1,5 +1,5 @@
 /**
- * ChatGPT → Markdown v1.1.6
+ * ChatGPT → Markdown v1.1.7
  * Content script: parses the live ChatGPT conversation and returns clean Markdown.
  *
  * Iterates [data-turn-id] sections (not just [data-message-author-role]) so that

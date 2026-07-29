@@ -31,8 +31,11 @@ function exportPath(slug, filename) {
     : 'chatgpt-export/' + filename;
 }
 
-/** Derive a filename from an image URL or alt text. */
-function imageFilename(url, alt, index) {
+/** Derive a filename from an image URL or alt text.
+ *  Prefixing with the conversation slug keeps names unique across exports:
+ *  two conversations both starting at image_001 would otherwise collide in the
+ *  flat legacy folder, and Chrome would suffix them "image_001 (1).png". */
+function imageFilename(url, alt, index, slug) {
   // Try to infer extension from the alt text first (e.g. "photo.jpg")
   var ext = 'png';
   var altMatch = alt && alt.match(/\.(png|jpe?g|gif|webp|svg|bmp)(\?|$)/i);
@@ -44,7 +47,8 @@ function imageFilename(url, alt, index) {
       if (pathMatch) ext = pathMatch[1].toLowerCase().replace('jpeg', 'jpg');
     } catch (_e) {}
   }
-  return 'image_' + String(index + 1).padStart(3, '0') + '.' + ext;
+  var prefix = slug ? slug + '-' : '';
+  return prefix + 'image_' + String(index + 1).padStart(3, '0') + '.' + ext;
 }
 
 /** Download one file via chrome.downloads. Returns {url, filename, ok, error}. */
@@ -144,7 +148,7 @@ btn.addEventListener('click', async () => {
       for (var i = 0; i < extracted.length; i++) {
         var ex = extracted[i];
         if (ex && ex.dataUrl) {
-          var fname = imageFilename(ex.url, refs[i] ? refs[i].alt : '', i);
+          var fname = imageFilename(ex.url, refs[i] ? refs[i].alt : '', i, slug);
           var r = await downloadOne(ex.dataUrl, fname, exportPath(slug, fname));
           if (r.ok) {
             dlOk++;

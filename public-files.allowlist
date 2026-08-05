@@ -2,6 +2,7 @@
 .github/dependabot.yml
 .github/workflows/ci.yml
 .gitignore
+CHANGELOG.md
 CODE_OF_CONDUCT.md
 CONTRIBUTING.md
 LICENSE

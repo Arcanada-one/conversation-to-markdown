@@ -61,6 +61,17 @@ test('README states independence and non-affiliation', () => {
   assert.doesNotMatch(readme, /^## (?:User|Assistant)$/m);
 });
 
+test('the changelog documents the version being shipped', () => {
+  // Releases 1.1.6 and 1.1.7 reached the store leaving no tag, no release and
+  // no changelog entry behind — the only record of what changed was a commit
+  // message. Coupling the changelog to the manifest means a version bump that
+  // forgets to say what changed fails the build instead of shipping silently.
+  const manifest = JSON.parse(read('manifest.json'));
+  const changelog = read('CHANGELOG.md');
+  const heading = new RegExp(`^## \\[${manifest.version.replace(/\./g, '\\.')}\\] — \\d{4}-\\d{2}-\\d{2}$`, 'm');
+  assert.match(changelog, heading, `CHANGELOG.md must carry a dated entry for ${manifest.version}`);
+});
+
 test('allowlisted text files contain no private or internal material', () => {
   const files = read('public-files.allowlist').trim().split('\n');
   const textFiles = files.filter(

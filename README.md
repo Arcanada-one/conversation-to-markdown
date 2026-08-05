@@ -111,6 +111,10 @@ npm run check
 
 Before proposing a change, read [CONTRIBUTING.md](CONTRIBUTING.md). Security reports belong in the private channel described in [SECURITY.md](SECURITY.md).
 
+## Changelog
+
+Release history is in [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
 Released under the [MIT License](LICENSE).

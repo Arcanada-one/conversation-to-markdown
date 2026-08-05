@@ -68,8 +68,15 @@ test('the changelog documents the version being shipped', () => {
   // forgets to say what changed fails the build instead of shipping silently.
   const manifest = JSON.parse(read('manifest.json'));
   const changelog = read('CHANGELOG.md');
-  const heading = new RegExp(`^## \\[${manifest.version.replace(/\./g, '\\.')}\\] — \\d{4}-\\d{2}-\\d{2}$`, 'm');
-  assert.match(changelog, heading, `CHANGELOG.md must carry a dated entry for ${manifest.version}`);
+  // Match the heading as a plain string rather than building a regex out of
+  // the version: hand-escaping an interpolated value is a habit worth not
+  // having, and there is nothing here a regex does better.
+  const dated = /^## \[(\d+\.\d+\.\d+)\] — \d{4}-\d{2}-\d{2}$/gm;
+  const documented = [...changelog.matchAll(dated)].map((m) => m[1]);
+  assert.ok(
+    documented.includes(manifest.version),
+    `CHANGELOG.md must carry a dated entry for ${manifest.version}; found ${documented.join(', ') || 'none'}`,
+  );
 });
 
 test('allowlisted text files contain no private or internal material', () => {

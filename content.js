@@ -268,6 +268,24 @@ function extractTurn(section, discoveryIndex) {
       const markdown = nodeToMarkdown(markdownRoot).trim().replace(/\n{3,}/g, '\n\n');
       if (markdown) fragments.push(markdown);
     }
+    // Some assistant turns carry no [data-message-author-role] wrapper at all —
+    // measured on a 570-turn conversation, 12 of 285 answers were shaped this
+    // way and were silently dropped, up to 3106 characters each. The prose is
+    // present; only the attribute is missing, so address the .markdown/.prose
+    // container directly.
+    //
+    // Deliberately NOT a fallback to the whole section: doing that harvests the
+    // "Thinking…" chrome of a re-mounting turn and appends it as a duplicate
+    // answer. Only a real prose container counts.
+    if (!fragments.length) {
+      const orphanRoots = section.querySelectorAll('.markdown, [class*="prose"]');
+      for (const root of orphanRoots) {
+        // Skip nested matches: .markdown inside an already-scanned .prose.
+        if (root.parentElement && root.parentElement.closest('.markdown, [class*="prose"]')) continue;
+        const markdown = nodeToMarkdown(root).trim().replace(/\n{3,}/g, '\n\n');
+        if (markdown) fragments.push(markdown);
+      }
+    }
     if (fragments.length) pieces.push(fragments.join('\n\n'));
     if (!pieces.length) return null;
     return createTurn(turnId, section, discoveryIndex, role, pieces.join('\n\n'));
@@ -385,9 +403,48 @@ function createScanSettings(options) {
     scrollTo: supplied.scrollTo || scrollToConversationPosition,
     now: supplied.now || function() { return Date.now(); },
     stablePasses: supplied.stablePasses || 3,
-    maxSteps: supplied.maxSteps || 1000,
-    timeoutMs: supplied.timeoutMs || 120000,
+    // How many times a turn may mount empty before it stops blocking the scan.
+    emptyTurnRetries: supplied.emptyTurnRetries || 3,
+    // The ONLY limit on a scan: consecutive steps that neither surface a new
+    // turn nor move down the document. See scanTurns.
+    noProgressSteps: supplied.noProgressSteps || 60,
+    // How long the scan holds position waiting for outstanding turns to paint
+    // before writing them off and moving on. Must be well below
+    // noProgressSteps, or the hold itself trips the stall guard.
+    holdReleaseSteps: supplied.holdReleaseSteps || 20,
+    // Optional operator cancellation. Returning true aborts at the next step
+    // boundary; the scan is never cut off by anything else.
+    isCancelled: supplied.isCancelled || function() { return false; },
+    // Optional progress reporting, so a long scan is visibly alive.
+    onProgress: supplied.onProgress || null,
+    // Test-only escape hatch. Production never sets this: a step ceiling is a
+    // length limit on the conversation, not a safety property.
+    maxSteps: supplied.maxSteps || 0,
   };
+}
+
+// Chrome a re-mounted turn shows while its real content is still coming back.
+// These are not answers, however long they run.
+const PLACEHOLDER_MARKDOWN = /^(thinking|reasoning|searching|analyzing|analysing|gathering|expanding|loading|generating|working)\b|^(думаю|размышляю|ищу|загружаю|генерирую)\b/i;
+
+function looksLikePlaceholder(markdown) {
+  return PLACEHOLDER_MARKDOWN.test(markdown.trim());
+}
+
+/**
+ * Decide whether a re-mounted capture should replace the one already held.
+ *
+ * Length alone is not a correctness rule: a turn re-mounting with placeholder
+ * chrome ("Thinking… gathering sources…") can be LONGER than the real prose, and
+ * taking the longer string silently corrupts the export. Prefer real content
+ * over a placeholder; only then fall back to preferring the longer text, which
+ * still rescues a capture truncated mid-stream.
+ */
+function shouldReplaceCapture(previousMarkdown, candidateMarkdown) {
+  const previousIsPlaceholder = looksLikePlaceholder(previousMarkdown);
+  const candidateIsPlaceholder = looksLikePlaceholder(candidateMarkdown);
+  if (previousIsPlaceholder !== candidateIsPlaceholder) return previousIsPlaceholder;
+  return candidateMarkdown.length > previousMarkdown.length;
 }
 
 function captureMountedTurns(sections, settings, seen, state) {
@@ -400,22 +457,42 @@ function captureMountedTurns(sections, settings, seen, state) {
       newIds += 1;
     }
     const candidate = settings.extractTurn(section, state.discoveryIndex);
-    if (!candidate) continue;
+    if (!candidate) {
+      // A turn can mount before its content paints — ChatGPT's virtualizer
+      // recycles bubbles and briefly renders them empty. Give it a bounded
+      // number of chances, then stop letting it block the scan: one such turn
+      // used to pin `unresolved` above zero forever, which froze the scroll
+      // target at the current position and burned the whole budget in place.
+      if (rawTurnId) {
+        const attempts = (state.emptyAttempts.get(rawTurnId) ?? 0) + 1;
+        state.emptyAttempts.set(rawTurnId, attempts);
+        if (attempts >= settings.emptyTurnRetries) state.skipped.add(rawTurnId);
+      }
+      continue;
+    }
+    if (rawTurnId) {
+      // It resolved after all — drop any strike against it.
+      state.emptyAttempts.delete(rawTurnId);
+      state.skipped.delete(rawTurnId);
+    }
     const previous = seen.get(candidate.turnId);
     if (!previous) {
       candidate.discoveryIndex = state.discoveryIndex;
       state.discoveryIndex += 1;
     }
-    if (!previous || candidate.markdown.length > previous.markdown.length) {
+    if (!previous || shouldReplaceCapture(previous.markdown, candidate.markdown)) {
       seen.set(candidate.turnId, previous
         ? Object.assign({}, candidate, { discoveryIndex: previous.discoveryIndex })
         : candidate);
     }
   }
-  return {
-    newIds: newIds,
-    unresolved: state.observedIds.size - seen.size,
-  };
+  // Set difference, not a size subtraction: sizes can coincide while a real id
+  // is missing, which would report "nothing outstanding" over a genuine gap.
+  let unresolved = 0;
+  for (const id of state.observedIds) {
+    if (!seen.has(id) && !state.skipped.has(id)) unresolved += 1;
+  }
+  return { newIds: newIds, unresolved: unresolved };
 }
 
 function nextScrollTop(container, atBottom) {
@@ -428,22 +505,75 @@ async function scanTurns(container, options) {
   const settings = createScanSettings(options);
   const originalScrollTop = container.scrollTop;
   const seen = new Map();
-  const state = { discoveryIndex: 0, observedIds: new Set() };
+  const state = {
+    discoveryIndex: 0,
+    observedIds: new Set(),
+    // Turns that mounted but never yielded content, and how many tries each got.
+    emptyAttempts: new Map(),
+    skipped: new Set(),
+  };
   let stablePasses = 0;
   let lastHeight = -1;
   const startedAt = settings.now();
+  // Progress is measured in work done, not time elapsed. A scan that keeps
+  // surfacing turns or keeps moving down the document is healthy however long
+  // it runs — a 100-hour conversation is a long job, not a failure. The only
+  // way a scan ends unsuccessfully is by genuinely stalling, or by the operator
+  // cancelling it. There is deliberately no deadline and no step ceiling: both
+  // are limits on conversation LENGTH wearing the costume of a safety check,
+  // and raising the constant only moves the wall further out.
+  let stepsSinceProgress = 0;
+  let lastProgressTop = -1;
 
   try {
     // Smooth scroll to top triggers ChatGPT's virtualization to mount
     // the earliest turns. Fallback delay catches any timeout.
     await settings.scrollTo(container, 0, 'smooth');
     await settings.settle(container);
-    for (let step = 0; step < settings.maxSteps; step += 1) {
-      if (settings.now() - startedAt > settings.timeoutMs) {
-        throw new Error('Conversation scan timed out before reaching a stable bottom.');
+    for (let step = 0; settings.maxSteps === 0 || step < settings.maxSteps; step += 1) {
+      if (settings.isCancelled()) {
+        throw new Error('Conversation scan cancelled.');
       }
       const observation = captureMountedTurns(settings.readSections(container), settings, seen, state);
       const atBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 1;
+
+      const movedDown = Math.abs(container.scrollTop - lastProgressTop) >= 1;
+      if (observation.newIds > 0 || movedDown) {
+        stepsSinceProgress = 0;
+        lastProgressTop = container.scrollTop;
+      } else {
+        stepsSinceProgress += 1;
+        // Waiting for a turn to paint is work, so it must not be mistaken for a
+        // stall — but it must not be unbounded either. A single turn that never
+        // resolves froze the scroll target ("hold position until unresolved
+        // clears"), which stopped the page moving, which then read as a stall
+        // and cost the remaining turns: 1 bad turn lost 70 good ones. Give up
+        // on the stragglers instead of giving up on the conversation.
+        if (stepsSinceProgress >= settings.holdReleaseSteps && observation.unresolved > 0) {
+          for (const id of state.observedIds) {
+            if (!seen.has(id)) state.skipped.add(id);
+          }
+          observation.unresolved = 0;
+          stepsSinceProgress = 0;
+        }
+        if (stepsSinceProgress >= settings.noProgressSteps && !atBottom) {
+          throw new Error('Conversation scan stopped making progress before reaching the end.');
+        }
+      }
+
+      if (settings.onProgress) {
+        // Report captured/observed rather than a percentage of a budget: there
+        // is no budget to be a percentage of, and the honest signal is that the
+        // count keeps climbing.
+        settings.onProgress({
+          captured: seen.size,
+          observed: state.observedIds.size,
+          elapsedMs: settings.now() - startedAt,
+          scrollTop: container.scrollTop,
+          scrollHeight: container.scrollHeight,
+        });
+      }
+
       stablePasses = atBottom && observation.newIds === 0 && observation.unresolved === 0 &&
         lastHeight === container.scrollHeight
         ? stablePasses + 1 : 0;
@@ -454,6 +584,8 @@ async function scanTurns(container, options) {
       await settings.scrollTo(container, target, 'auto');
       await settings.settle(container);
     }
+    // Only reachable when a test supplies maxSteps; production leaves it 0 and
+    // the loop above is bounded solely by stability, stall, or cancellation.
     throw new Error('Conversation scan exceeded its step limit before reaching a stable bottom.');
   } finally {
     await settings.scrollTo(container, originalScrollTop, 'auto');
@@ -550,9 +682,21 @@ async function getConversationMarkdown() {
     } else {
       const container = findScrollContainer(firstSection);
       if (!container) return { ok: false, error: 'Could not find the conversation scroll area.' };
+      // The popup cannot hold a live channel into the page across
+      // executeScript calls, so cancellation and progress ride on a window
+      // flag it can set and read with a separate one-liner injection. Guarded
+      // because this function is also exercised outside a browser window.
+      const scanState = { cancelled: false, captured: 0, observed: 0, elapsedMs: 0 };
+      if (typeof window !== 'undefined') window.__c2mScan = scanState;
       const turns = await scanTurns(container, {
         readSections: function() { return document.querySelectorAll('[data-turn-id]'); },
         extractTurn: extractTurn,
+        isCancelled: function() { return scanState.cancelled === true; },
+        onProgress: function(p) {
+          scanState.captured = p.captured;
+          scanState.observed = p.observed;
+          scanState.elapsedMs = p.elapsedMs;
+        },
       });
       md = buildConversationMarkdown(turns);
     }

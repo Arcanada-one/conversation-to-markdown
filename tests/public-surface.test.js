@@ -46,7 +46,7 @@ test('uses a neutral public identity throughout the extension', () => {
   const manifest = JSON.parse(read('manifest.json'));
   const popup = read('popup.html');
   assert.equal(manifest.name, 'Conversation to Markdown');
-  assert.equal(manifest.version, '1.1.7');
+  assert.equal(manifest.version, '1.1.8');
   assert.match(popup, /Conversation to Markdown/);
   assert.doesNotMatch(popup, /ChatGPT\s*→\s*Markdown/);
   assert.deepEqual([...manifest.permissions].sort(), ['activeTab', 'clipboardWrite', 'downloads', 'scripting']);
@@ -59,6 +59,24 @@ test('README states independence and non-affiliation', () => {
   assert.match(readme, /#### You said:/);
   assert.match(readme, /#### ChatGPT said:/);
   assert.doesNotMatch(readme, /^## (?:User|Assistant)$/m);
+});
+
+test('the changelog documents the version being shipped', () => {
+  // Releases 1.1.6 and 1.1.7 reached the store leaving no tag, no release and
+  // no changelog entry behind — the only record of what changed was a commit
+  // message. Coupling the changelog to the manifest means a version bump that
+  // forgets to say what changed fails the build instead of shipping silently.
+  const manifest = JSON.parse(read('manifest.json'));
+  const changelog = read('CHANGELOG.md');
+  // Match the heading as a plain string rather than building a regex out of
+  // the version: hand-escaping an interpolated value is a habit worth not
+  // having, and there is nothing here a regex does better.
+  const dated = /^## \[(\d+\.\d+\.\d+)\] — \d{4}-\d{2}-\d{2}$/gm;
+  const documented = [...changelog.matchAll(dated)].map((m) => m[1]);
+  assert.ok(
+    documented.includes(manifest.version),
+    `CHANGELOG.md must carry a dated entry for ${manifest.version}; found ${documented.join(', ') || 'none'}`,
+  );
 });
 
 test('allowlisted text files contain no private or internal material', () => {

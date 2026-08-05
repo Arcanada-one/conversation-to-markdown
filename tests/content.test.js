@@ -189,20 +189,79 @@ test('restores the original scroll position after extraction throws', async () =
   assert.equal(container.scrollCalls.at(-1).behavior, 'auto');
 });
 
-test('fails without returning partial turns when the scan times out', async () => {
-  const container = createVirtualizedFixture([[{ turnId: 'u1', markdown: 'partial' }]], 12);
+test('elapsed time alone never ends a healthy scan', async () => {
+  // The defect this replaces: a flat deadline aborted a scan that was working
+  // perfectly, purely because the conversation was long. Duration is a
+  // measurement, not a failure condition — only a stall or a cancellation may
+  // end a scan early. The clock here jumps an hour per step, far past any
+  // deadline the old code would have imposed.
+  const pages = [];
+  for (let i = 1; i <= 40; i += 1) {
+    pages.push([{ turnId: 't' + i, order: i, role: 'user', markdown: 'turn ' + i }]);
+  }
+  const container = createVirtualizedFixture(pages, 0);
   let clock = 0;
+
+  let longestElapsed = 0;
+  const turns = await parser.scanTurns(container, {
+    readSections: (target) => target.querySelectorAll('[data-turn-id]'),
+    extractTurn: (turn) => turn,
+    settle: async () => {},
+    now: () => { clock += 3600000; return clock; },
+    onProgress: (p) => { longestElapsed = Math.max(longestElapsed, p.elapsedMs); },
+    stablePasses: 2,
+  });
+
+  assert.equal(turns.length, 40, 'every turn survives a scan that runs for hours');
+  // Positive control: prove the fixture actually reached a duration that every
+  // previous build would have aborted on. The old wall was 120000ms.
+  assert.ok(
+    longestElapsed > 120000,
+    `scan must exceed the retired 120s deadline to prove the point (was ${longestElapsed}ms)`
+  );
+});
+
+test('a stalled scan still fails, and does not return partial turns', async () => {
+  // The counterpart to the test above: removing the deadline must not remove
+  // the ability to detect a genuinely stuck scan. Here nothing ever moves and
+  // no new turn appears, so the no-progress guard must fire.
+  const container = createVirtualizedFixture([[{ turnId: 'u1', markdown: 'partial' }]], 12);
+  let steps = 0;
 
   await assert.rejects(
     parser.scanTurns(container, {
+      readSections: () => [],
       extractTurn: (turn) => turn,
       settle: async () => {},
-      now: () => { clock += 100; return clock; },
-      timeoutMs: 50,
+      scrollTo: async () => { steps += 1; },
+      noProgressSteps: 5,
     }),
-    /timed out/
+    /stopped making progress/
   );
+  assert.ok(steps < 30, 'the stall is caught quickly, not after a long budget');
   assert.equal(container.scrollTop, 12);
+});
+
+test('the operator can cancel a scan at any point', async () => {
+  // Cancellation is the deliberate replacement for the deadline: the operator
+  // decides when a long job is too long, the code does not decide for them.
+  const pages = [];
+  for (let i = 1; i <= 40; i += 1) {
+    pages.push([{ turnId: 't' + i, order: i, role: 'user', markdown: 'turn ' + i }]);
+  }
+  const container = createVirtualizedFixture(pages, 5);
+  let steps = 0;
+
+  await assert.rejects(
+    parser.scanTurns(container, {
+      readSections: (target) => target.querySelectorAll('[data-turn-id]'),
+      extractTurn: (turn) => turn,
+      settle: async () => {},
+      isCancelled: () => { steps += 1; return steps > 3; },
+    }),
+    /cancelled/
+  );
+  assert.equal(container.scrollTop, 5, 'a cancelled scan still restores the page');
 });
 
 test('follows a reachable scroll target when virtualized bounds shrink', async () => {
@@ -370,20 +429,47 @@ test('waits for an observed turn shell to receive content', async () => {
   assert.equal(container.scrollTop, 25);
 });
 
-test('fails explicitly when an observed turn never receives content', async () => {
+test('a turn that never receives content stops blocking the scan', async () => {
+  // ChatGPT's virtualizer recycles bubbles and can render one empty. Such a turn
+  // used to pin `unresolved` above zero forever, which froze the scroll target
+  // and burned the entire budget standing still — the whole export was lost over
+  // one unpainted bubble. It must be retried a bounded number of times and then
+  // set aside, not allowed to hold the scan hostage.
   const shell = { turnId: 'empty-turn', order: 1, role: 'assistant', markdown: '' };
   const container = createVirtualizedFixture([[shell]], 18);
 
-  await assert.rejects(
-    parser.scanTurns(container, {
-      extractTurn: () => null,
-      settle: async () => {},
-      stablePasses: 2,
-      maxSteps: 4,
-    }),
-    /step limit/
-  );
-  assert.equal(container.scrollTop, 18);
+  const turns = await parser.scanTurns(container, {
+    extractTurn: () => null,
+    settle: async () => {},
+    stablePasses: 2,
+    maxSteps: 40,
+    emptyTurnRetries: 3,
+  });
+
+  assert.deepEqual(turns, []);
+  assert.equal(container.scrollTop, 18, 'original scroll position is restored');
+});
+
+test('one unpaintable turn does not cost the rest of the conversation', async () => {
+  // The failure the operator hit: a long conversation where a single turn mounts
+  // empty. Everything else must still be exported.
+  const screens = [];
+  for (let i = 0; i < 12; i += 1) {
+    screens.push([{ turnId: `t${i}`, order: i, role: 'assistant', markdown: i === 5 ? '' : `answer ${i}` }]);
+  }
+  const container = createVirtualizedFixture(screens, 0);
+
+  const turns = await parser.scanTurns(container, {
+    extractTurn: (turn) => (turn.markdown ? turn : null),
+    settle: async () => {},
+    stablePasses: 2,
+    maxSteps: 200,
+    emptyTurnRetries: 3,
+  });
+
+  assert.equal(turns.length, 11, 'eleven of twelve turns survive the one bad turn');
+  assert.equal(turns.some((t) => t.turnId === 't5'), false, 'the empty turn is the only casualty');
+  assert.equal(turns.some((t) => t.turnId === 't11'), true, 'the scan reached the end');
 });
 
 test('ignores explicitly unsupported roles without treating them as pending', async () => {
@@ -766,5 +852,185 @@ test('prefixes the Markdown with the conversation title when the page has one', 
     global.document = previousDocument;
     global.getComputedStyle = previousStyle;
     global.location = previousLocation;
+  }
+});
+
+// --- Guards that a green suite used to leave undefended -----------------
+// Each of the three tests below was written against a mutation that survived
+// the whole suite: flipping the guard it covers left every test passing.
+
+/**
+ * A fixture that behaves like a real virtualizer: only the turns near the
+ * current offset are mounted, everything else is unmounted, and scrollHeight
+ * grows as later pages are reached (lazy content still loading).
+ */
+function createUnmountingFixture(pages, options = {}) {
+  const grow = options.growUntil ?? 0;
+  let reached = 0;
+  const container = {
+    scrollTop: 0,
+    clientHeight: 100,
+    get scrollHeight() {
+      // Height keeps growing while early pages are visited, the way lazily
+      // rendered content extends a conversation as you scroll into it.
+      return Math.max(2, pages.length + Math.max(0, grow - reached)) * 100;
+    },
+    scrollTo(options) {
+      this.scrollTop = Math.max(0, Math.min(options.top, this.scrollHeight - this.clientHeight));
+      reached = Math.max(reached, Math.floor(this.scrollTop / this.clientHeight));
+    },
+    querySelectorAll() {
+      const page = Math.min(Math.floor(this.scrollTop / this.clientHeight), pages.length - 1);
+      // Only the current page is mounted — neighbours are unmounted.
+      return pages[Math.max(0, page)];
+    },
+  };
+  return container;
+}
+
+test('a turn discovered on the last pass is not lost to an early exit', async () => {
+  // Covers the `newIds === 0` guard: without it the scan may declare itself
+  // finished on the pass that first sees a new turn, dropping it.
+  const pages = [];
+  for (let i = 0; i < 6; i += 1) {
+    pages.push([{ turnId: `n${i}`, order: i, role: 'assistant', markdown: `answer ${i}` }]);
+  }
+  const container = createUnmountingFixture(pages);
+
+  const turns = await parser.scanTurns(container, {
+    extractTurn: (turn) => (turn.markdown ? turn : null),
+    settle: async () => {},
+    stablePasses: 2,
+    maxSteps: 200,
+  });
+
+  assert.equal(turns.length, 6, 'every turn is captured, including the last one found');
+  assert.equal(turns[turns.length - 1].turnId, 'n5');
+});
+
+test('a conversation still growing is not declared complete', async () => {
+  // Covers the `lastHeight === scrollHeight` guard: a container whose height is
+  // still changing has not settled, so the bottom is not the bottom yet.
+  const pages = [];
+  for (let i = 0; i < 5; i += 1) {
+    pages.push([{ turnId: `g${i}`, order: i, role: 'assistant', markdown: `answer ${i}` }]);
+  }
+  const container = createUnmountingFixture(pages, { growUntil: 4 });
+
+  const turns = await parser.scanTurns(container, {
+    extractTurn: (turn) => (turn.markdown ? turn : null),
+    settle: async () => {},
+    stablePasses: 2,
+    maxSteps: 200,
+  });
+
+  assert.equal(turns.length, 5, 'the scan waited for the height to settle');
+});
+
+test('a degraded re-mount never overwrites a good capture', async () => {
+  // Covers the longer-markdown heuristic. A turn re-mounting with placeholder
+  // chrome ("Thinking…", citation furniture) can be LONGER than the real prose;
+  // length alone is not a correctness rule, so a shorter good capture must win
+  // over a longer degraded one once we have real content.
+  const good = 'The answer.';
+  const degraded = 'Thinking… gathering sources… expanding citations…';
+  let call = 0;
+  const container = {
+    scrollTop: 0,
+    clientHeight: 100,
+    scrollHeight: 200,
+    scrollTo(options) { this.scrollTop = Math.max(0, Math.min(options.top, 100)); },
+    querySelectorAll() {
+      call += 1;
+      // First mount yields the real answer, later mounts yield longer chrome.
+      const markdown = call === 1 ? good : degraded;
+      return [{ turnId: 'd1', order: 1, role: 'assistant', markdown }];
+    },
+  };
+
+  const turns = await parser.scanTurns(container, {
+    extractTurn: (turn) => (turn.markdown ? turn : null),
+    settle: async () => {},
+    stablePasses: 2,
+    maxSteps: 30,
+  });
+
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].markdown, good, 'the real answer survives a longer degraded re-mount');
+});
+
+test('one never-resolving turn does not cost the rest of a long conversation', async () => {
+  // The operator's real failure, measured on the live page: turn d271b4db
+  // never yielded content while 31556px of conversation remained. The scan
+  // holds its scroll position whenever anything is unresolved, so the page
+  // stopped moving; the stall guard then saw no movement and no new turns and
+  // killed a scan that had already captured 500 of 570 turns.
+  //
+  // Both live properties must hold or the test proves nothing: the straggler
+  // stays mounted once reached (so it keeps pinning `unresolved` above zero),
+  // and it never resolves however many times it is retried. Verified by
+  // mutation: deleting the hold-release in content.js makes this test fail with
+  // the operator's exact message.
+  const total = 24;
+  const container = {
+    scrollTop: 0,
+    clientHeight: 100,
+    scrollHeight: total * 100,
+    scrollCalls: [],
+    scrollTo(options) {
+      this.scrollCalls.push(options);
+      this.scrollTop = options.top;
+    },
+    querySelectorAll() {
+      const index = Math.min(Math.floor(this.scrollTop / this.clientHeight), total - 1);
+      const turns = [{ turnId: 't' + index, order: index, role: 'assistant', markdown: 'answer ' + index }];
+      if (index >= 9) turns.unshift({ turnId: 'straggler', order: 9, role: 'assistant', markdown: '' });
+      return turns;
+    },
+  };
+
+  const turns = await parser.scanTurns(container, {
+    extractTurn: (turn) => (turn.turnId === 'straggler' ? null : turn),
+    settle: async () => {},
+    stablePasses: 2,
+    holdReleaseSteps: 5,
+    noProgressSteps: 30,
+    // Retries can never retire it, so only the hold-release can save the scan.
+    emptyTurnRetries: 1000,
+  });
+
+  assert.equal(turns.some((t) => t.turnId === 't23'), true, 'the scan must reach the final turn');
+  assert.equal(turns.some((t) => t.turnId === 'straggler'), false, 'the bad turn is the only casualty');
+  assert.ok(turns.length >= 20, `the conversation survives one bad turn (got ${turns.length})`);
+});
+
+test('an assistant turn without the author-role wrapper is still captured', async () => {
+  // Measured on the operator's 570-turn conversation: 12 of 285 assistant turns
+  // carried no [data-message-author-role] wrapper. extractTurn looked only
+  // inside that wrapper, so the loop never ran and answers up to 3106
+  // characters were dropped in silence — the export showed two consecutive
+  // "You said:" blocks where an answer belonged.
+  const prose = element('div', [textNode('Да, да, дай секунду. Я бы не меняла структуру.')], { class: 'markdown' });
+  const section = {
+    getAttribute(name) {
+      return { 'data-turn-id': 'a-orphan', 'data-turn': 'assistant', 'data-testid': 'conversation-turn-468' }[name] ?? null;
+    },
+    querySelector: () => null,
+    querySelectorAll(selector) {
+      if (selector === '[data-message-author-role="assistant"]') return [];
+      if (selector.includes('markdown')) return [prose];
+      return [];
+    },
+  };
+
+  const previousNode = global.Node;
+  global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
+  try {
+    const turn = parser.extractTurn(section, 0);
+    assert.ok(turn, 'the turn must not be dropped for want of an attribute');
+    assert.equal(turn.role, 'assistant');
+    assert.match(turn.markdown, /дай секунду/);
+  } finally {
+    global.Node = previousNode;
   }
 });

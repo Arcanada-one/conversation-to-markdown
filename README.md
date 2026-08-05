@@ -20,6 +20,10 @@ Long conversations are difficult to archive when the page keeps only part of the
 - Combines multiple message segments from one turn instead of keeping only the first paragraph.
 - Restores the original scroll position after success or failure.
 - Processes everything locally in the browser with no telemetry, storage, or server.
+- Runs without a time limit: a scan ends when the conversation ends, when it genuinely stops making progress, or when you stop it — never because a clock expired.
+- Shows live progress (messages captured and seconds elapsed) and offers a **Stop scanning** button at any point.
+- Keeps going when a single message refuses to render, instead of losing the rest of the conversation to it.
+- Captures assistant messages even when the page omits the author-role attribute some turns are missing.
 - Reports incomplete scans instead of silently copying a partial conversation.
 
 ## Install in Chrome
@@ -89,7 +93,7 @@ See [PRIVACY.md](PRIVACY.md) for the complete data-handling statement.
 ## Limitations
 
 - ChatGPT can change its page structure, which may require an extension update.
-- The tab must stay open while scanning; very long conversations can take longer.
+- The tab must stay open while scanning. Very long conversations simply take longer — there is no deadline, and a scan in progress can be stopped from the popup.
 - Only content rendered by the conversation page can be exported.
 - Unsafe executable link schemes are intentionally omitted.
 - Temporary or authenticated page links may stop working after URL query parameters are removed.

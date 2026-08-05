@@ -1,6 +1,11 @@
 const btn = document.getElementById('btn-copy');
+const btnCancel = document.getElementById('btn-cancel');
 const status = document.getElementById('status');
 const chkImages = document.getElementById('chk-images');
+
+// Id of the tab currently being scanned, so Stop knows where to send the flag.
+var scanningTabId = null;
+var progressTimer = null;
 
 function showStatus(type, message) {
   status.className = type;
@@ -77,9 +82,51 @@ function downloadOne(url, filename, targetPath, timeoutMs) {
   });
 }
 
+/** Poll the page's scan state so a long run visibly reports work done.
+ *  Counts, not a percentage: there is no fixed budget to be a percentage of. */
+function startProgressPolling(tabId) {
+  stopProgressPolling();
+  progressTimer = setInterval(async function() {
+    try {
+      const probe = await chrome.scripting.executeScript({
+        target: { tabId: tabId },
+        func: function() { return window.__c2mScan || null; },
+      });
+      const state = probe && probe[0] && probe[0].result;
+      if (state && !state.cancelled) {
+        const seconds = Math.round((state.elapsedMs || 0) / 1000);
+        btn.textContent = 'Scanning… ' + state.captured + ' messages · ' + seconds + 's';
+      }
+    } catch (_e) {
+      // The tab may navigate or close mid-scan; the scan itself reports that.
+    }
+  }, 1000);
+}
+
+function stopProgressPolling() {
+  if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
+}
+
+btnCancel.addEventListener('click', async () => {
+  if (scanningTabId === null) return;
+  btnCancel.disabled = true;
+  btnCancel.textContent = 'Stopping…';
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: scanningTabId },
+      func: function() { if (window.__c2mScan) window.__c2mScan.cancelled = true; },
+    });
+  } catch (_e) {
+    // Nothing to cancel — the scan already ended.
+  }
+});
+
 btn.addEventListener('click', async () => {
   btn.disabled = true;
   btn.textContent = 'Scanning conversation…';
+  btnCancel.classList.add('visible');
+  btnCancel.disabled = false;
+  btnCancel.textContent = 'Stop scanning';
   status.className = '';
   status.textContent = '';
 
@@ -96,10 +143,16 @@ btn.addEventListener('click', async () => {
       files: ['content.js'],
     });
 
+    scanningTabId = tab.id;
+    startProgressPolling(tab.id);
+
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: async () => getConversationMarkdown(),
     });
+
+    stopProgressPolling();
+    btnCancel.classList.remove('visible');
 
     const result = results?.[0]?.result;
 
@@ -200,6 +253,9 @@ btn.addEventListener('click', async () => {
   } catch (err) {
     showStatus('error', err.message || String(err));
   } finally {
+    stopProgressPolling();
+    scanningTabId = null;
+    btnCancel.classList.remove('visible');
     btn.disabled = false;
     btn.textContent = 'Copy as Markdown';
   }

@@ -58,6 +58,24 @@
     #btn-copy:active { transform: scale(0.97); }
     #btn-copy:disabled { background: #333; color: #666; cursor: default; }
 
+    /* A long conversation is a long job, not a failure — the operator decides
+       when to stop it, so the control is always reachable while scanning. */
+    #btn-cancel {
+      width: 100%;
+      margin-top: 8px;
+      padding: 9px 16px;
+      background: transparent;
+      color: #999;
+      border: 1px solid #3a3a3a;
+      border-radius: 10px;
+      font-size: 13px;
+      cursor: pointer;
+      display: none;
+    }
+
+    #btn-cancel:hover { color: #e05252; border-color: #e0525266; }
+    #btn-cancel.visible { display: block; }
+
     #status {
       margin-top: 14px;
       font-size: 12px;
@@ -114,6 +132,7 @@
   </div>
 
   <button id="btn-copy">Copy as Markdown</button>
+  <button id="btn-cancel">Stop scanning</button>
 
   <label class="toggle">
     <input type="checkbox" id="chk-images" />

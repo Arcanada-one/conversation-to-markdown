@@ -727,6 +727,115 @@ test('names an attachment chip that carries no link', () => {
   }
 });
 
+// Shapes below are TRANSCRIBED FROM A REAL SAVED ChatGPT PAGE (an operator-held
+// sample of a 4-exchange conversation, not committed here: it carries signed
+// `sig=` URLs and a real conversation id, which the public-surface gate bans).
+// Every attribute and nesting level was read off those bytes; the URLs and ids
+// are replaced with synthetic ones.
+//
+// What the real page proved, and why this test exists:
+//  - An assistant turn whose answer is IMAGE-ONLY carries no `.markdown` and no
+//    `[class*="prose"]` container at all, and no `[data-message-author-role]`
+//    wrapper either. Its role lives ONLY in `data-turn="assistant"` on the
+//    section. Two such turns were dropped by the shipped 1.1.x extractor
+//    (8 turns in, 6 out) — the defect this project was filed for.
+//  - Generated files are served from `chatgpt.com/backend-api/estuary/content`
+//    with the id in a query parameter and NO extension in the path, so filename
+//    derivation cannot rely on the URL path.
+// A hand-written fixture that gives such a turn a prose container, or an
+// author-role attribute, tests a page ChatGPT does not serve.
+test('captures an image-only assistant turn shaped like the real page', () => {
+  const image = {
+    nodeType: 1,
+    tagName: 'img',
+    getAttribute(name) {
+      return {
+        src: 'https://chatgpt.com/backend-api/estuary/content?id=file_synth_0001&ts=1&p=fs',
+        alt: 'Сформированное изображение: statistics',
+      }[name] ?? null;
+    },
+    childNodes: [],
+    closest: () => null,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+
+  const section = {
+    nodeType: 1,
+    tagName: 'section',
+    getAttribute(name) {
+      // Role is carried by data-turn ALONE — this is the real shape.
+      return {
+        'data-turn-id': 'synth-image-only-turn',
+        'data-testid': 'conversation-turn-6',
+        'data-turn': 'assistant',
+      }[name] ?? null;
+    },
+    // No [data-message-author-role], no .markdown, no [class*="prose"].
+    querySelector: () => null,
+    querySelectorAll(selector) {
+      return selector === 'img' ? [image] : [];
+    },
+    childNodes: [image],
+  };
+
+  const previousNode = global.Node;
+  global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
+  try {
+    const turn = parser.extractTurn(section, 5);
+    assert.notEqual(turn, null, 'an image-only assistant turn must not be dropped');
+    assert.equal(turn.role, 'assistant');
+    assert.match(turn.markdown, /!\[/, 'the image must survive into the markdown');
+    assert.match(turn.markdown, /estuary\/content/);
+  } finally {
+    global.Node = previousNode;
+  }
+});
+
+test('derives a filename for an estuary URL that carries no extension', () => {
+  // Real generated-file URLs put the id in a query parameter and end the path
+  // at `/content`, so there is no extension to read. An image still gets a
+  // usable name; a file with no label anywhere degrades to .bin rather than to
+  // an extensionless name Chrome would refuse.
+  const popupPath = require('path').join(__dirname, '..', 'popup.js');
+  const vm = require('node:vm');
+  const context = {
+    module: { exports: {} },
+    document: {
+      getElementById: () => ({
+        addEventListener() {},
+        disabled: false,
+        textContent: '',
+        classList: { add() {}, remove() {} },
+      }),
+    },
+    chrome: {
+      tabs: { query: async () => [] },
+      scripting: { executeScript: async () => [] },
+      downloads: { download() {} },
+      runtime: { lastError: null },
+    },
+    navigator: { clipboard: { writeText: async () => {} } },
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    URL,
+    encodeURIComponent,
+    decodeURIComponent,
+    btoa,
+  };
+  vm.runInNewContext(require('fs').readFileSync(popupPath, 'utf8'), context);
+  const popup = context.module.exports;
+
+  const estuary = 'https://chatgpt.com/backend-api/estuary/content?id=file_synth_0002&ts=1&p=fs';
+  assert.equal(popup.isDownloadableFileUrl(estuary), true);
+  assert.equal(popup.artifactFilename(estuary, '', 0, 'Chat', 'image'), 'Chat-image_001.png');
+  assert.equal(popup.artifactFilename(estuary, '', 0, 'Chat', 'file'), 'Chat-file_001.bin');
+  // A labelled link still wins, which is the common case for documents.
+  assert.equal(popup.artifactFilename(estuary, 'quarterly.xlsx', 0, 'Chat', 'file'), 'Chat-001-quarterly.xlsx');
+});
+
 test('falls back to the child author role when data-turn is absent', () => {
   const bubble = { textContent: 'Fallback question' };
   const message = {

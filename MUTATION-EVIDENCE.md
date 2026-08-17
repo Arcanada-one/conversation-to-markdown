@@ -270,3 +270,49 @@ path the stem is discarded so only the extension whitelist applies. The branch
 changed no observable output on any reachable path, so it was DELETED rather than
 kept with a test written to fit it. A surviving mutant is a claim about the code,
 not only about the tests: here the honest reading was dead complexity.
+
+## Wave 2d — checked against a real saved ChatGPT page
+
+Everything above was verified against hand-written fixtures. Hand-written
+fixtures test the page the author imagined. This section is what changed after
+reading an operator-held save of a real 4-exchange ChatGPT conversation (68 KB of
+actual page bytes). The file itself is NOT committed and cannot be: it carries
+`sig=` signed URLs and a real conversation id, both banned in tracked text by
+`tests/public-surface.test.js:91-92`, and the sample-directory path is banned too. So
+the shapes were TRANSCRIBED and the identifiers replaced with synthetic ones.
+
+### What the real bytes proved
+
+| Observation | Consequence |
+| --- | --- |
+| An image-only assistant turn carries **no** `.markdown`, **no** `[class*="prose"]` and **no** `[data-message-author-role]`. Its role lives ONLY in `data-turn="assistant"` on the section. | The orphan-prose fallback cannot reach such a turn; only the `data-turn` path and the image extractor save it. A fixture that gives such a turn a prose container tests a page ChatGPT does not serve. |
+| Generated files are served from `chatgpt.com/backend-api/estuary/content?id=...` — id in a QUERY parameter, path ending at `/content`, **no extension anywhere**. | Filename derivation cannot rely on the URL path. The `/estuary/` host rule already shipped in `isDownloadableFileUrl` is confirmed correct against real bytes. |
+| `files.oaiusercontent.com` does not appear in this sample at all; every artifact is on `chatgpt.com`. | The host allowlist needs the `chatgpt.com` paths, not only the CDN. Already the case. |
+| Real `data-testid` values in the sample are `conversation-turn-N`, `copy-turn-action-button`, `webpage-citation-pill`, `image-gen-overlay-actions`. | `[data-testid="file-chip"]`, used for attachment discovery, is NOT among them — this sample contains no attachments, so that selector remains **unconfirmed** rather than refuted. Stated plainly instead of counted as verified. |
+| All 8 turns in the sample carry `data-turn`. | The historical 8-in / 6-out loss belongs to the 1.1.x extractor, not to the current code. The current code captures all 8. |
+
+### A. The real image-only turn shape must not regress
+
+| Field | Value |
+| --- | --- |
+| **Edit** | In `getSectionRole`, replace `section.getAttribute('data-turn')` with `null`, so the section-level role attribute is ignored and only `[data-message-author-role]` counts. |
+| **Tests that went red** | `captures an image-only assistant turn shaped like the real page`; `extracts an image-only assistant turn`; `preserves every assistant message segment within one turn`; `browser entrypoint scans all windows and returns the established result shape` |
+| **EXIT** | **1** |
+
+### B. Extensionless estuary URLs
+
+Covered by `derives a filename for an estuary URL that carries no extension`,
+which pins all three outcomes on the real URL shape: an image gets `.png`, a file
+with no label anywhere degrades to `.bin` rather than to an extensionless name
+Chrome would refuse, and a labelled link still wins (the common case for
+documents).
+
+### A measurement error worth recording, because it nearly became a bug report
+
+An intermediate probe concluded that a role-less image-only turn returns `null`
+and is silently lost, and that conclusion was WRONG. The synthetic section used
+for the probe omitted `data-turn` — an attribute the real page always carries.
+The shim, not the extractor, was broken; re-running with the attribute present
+returned the turn with its image intact. This is the exact failure mode this
+section exists to prevent: a fixture that diverges from the real markup can
+manufacture a defect as easily as it can hide one.

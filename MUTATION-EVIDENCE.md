@@ -151,3 +151,63 @@ in **F** below.
 | `[data-testid="file-chip"]` | Attachment chip discovery in `extractAttachments` and `isAttachmentChip` |
 | Inner `a[href]` inside the chip | Resolving download URL and label |
 | `.katex` / `.katex-mathml` / `.katex-html` | KaTeX deduplication (standard KaTeX DOM, not re-checked on live ChatGPT) |
+
+## Wave 2b
+
+Baseline before mutations: **78 pass, 0 fail, EXIT=0**.
+
+### A. Sidebar conversation enumeration
+
+| Field | Value |
+| --- | --- |
+| **Edit** | Replace `listSidebarConversations` with `function listSidebarConversations() { return []; }`. |
+| **Test that went red** | `lists every sidebar conversation link once` |
+| **EXIT** | **1** |
+
+### B. Batch resume filter
+
+| Field | Value |
+| --- | --- |
+| **Edit** | Replace `filterPendingConversations` body with `return conversations;` (never skip completed paths). |
+| **Test that went red** | `filterPendingConversations skips paths already downloaded` |
+| **EXIT** | **1** |
+
+### C. Per-conversation progress label
+
+| Field | Value |
+| --- | --- |
+| **Edit** | Replace `formatBatchProgress` with `function formatBatchProgress() { return 'Scanning conversation…'; }`. |
+| **Test that went red** | `formatBatchProgress shows n of N and the current title` |
+| **EXIT** | **1** |
+
+### D. STORE zip writer
+
+| Field | Value |
+| --- | --- |
+| **Edit** | In `buildStoreZip`, write `0x00034b50` instead of `0x04034b50` for the local header signature. |
+| **Test that went red** | `buildStoreZip writes the local-file magic bytes` |
+| **EXIT** | **1** |
+
+### E. Batch zip download
+
+| Field | Value |
+| --- | --- |
+| **Edit** | In `runBatchExport`, delete the `if (zipEntries && zipEntries.length > 0 && typeof buildStoreZip === 'function') { … }` block. |
+| **Test that went red** | `batch mode reports per-conversation progress and writes a zip archive` |
+| **EXIT** | **1** |
+
+### F. Navigation readiness gate
+
+| Field | Value |
+| --- | --- |
+| **Edit** | Replace `waitForConversationReady` with `function waitForConversationReady() { return Promise.resolve({ ready: true }); }` always-ready stub — then change it to `return Promise.resolve({ ready: false, error: 'stub' });`. |
+| **Tests that went red** | `waitForConversationReady resolves when message content mounts`; `waitForConversationReady times out when navigation never arrives` |
+| **EXIT** | **1** |
+
+### Fixture-derived selectors (not live-verified)
+
+| Selector / assumption | Used for |
+| --- | --- |
+| `nav a[href^="/c/"]` | Project sidebar conversation list in `listSidebarConversations` |
+| `aria-label` / `.truncate` on sidebar links | Conversation titles (shared with `titleFromSidebarLink`) |
+| `[data-turn-id]` / `[data-message-author-role]` | `waitForConversationReady` content gate |

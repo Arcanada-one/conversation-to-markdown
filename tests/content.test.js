@@ -1278,3 +1278,75 @@ test('renders KaTeX once by skipping the hidden MathML layer', () => {
     global.Node = previousNode;
   }
 });
+
+test('lists every sidebar conversation link once', () => {
+  assert.equal(typeof parser.listSidebarConversations, 'function');
+  const makeLink = (id, title) => ({
+    getAttribute(name) {
+      if (name === 'href') return '/c/' + id;
+      if (name === 'aria-label') return title;
+      return null;
+    },
+    querySelector: () => null,
+    textContent: title,
+  });
+  const doc = {
+    querySelectorAll(selector) {
+      if (selector === 'nav a[href^="/c/"]') {
+        return [
+          makeLink('aaa111', 'Alpha chat'),
+          makeLink('bbb222', 'Beta chat'),
+          makeLink('aaa111', 'Alpha duplicate'),
+        ];
+      }
+      return [];
+    },
+  };
+  const listed = parser.listSidebarConversations(doc);
+  assert.deepEqual(listed.map((item) => item.id), ['aaa111', 'bbb222']);
+  assert.equal(listed[0].title, 'Alpha chat');
+  assert.equal(listed[0].slug, 'Alpha-chat');
+});
+
+test('waitForConversationReady resolves when message content mounts', async () => {
+  assert.equal(typeof parser.waitForConversationReady, 'function');
+  const previousDocument = global.document;
+  const previousLocation = global.location;
+  global.location = { pathname: '/c/conv123' };
+  global.document = {
+    querySelector(selector) {
+      if (selector === '[data-turn-id]') return { turnId: 'turn-1' };
+      return null;
+    },
+  };
+  try {
+    const result = await parser.waitForConversationReady({
+      conversationId: 'conv123',
+      timeoutMs: 500,
+      pollMs: 10,
+    });
+    assert.equal(result.ready, true);
+  } finally {
+    global.document = previousDocument;
+    global.location = previousLocation;
+  }
+});
+
+test('waitForConversationReady times out when navigation never arrives', async () => {
+  const previousDocument = global.document;
+  const previousLocation = global.location;
+  global.location = { pathname: '/g/g-p-project' };
+  global.document = { querySelector: () => null };
+  try {
+    const result = await parser.waitForConversationReady({
+      conversationId: 'conv123',
+      timeoutMs: 40,
+      pollMs: 10,
+    });
+    assert.equal(result.ready, false);
+    assert.match(result.error, /Navigation/);
+  } finally {
+    global.document = previousDocument;
+    global.location = previousLocation;
+  }
+});

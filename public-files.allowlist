@@ -21,7 +21,10 @@ package.json
 popup.html
 popup.js
 public-files.allowlist
+tests/batch.test.js
 tests/content.test.js
 tests/manifest.test.js
 tests/popup.test.js
 tests/public-surface.test.js
+tests/zip.test.js
+zip.js

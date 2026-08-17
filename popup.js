@@ -3,10 +3,13 @@ const btnCancel = document.getElementById('btn-cancel');
 const status = document.getElementById('status');
 const chkImages = document.getElementById('chk-images');
 const chkTimestamp = document.getElementById('chk-timestamp');
+const chkBatch = document.getElementById('chk-batch');
+const batchWarning = document.getElementById('batch-warning');
 
 // Id of the tab currently being scanned, so Stop knows where to send the flag.
 var scanningTabId = null;
 var progressTimer = null;
+var batchCancelled = false;
 
 function showStatus(type, message) {
   status.className = type;
@@ -107,9 +110,89 @@ function formatExportTimestamp(date) {
 }
 
 /** Build the .md filename; timestamp suffix implements re-export without uniquify suffixes. */
-function buildMdFilename(slug, useTimestamp, now) {
+function buildMdFilename(slug, useTimestamp, now, fixedStamp) {
   var base = slug || 'conversation';
-  return useTimestamp ? base + '--' + formatExportTimestamp(now) + '.md' : base + '.md';
+  if (useTimestamp) {
+    var stamp = fixedStamp || formatExportTimestamp(now);
+    return base + '--' + stamp + '.md';
+  }
+  return base + '.md';
+}
+
+/** Progress label for a batch export: "3 of 12 — Conversation title". */
+function formatBatchProgress(index, total, title) {
+  var position = index + 1;
+  var label = title ? ' — ' + title : '';
+  return position + ' of ' + total + label;
+}
+
+/** Root folder for a project batch under Downloads/chatgpt-export/. */
+function batchRootPath(projectSlug) {
+  return projectSlug ? 'chatgpt-export/' + projectSlug : 'chatgpt-export';
+}
+
+/** Per-conversation folder inside a batch export. */
+function conversationFolderPath(convSlug, projectSlug) {
+  var root = batchRootPath(projectSlug);
+  return convSlug ? root + '/' + convSlug : root;
+}
+
+/** Full download path for a conversation's markdown file. */
+function mdDownloadPath(convSlug, projectSlug, useTimestamp, stamp) {
+  var mdName = buildMdFilename(convSlug, useTimestamp, null, stamp);
+  return conversationFolderPath(convSlug, projectSlug) + '/' + mdName;
+}
+
+/** Skip conversations whose markdown already landed in a prior partial run. */
+function filterPendingConversations(conversations, completedPaths, projectSlug, useTimestamp, stamp) {
+  return conversations.filter(function(conv) {
+    var slug = conv.slug || conv.id;
+    return !completedPaths.has(mdDownloadPath(slug, projectSlug, useTimestamp, stamp));
+  });
+}
+
+/** Resume a batch by reading prior download paths — no extension storage API. */
+function searchCompletedDownloadPaths(projectSlug) {
+  return new Promise(function(resolve) {
+    if (typeof chrome === 'undefined' || !chrome.downloads || !chrome.downloads.search) {
+      resolve(new Set());
+      return;
+    }
+    var escaped = (projectSlug || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    var pattern = projectSlug
+      ? 'chatgpt-export/' + escaped + '/.+/.*\\.md$'
+      : 'chatgpt-export/.+/.*\\.md$';
+    chrome.downloads.search({ filenameRegex: pattern }, function(items) {
+      var paths = new Set();
+      if (items) {
+        for (var i = 0; i < items.length; i++) {
+          if (items[i].filename) paths.add(items[i].filename);
+        }
+      }
+      resolve(paths);
+    });
+  });
+}
+
+function bytesToBase64DataUrl(bytes, mimeType) {
+  var binary = '';
+  for (var i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return 'data:' + (mimeType || 'application/octet-stream') + ';base64,' + btoa(binary);
+}
+
+function textToUtf8Bytes(text) {
+  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(text);
+  var out = new Uint8Array(text.length);
+  for (var i = 0; i < text.length; i++) out[i] = text.charCodeAt(i) & 0xff;
+  return out;
+}
+
+function addZipEntry(zipEntries, projectSlug, convSlug, filename, content) {
+  var prefix = conversationFolderPath(convSlug, projectSlug) + '/';
+  zipEntries.push({
+    name: prefix + filename,
+    data: typeof content === 'string' ? textToUtf8Bytes(content) : content,
+  });
 }
 
 /** Download one file via chrome.downloads. Returns {url, filename, ok, error}. */
@@ -164,8 +247,205 @@ function stopProgressPolling() {
   if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
 }
 
+/** Save one scanned conversation to disk and optionally collect zip entries. */
+async function saveConversationExport(tabId, result, options) {
+  var downloadImages = options.downloadImages;
+  var useTimestamp = options.useTimestamp;
+  var batchStamp = options.batchStamp;
+  var projectSlug = options.projectSlug;
+  var zipEntries = options.zipEntries;
+  var slug = result.slug || null;
+  var convSlug = slug || 'conversation';
+  var mdName = buildMdFilename(slug, useTimestamp, null, batchStamp);
+  var folderPath = projectSlug
+    ? conversationFolderPath(convSlug, projectSlug)
+    : exportPath(slug, '').replace(/\/$/, '');
+  var md = result.md;
+  var partialSuffix = result.partial ? ' (partial export)' : '';
+  var dlOk = 0;
+  var dlTotal = 0;
+  var dlErrors = [];
+  var mdFinal = md;
+
+  if (downloadImages && typeof chrome.downloads !== 'undefined') {
+    var refs = parseArtifactRefs(md);
+    dlTotal = refs.length;
+    var extracted = [];
+    if (refs.length > 0) {
+      var urls = refs.map(function(r) { return r.url; });
+      var extractResult = await chrome.scripting.executeScript({
+        target: { tabId: tabId },
+        func: async function(urls) {
+          if (typeof fetchImageDataUrls === 'function') return await fetchImageDataUrls(urls);
+          if (typeof extractImageDataUrls === 'function') return await extractImageDataUrls(urls);
+          return urls.map(function() { return null; });
+        },
+        args: [urls],
+      });
+      extracted = extractResult?.[0]?.result || [];
+    }
+
+    mdFinal = md;
+    for (var i = 0; i < extracted.length; i++) {
+      var ex = extracted[i];
+      if (ex && ex.dataUrl) {
+        var ref = refs[i] || {};
+        var fname = artifactFilename(ex.url, ref.label || '', i, slug, ref.kind || 'image');
+        var targetPath = folderPath + '/' + fname;
+        var r = await downloadOne(ex.dataUrl, fname, targetPath);
+        if (r.ok) {
+          dlOk++;
+          mdFinal = mdFinal.split(ex.url).join('./' + r.filename);
+          if (zipEntries) {
+            var dataPart = ex.dataUrl.split(',')[1] || '';
+            var bin = Uint8Array.from(atob(dataPart), function(c) { return c.charCodeAt(0); });
+            addZipEntry(zipEntries, projectSlug, convSlug, fname, bin);
+          }
+        } else {
+          dlErrors.push(r.error || 'unknown');
+        }
+      }
+    }
+  }
+
+  await downloadOne(
+    'data:text/markdown;charset=utf-8,' + encodeURIComponent(mdFinal),
+    mdName,
+    folderPath + '/' + mdName
+  );
+  if (zipEntries) addZipEntry(zipEntries, projectSlug, convSlug, mdName, mdFinal);
+
+  return {
+    mdFinal: mdFinal,
+    partialSuffix: partialSuffix,
+    dlOk: dlOk,
+    dlTotal: dlTotal,
+    dlErrors: dlErrors,
+    mdName: mdName,
+  };
+}
+
+/** Walk the sidebar conversation list in the active tab, export each in turn. */
+async function runBatchExport(tab, options) {
+  var downloadImages = options.downloadImages;
+  var useTimestamp = options.useTimestamp;
+  var projectSlug = options.projectSlug;
+  var batchStamp = options.batchStamp;
+  var onProgress = options.onProgress;
+  var zipEntries = options.buildZip ? [] : null;
+  var completedPaths = await searchCompletedDownloadPaths(projectSlug);
+  var listResult = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: function() {
+      if (typeof listSidebarConversations === 'function') return listSidebarConversations();
+      return [];
+    },
+  });
+  var conversations = listResult?.[0]?.result || [];
+  if (!conversations.length) {
+    return { ok: false, error: 'No conversations found in the sidebar. Open a ChatGPT Project page first.' };
+  }
+
+  var pending = filterPendingConversations(conversations, completedPaths, projectSlug, useTimestamp, batchStamp);
+  var skipped = conversations.length - pending.length;
+  var exported = 0;
+  var errors = [];
+
+  for (var index = 0; index < pending.length; index++) {
+    if (batchCancelled) break;
+    var conv = pending[index];
+    var progressTitle = conv.title || conv.slug || conv.id;
+    if (onProgress) onProgress(index, pending.length, progressTitle);
+
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: function(href) { window.location.href = href; },
+      args: [conv.href],
+    });
+
+    var readyResult = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: async function(conversationId) {
+        if (typeof waitForConversationReady === 'function') {
+          return await waitForConversationReady({ conversationId: conversationId, timeoutMs: 30000 });
+        }
+        return { ready: false, error: 'waitForConversationReady is unavailable.' };
+      },
+      args: [conv.id],
+    });
+    var ready = readyResult?.[0]?.result;
+    if (!ready || !ready.ready) {
+      errors.push((conv.title || conv.id) + ': ' + ((ready && ready.error) || 'did not load'));
+      continue;
+    }
+
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['content.js'],
+    });
+
+    scanningTabId = tab.id;
+    startProgressPolling(tab.id);
+
+    var results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: async function() { return getConversationMarkdown(); },
+    });
+    stopProgressPolling();
+
+    var result = results?.[0]?.result;
+    if (!result || !result.ok) {
+      errors.push((conv.title || conv.id) + ': ' + ((result && result.error) || 'scan failed'));
+      continue;
+    }
+
+    if (downloadImages) {
+      await saveConversationExport(tab.id, result, {
+        downloadImages: true,
+        useTimestamp: useTimestamp,
+        batchStamp: batchStamp,
+        projectSlug: projectSlug,
+        zipEntries: zipEntries,
+      });
+    } else {
+      var slug = result.slug || conv.slug || conv.id;
+      var mdName = buildMdFilename(slug, useTimestamp, null, batchStamp);
+      var folder = conversationFolderPath(slug, projectSlug);
+      await downloadOne(
+        'data:text/markdown;charset=utf-8,' + encodeURIComponent(result.md),
+        mdName,
+        folder + '/' + mdName
+      );
+      if (zipEntries) addZipEntry(zipEntries, projectSlug, slug, mdName, result.md);
+    }
+
+    exported += 1;
+    var exportSlug = result.slug || conv.slug || conv.id;
+    completedPaths.add(mdDownloadPath(exportSlug, projectSlug, useTimestamp, batchStamp));
+  }
+
+  var zipName = null;
+  if (zipEntries && zipEntries.length > 0 && typeof buildStoreZip === 'function') {
+    var stamp = batchStamp || formatExportTimestamp();
+    zipName = (projectSlug || 'project') + '-export--' + stamp + '.zip';
+    var zipBytes = buildStoreZip(zipEntries);
+    await downloadOne(bytesToBase64DataUrl(zipBytes, 'application/zip'), zipName, batchRootPath(projectSlug) + '/' + zipName);
+  }
+
+  return {
+    ok: true,
+    total: conversations.length,
+    exported: exported,
+    skipped: skipped,
+    cancelled: batchCancelled,
+    errors: errors,
+    zipName: zipName,
+  };
+}
+
 btnCancel.addEventListener('click', async () => {
   if (scanningTabId === null) return;
+  batchCancelled = true;
   btnCancel.disabled = true;
   btnCancel.textContent = 'Stopping…';
   try {
@@ -180,18 +460,67 @@ btnCancel.addEventListener('click', async () => {
 
 btn.addEventListener('click', async () => {
   btn.disabled = true;
-  btn.textContent = 'Scanning conversation…';
+  batchCancelled = false;
+  const batchMode = chkBatch && chkBatch.checked;
+  btn.textContent = batchMode ? 'Preparing batch export…' : 'Scanning conversation…';
   btnCancel.classList.add('visible');
   btnCancel.disabled = false;
-  btnCancel.textContent = 'Stop scanning';
+  btnCancel.textContent = batchMode ? 'Stop export' : 'Stop scanning';
   status.className = '';
   status.textContent = '';
+  if (batchWarning) batchWarning.classList.toggle('visible', batchMode);
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
     if (!tab?.url?.match(/https:\/\/(chatgpt\.com|chat\.openai\.com)\//)) {
       showStatus('error', 'Open a ChatGPT conversation page first.');
+      return;
+    }
+
+    const useTimestamp = chkTimestamp && chkTimestamp.checked;
+    const downloadImages = chkImages && chkImages.checked;
+
+    if (batchMode) {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        files: ['content.js'],
+      });
+
+      var projectInfo = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: function() {
+          var title = typeof extractConversationTitle === 'function' ? extractConversationTitle() : null;
+          var slug = title && typeof slugifyTitle === 'function' ? slugifyTitle(title) : null;
+          return { title: title, slug: slug || 'project-batch' };
+        },
+      });
+      var projectSlug = projectInfo?.[0]?.result?.slug || 'project-batch';
+      var batchStamp = useTimestamp ? formatExportTimestamp() : null;
+      scanningTabId = tab.id;
+
+      var batchResult = await runBatchExport(tab, {
+        downloadImages: downloadImages,
+        useTimestamp: useTimestamp,
+        projectSlug: projectSlug,
+        batchStamp: batchStamp,
+        buildZip: true,
+        onProgress: function(index, total, title) {
+          btn.textContent = 'Exporting ' + formatBatchProgress(index, total, title);
+        },
+      });
+
+      if (!batchResult.ok) {
+        showStatus('error', batchResult.error || 'Batch export failed.');
+        return;
+      }
+
+      var summary = '✓ Batch export complete: ' + batchResult.exported + ' saved';
+      if (batchResult.skipped > 0) summary += ', ' + batchResult.skipped + ' skipped (already exported)';
+      if (batchResult.cancelled) summary += ' — stopped early';
+      if (batchResult.zipName) summary += '\nZip: ' + batchResult.zipName;
+      if (batchResult.errors.length) summary += '\nErrors: ' + batchResult.errors.join('; ');
+      showStatus('success', summary);
       return;
     }
 
@@ -210,6 +539,7 @@ btn.addEventListener('click', async () => {
 
     stopProgressPolling();
     btnCancel.classList.remove('visible');
+    if (batchWarning) batchWarning.classList.remove('visible');
 
     const result = results?.[0]?.result;
 
@@ -224,59 +554,22 @@ btn.addEventListener('click', async () => {
     }
 
     let md = result.md;
-    const downloadImages = chkImages && chkImages.checked;
-    const useTimestamp = chkTimestamp && chkTimestamp.checked;
     // Conversation title drives both the .md filename and its export folder.
     const slug = result.slug || null;
     const mdName = buildMdFilename(slug, useTimestamp);
     const partialSuffix = result.partial ? ' (partial export)' : '';
 
     if (downloadImages && typeof chrome.downloads !== 'undefined') {
-      // Fetch artifacts via content script (has host_permissions for CDN CORS bypass).
+      var saved = await saveConversationExport(tab.id, result, {
+        downloadImages: true,
+        useTimestamp: useTimestamp,
+        projectSlug: null,
+        zipEntries: null,
+      });
+      var mdFinal = saved.mdFinal;
       var refs = parseArtifactRefs(md);
-      var extracted = [];
-      if (refs.length > 0) {
-        btn.textContent = 'Downloading ' + refs.length + ' file' + (refs.length === 1 ? '' : 's') + '…';
-        var urls = refs.map(function(r) { return r.url; });
-        var extractResult = await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          func: async function(urls) {
-            if (typeof fetchImageDataUrls === 'function') return await fetchImageDataUrls(urls);
-            if (typeof extractImageDataUrls === 'function') return await extractImageDataUrls(urls);
-            return urls.map(function() { return null; });
-          },
-          args: [urls],
-        });
-        extracted = extractResult?.[0]?.result || [];
-      }
-
-      // Download extracted data URLs + save .md file
-      btn.textContent = 'Saving files…';
-      var mdChanged = md;
-      var dlOk = 0;
-      var dlErrors = [];
-      for (var i = 0; i < extracted.length; i++) {
-        var ex = extracted[i];
-        if (ex && ex.dataUrl) {
-          var ref = refs[i] || {};
-          var fname = artifactFilename(ex.url, ref.label || '', i, slug, ref.kind || 'image');
-          var r = await downloadOne(ex.dataUrl, fname, exportPath(slug, fname));
-          if (r.ok) {
-            dlOk++;
-            mdChanged = mdChanged.split(ex.url).join('./' + r.filename);
-          } else {
-            dlErrors.push(r.error || 'unknown');
-          }
-        }
-      }
-
-      // Save .md with local paths for successfully extracted artifacts
-      var mdFinal = dlOk > 0 ? mdChanged : md;
-      await downloadOne(
-        'data:text/markdown;charset=utf-8,' + encodeURIComponent(mdFinal),
-        mdName,
-        exportPath(slug, mdName)
-      );
+      var dlOk = saved.dlOk;
+      var dlErrors = saved.dlErrors || [];
 
       if (dlOk > 0) {
         showStatus('success',
@@ -314,6 +607,7 @@ btn.addEventListener('click', async () => {
     stopProgressPolling();
     scanningTabId = null;
     btnCancel.classList.remove('visible');
+    if (batchWarning) batchWarning.classList.remove('visible');
     btn.disabled = false;
     btn.textContent = 'Copy as Markdown';
   }
@@ -321,14 +615,22 @@ btn.addEventListener('click', async () => {
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    addZipEntry: addZipEntry,
     artifactFilename: artifactFilename,
+    batchRootPath: batchRootPath,
     buildMdFilename: buildMdFilename,
+    conversationFolderPath: conversationFolderPath,
+    downloadOne: downloadOne,
+    filterPendingConversations: filterPendingConversations,
+    formatBatchProgress: formatBatchProgress,
     formatExportTimestamp: formatExportTimestamp,
     exportPath: exportPath,
-    downloadOne: downloadOne,
     isDownloadableFileUrl: isDownloadableFileUrl,
+    mdDownloadPath: mdDownloadPath,
     parseArtifactRefs: parseArtifactRefs,
     parseFileRefs: parseFileRefs,
     parseImageRefs: parseImageRefs,
+    runBatchExport: runBatchExport,
+    searchCompletedDownloadPaths: searchCompletedDownloadPaths,
   };
 }

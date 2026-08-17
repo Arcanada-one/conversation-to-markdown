@@ -753,6 +753,17 @@ function extractConversationLegacy() {
   return parts.length ? parts.join('\n\n---\n\n') : null;
 }
 
+/** Read a sidebar conversation link's visible title.
+ *  Fixture-derived: aria-label and inner .truncate both carry the title. */
+function titleFromSidebarLink(link) {
+  if (!link) return null;
+  const label = (link.getAttribute('aria-label') || '').trim();
+  if (label) return label;
+  const inner = link.querySelector ? link.querySelector('.truncate') : null;
+  const text = inner ? (inner.textContent || '').trim() : (link.textContent || '').trim();
+  return text || null;
+}
+
 /** Read the conversation title from the page.
  *  Primary source: the active sidebar entry for the current /c/{id} route
  *  (its aria-label and inner text both carry the title). Falls back to the
@@ -770,18 +781,76 @@ function extractConversationTitle(doc) {
 
   for (const selector of candidates) {
     const link = root.querySelector(selector);
-    if (!link) continue;
-    const label = (link.getAttribute('aria-label') || '').trim();
-    if (label) return label;
-    const inner = link.querySelector ? link.querySelector('.truncate') : null;
-    const text = inner ? (inner.textContent || '').trim() : '';
-    if (text) return text;
+    const title = titleFromSidebarLink(link);
+    if (title) return title;
   }
 
   const title = (root.title || '').trim();
   if (!title) return null;
   const cleaned = title.replace(/\s*[|-]\s*ChatGPT\s*$/i, '').trim();
   return cleaned && cleaned.toLowerCase() !== 'chatgpt' ? cleaned : null;
+}
+
+/**
+ * Enumerate every conversation link visible in the sidebar.
+ * Fixture-derived selector: nav a[href^="/c/"] — needs a live check on a
+ * ChatGPT Project page.
+ */
+function listSidebarConversations(doc) {
+  const root = doc || (typeof document !== 'undefined' ? document : null);
+  if (!root || !root.querySelectorAll) return [];
+
+  const links = root.querySelectorAll('nav a[href^="/c/"]');
+  const seen = new Set();
+  const results = [];
+  for (const link of links) {
+    const href = link.getAttribute('href') || '';
+    const match = href.match(/^\/c\/([A-Za-z0-9-]+)/);
+    if (!match || seen.has(match[1])) continue;
+    seen.add(match[1]);
+    const title = titleFromSidebarLink(link);
+    results.push({
+      id: match[1],
+      href: '/c/' + match[1],
+      title: title,
+      slug: slugifyTitle(title) || match[1],
+    });
+  }
+  return results;
+}
+
+/** Wait until a navigated conversation page has mountable message content. */
+function waitForConversationReady(options) {
+  const supplied = options || {};
+  const timeoutMs = supplied.timeoutMs || 30000;
+  const pollMs = supplied.pollMs || 300;
+  const conversationId = supplied.conversationId || null;
+
+  return new Promise(function(resolve) {
+    const startedAt = Date.now();
+    function check() {
+      if (conversationId) {
+        const pathMatch = (typeof location !== 'undefined' ? location.pathname : '')
+          .match(/\/c\/([A-Za-z0-9-]+)/);
+        if (!pathMatch || pathMatch[1] !== conversationId) {
+          if (Date.now() - startedAt >= timeoutMs) {
+            return resolve({ ready: false, error: 'Navigation did not reach the conversation.' });
+          }
+          return setTimeout(check, pollMs);
+        }
+      }
+      if (typeof document !== 'undefined' &&
+          (document.querySelector('[data-turn-id]') ||
+           document.querySelector('[data-message-author-role]'))) {
+        return resolve({ ready: true });
+      }
+      if (Date.now() - startedAt >= timeoutMs) {
+        return resolve({ ready: false, error: 'Conversation content did not load.' });
+      }
+      setTimeout(check, pollMs);
+    }
+    check();
+  });
 }
 
 /** Turn a conversation title into a filesystem-safe slug.
@@ -881,6 +950,7 @@ if (typeof module !== 'undefined' && module.exports) {
     extractConversationTitle: extractConversationTitle,
     extractImages: extractImages,
     fetchImageDataUrls: fetchImageDataUrls,
+    listSidebarConversations: listSidebarConversations,
     slugifyTitle: slugifyTitle,
     extractTurn: extractTurn,
     findScrollContainer: findScrollContainer,
@@ -890,5 +960,7 @@ if (typeof module !== 'undefined' && module.exports) {
     parseTurnOrder: parseTurnOrder,
     prefixPartialNotice: prefixPartialNotice,
     scanTurns: scanTurns,
+    titleFromSidebarLink: titleFromSidebarLink,
+    waitForConversationReady: waitForConversationReady,
   };
 }

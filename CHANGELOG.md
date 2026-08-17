@@ -5,6 +5,24 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] — 2026-08-17
+
+### Added
+
+- **Project batch export.** Export every conversation listed in the sidebar of the
+  active ChatGPT tab, one folder per conversation under
+  `chatgpt-export/<project>/`, without adding permissions or a service worker.
+  The popup must stay open for the run; progress shows `n of N — title`.
+- **Resumable batch runs.** Prior exports are detected via
+  `chrome.downloads.search` (no `chrome.storage`); restarting skips
+  conversations whose `.md` already landed.
+- **Batch zip archive.** A minimal STORE-method zip writer bundles every
+  exported folder into one `.zip` at the end of a batch run.
+
+### Verification
+
+See `MUTATION-EVIDENCE.md` § Wave 2b.
+
 ## [1.3.0] — 2026-08-17
 
 ### Added

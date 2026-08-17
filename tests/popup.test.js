@@ -38,6 +38,7 @@ function loadPopupExports() {
 }
 
 function createPopupHarness(runScan, options = {}) {
+  const zipSource = fs.readFileSync(path.join(__dirname, '..', 'zip.js'), 'utf8');
   let clickHandler;
   let clipboardValue = null;
   let scriptCalls = 0;
@@ -72,6 +73,20 @@ function createPopupHarness(runScan, options = {}) {
   // The image checkbox only exists when a test opts into the download path.
   const checkbox = options.downloadImages ? { checked: true } : null;
   const timestampCheckbox = { checked: !!options.useTimestamp };
+  const batchCheckbox = { checked: !!options.batchMode };
+  const batchWarning = {
+    classList: {
+      _names: new Set(),
+      toggle(name, force) {
+        if (force === true) this._names.add(name);
+        else if (force === false) this._names.delete(name);
+        else if (this._names.has(name)) this._names.delete(name);
+        else this._names.add(name);
+      },
+      add(name) { this._names.add(name); },
+      remove(name) { this._names.delete(name); },
+    },
+  };
   const context = {
     document: {
       getElementById: (id) => {
@@ -79,6 +94,8 @@ function createPopupHarness(runScan, options = {}) {
         if (id === 'btn-cancel') return cancelButton;
         if (id === 'chk-images') return checkbox;
         if (id === 'chk-timestamp') return timestampCheckbox;
+        if (id === 'chk-batch') return batchCheckbox;
+        if (id === 'batch-warning') return batchWarning;
         return status;
       },
     },
@@ -89,17 +106,31 @@ function createPopupHarness(runScan, options = {}) {
           scriptCalls += 1;
           injected.push(opts);
           if (opts.files) return [];
-          if (opts.args) return [{ result: options.extracted || [] }];
+          const funcSource = opts.func ? String(opts.func) : '';
+          if (opts.args && /fetchImageDataUrls|extractImageDataUrls/.test(funcSource)) {
+            return [{ result: options.extracted || [] }];
+          }
           // Only the scan itself is an async injection. The progress probe and
           // the cancellation flag are synchronous one-liners; routing them into
           // runScan would hand them the scan's pending promise and deadlock the
           // very handler under test.
           if (opts.func && opts.func.constructor.name !== 'AsyncFunction') {
+            const src = String(opts.func);
+            if (runScan && (
+              src.includes('listSidebarConversations') ||
+              src.includes('extractConversationTitle') ||
+              src.includes('waitForConversationReady')
+            )) {
+              return runScan(opts, button);
+            }
             // The injected closure was compiled inside the vm context, so its
             // free `window` resolves against that context's global — not this
             // file's globalThis. Set it where the closure will actually look.
-            context.window = { __c2mScan: pageScanState };
-            try { return [{ result: opts.func() }]; }
+            context.window = { location: { href: 'https://chatgpt.com/' }, __c2mScan: pageScanState };
+            try {
+              if (opts.args) return [{ result: opts.func(...opts.args) }];
+              return [{ result: opts.func() }];
+            }
             finally { context.window = undefined; }
           }
           return runScan(opts, button);
@@ -110,6 +141,7 @@ function createPopupHarness(runScan, options = {}) {
           downloads.push(opts);
           callback(downloads.length);
         },
+        search: (_query, callback) => callback([]),
       },
       runtime: { lastError: null },
     },
@@ -126,7 +158,15 @@ function createPopupHarness(runScan, options = {}) {
     clearInterval,
     URL,
     encodeURIComponent,
+    TextEncoder,
+    btoa: (value) => Buffer.from(value, 'binary').toString('base64'),
+    atob: (value) => Buffer.from(value, 'base64').toString('binary'),
+    buildStoreZip: null,
+    module: { exports: {} },
   };
+  vm.runInNewContext(zipSource, context);
+  context.buildStoreZip = context.module.exports.buildStoreZip;
+  context.module = { exports: {} };
   const source = fs.readFileSync(path.join(__dirname, '..', 'popup.js'), 'utf8');
   vm.runInNewContext(source, context);
   return {
@@ -338,4 +378,35 @@ test('downloads non-image attachment files alongside images', async () => {
   assert.match(harness.clipboardValue(), /!\[chart\]\(\.\/Export-image_001\.png\)/);
   assert.match(harness.clipboardValue(), /\[report\.pdf\]\(\.\/Export-file_002\.pdf\)/);
   assert.match(harness.status.textContent, /Files: 2\/2 downloaded/);
+});
+
+test('batch mode reports per-conversation progress and writes a zip archive', async () => {
+  const conversations = [
+    { id: 'aaa111', href: '/c/aaa111', title: 'Alpha', slug: 'Alpha' },
+    { id: 'bbb222', href: '/c/bbb222', title: 'Beta', slug: 'Beta' },
+  ];
+  const harness = createPopupHarness(async (opts) => {
+    const source = String(opts.func || '');
+    if (source.includes('listSidebarConversations')) {
+      return [{ result: conversations }];
+    }
+    if (source.includes('extractConversationTitle')) {
+      return [{ result: { title: 'My Project', slug: 'My-Project' } }];
+    }
+    if (source.includes('waitForConversationReady')) {
+      return [{ result: { ready: true } }];
+    }
+    if (source.includes('getConversationMarkdown')) {
+      return [{ result: { ok: true, md: '# Alpha\n\nbody', slug: 'Alpha', lines: 2, words: 2 } }];
+    }
+    return [{ result: null }];
+  }, { batchMode: true });
+
+  await harness.click();
+
+  assert.match(harness.status.className, /success/, harness.status.textContent);
+  assert.match(harness.status.textContent, /Batch export complete: 2 saved/);
+  const zipDownload = harness.downloads().find((item) => item.filename.endsWith('.zip'));
+  assert.ok(zipDownload, 'batch must download a zip archive');
+  assert.match(zipDownload.filename, /My-Project-export--\d{8}-\d{4}\.zip$/);
 });

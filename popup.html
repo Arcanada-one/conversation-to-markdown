@@ -120,6 +120,20 @@
       line-height: 1.5;
       text-align: center;
     }
+
+    .batch-warning {
+      display: none;
+      margin-top: 12px;
+      font-size: 11px;
+      color: #c9a227;
+      line-height: 1.5;
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid #c9a22744;
+      background: #2a220d;
+    }
+
+    .batch-warning.visible { display: block; }
   </style>
 </head>
 <body>
@@ -144,10 +158,18 @@
     <span>Re-export with date-time stamp in filename</span>
   </label>
 
+  <label class="toggle">
+    <input type="checkbox" id="chk-batch" />
+    <span>Export all sidebar conversations (project batch)</span>
+  </label>
+
+  <p id="batch-warning" class="batch-warning">Keep this popup open until the batch finishes. Closing it cancels the run; restart to resume — already-exported conversations are skipped.</p>
+
   <div id="status"></div>
 
-  <p class="hint">Open a ChatGPT conversation,<br>then click the button.</p>
+  <p class="hint">Open a ChatGPT conversation or project,<br>then click the button.</p>
 
+  <script src="zip.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

@@ -254,26 +254,39 @@ function mdDownloadPath(convSlug, projectSlug, useTimestamp, stamp, convId) {
  *  forever and reported it as "already downloaded". Re-downloading costs
  *  bandwidth; a false skip silently loses a conversation, so the two directions
  *  are not equally bad. */
-function completionKeyForPath(downloadPath) {
+function completionKeyForPath(downloadPath, knownIds) {
   var normalized = String(downloadPath || '').replace(/\\/g, '/');
   var anchor = normalized.indexOf('chatgpt-export/');
   if (anchor > 0) normalized = normalized.slice(anchor);
   var segments = normalized.split('/').filter(Boolean);
   if (!segments.length) return '';
   var file = segments.pop();
-  // The batch appends `<slug>[--<stamp>][--<id>].md`, so fields come off the END
-  // one at a time. Splitting on the separator — rather than matching "id-shaped
+  // The batch appends `<slug>[--<stamp>][--<id>].md`, so fields come off the END one
+  // at a time. Splitting on the separator — rather than matching "id-shaped
   // characters at the end" — is what keeps a title that itself contains `--` from
   // being eaten: `-` is a legal id character, so a greedy pattern spans the
   // separator and strips part of the title.
+  //
+  // `knownIds` is required to strip an id field, and it is deliberately NOT
+  // optional in spirit: a trailing field is removed only when it is PROVEN to be a
+  // stamp or one of this run's ids. Stripping on shape alone made a file belonging
+  // to a conversation outside this run key as though it belonged to a live
+  // namesake, which skipped that namesake without it ever being saved.
   var stem = file.replace(/\.md$/i, '');
   var idField = trailingField(stem);
-  if (idField && !/^\d{8}-\d{4}$/.test(idField)) {
+  if (idField && knownIds && knownIds.has(idField)) {
     stem = stem.slice(0, stem.length - idField.length - 2);
-  }
-  var stampField = trailingField(stem);
-  if (/^\d{8}-\d{4}$/.test(stampField)) {
-    stem = stem.slice(0, stem.length - stampField.length - 2);
+    // Only now may a stamp come off: this name is KNOWN to be `slug[--stamp]--id`,
+    // so whatever precedes the id is the run's own stamp. Stripping a trailing
+    // stamp from a name whose id was NOT recognised would collapse
+    // `Budget--20260817-1200.md` onto the plain `Budget` key — and that name is
+    // genuinely ambiguous (a timestamped export from an older version, or an export
+    // whose conversation id merely looks like a stamp). Collapsing it made the file
+    // impersonate a plain export and excuse a different conversation entirely.
+    var stampField = trailingField(stem);
+    if (/^\d{8}-\d{4}$/.test(stampField)) {
+      stem = stem.slice(0, stem.length - stampField.length - 2);
+    }
   }
   var folder = segments.join('/').toLowerCase();
   return folder ? folder + '/' + stem : stem;
@@ -310,16 +323,22 @@ function pathCarriesConversationId(downloadPath, convId) {
   return trailingField(mdStem(downloadPath)) === String(convId);
 }
 
-/** True when a file's name carries ANY conversation id, i.e. it was written by a
- *  version that records them. Used only to tell such files apart from legacy ones;
- *  the id itself is matched by `pathCarriesConversationId`, never parsed here.
+/** True when a file's name carries the id of one of THESE conversations.
  *
- *  A date-time stamp occupies the same position when no id follows it, so it must
- *  not be mistaken for one. */
-function pathCarriesAnyConversationId(downloadPath) {
+ *  Classification is a test against the known ids, never a guess about the name's
+ *  shape. Sniffing the shape is what failed: ChatGPT ids are `[A-Za-z0-9-]+`, so an
+ *  id can look exactly like a date-time stamp, and `Budget--20260817-1200.md` was
+ *  filed as an older id-less export. A conversation sharing that title was then the
+ *  only claimant of the title key, so the ambiguity guard never fired and it was
+ *  skipped without ever being saved.
+ *
+ *  Every recurrence of that defect in this function family came from inferring
+ *  identity instead of testing it. The ids are right here; there is nothing to
+ *  infer. */
+function pathCarriesKnownConversationId(downloadPath, conversationIds) {
+  if (!conversationIds || !conversationIds.size) return false;
   var field = trailingField(mdStem(downloadPath));
-  if (!field) return false;
-  return !/^\d{8}-\d{4}$/.test(field);
+  return !!field && conversationIds.has(field);
 }
 
 /** Skip conversations whose markdown already landed in a prior partial run.
@@ -350,13 +369,18 @@ function filterPendingConversations(conversations, completedPaths, projectSlug) 
   // costs bandwidth; a false skip loses a conversation permanently and re-running
   // cannot repair it, so the two directions are not equally bad and ambiguity must
   // resolve to the cheap one.
+  var knownIds = new Set();
+  for (var k = 0; k < conversations.length; k++) {
+    if (conversations[k].id) knownIds.add(String(conversations[k].id));
+  }
+
   var legacyKeys = new Set();
   var idPaths = [];
   for (var i = 0; i < paths.length; i++) {
-    if (pathCarriesAnyConversationId(paths[i])) {
+    if (pathCarriesKnownConversationId(paths[i], knownIds)) {
       idPaths.push(paths[i]);
     } else {
-      var key = completionKeyForPath(paths[i]);
+      var key = completionKeyForPath(paths[i], knownIds);
       // A Set of KEYS, not a count of paths: `chrome.downloads.search` reports
       // history, so one file can appear under several absolute paths.
       if (key) legacyKeys.add(key);
@@ -385,6 +409,8 @@ function filterPendingConversations(conversations, completedPaths, projectSlug) 
 
 /** Build the completion key a conversation would have once exported. */
 function completionKeyForConversation(convSlug, projectSlug) {
+  // Built without a stamp or an id, so nothing needs stripping — the key of the
+  // plainest possible name for this conversation.
   return completionKeyForPath(conversationFolderPath(convSlug, projectSlug) + '/' + (convSlug || 'conversation') + '.md');
 }
 
@@ -1119,7 +1145,7 @@ if (typeof module !== 'undefined' && module.exports) {
     waitForDownloadComplete: waitForDownloadComplete,
     ZIP_WRITE_TIMEOUT_MS: ZIP_WRITE_TIMEOUT_MS,
     pathCarriesConversationId: pathCarriesConversationId,
-    pathCarriesAnyConversationId: pathCarriesAnyConversationId,
+    pathCarriesKnownConversationId: pathCarriesKnownConversationId,
     trailingField: trailingField,
     conversationFolderPath: conversationFolderPath,
     downloadOne: downloadOne,

@@ -591,3 +591,75 @@ so earns no legacy credit, meaning that conversation re-exports on every run. It
 fails toward bandwidth rather than loss. Not fixed, because distinguishing a title's
 `--` from the separator's `--` in a name written by a version that recorded no id is
 the same unknowable problem as above; recording it beats pretending it is handled.
+
+## Wave 3d — remove the last guess about identity
+
+A third fresh reviewer found a **fourth** instance of the same silent-loss defect,
+and named the design fault precisely: the routing layer still decided "does this
+name carry an id?" from the field's **shape**.
+
+ChatGPT ids match `[A-Za-z0-9-]+` (see the sidebar parser), so an id can look
+exactly like a date-time stamp. `Budget--20260817-1200.md` — a perfectly ordinary
+export whose conversation id happens to be stamp-shaped — was therefore filed as an
+older, id-less export. A different conversation sharing that title was then the only
+claimant of the title key, the round-3c ambiguity guard never fired, and it was
+skipped without ever being saved:
+
+```
+conversations:  [{ id: 'c8f21ab4', slug: 'Budget' }]
+on disk:        chatgpt-export/proj/Budget/Budget--20260817-1200.md
+pending = []                      want ['c8f21ab4']
+```
+
+The guard was sound; it was fed a poisoned bucket.
+
+### The rule now: test, never infer
+
+The candidate ids are known at filter time, so classification is a **test against
+them**: a path carries an id when its trailing field EQUALS one of this run's ids.
+`pathCarriesAnyConversationId` — the shape-sniffer — is gone.
+
+### A second defect, found in the first version of this very fix
+
+Testing against known ids alone moved the loss rather than removing it: a file
+belonging to a conversation **no longer in the run** (deleted from the project) has
+an unrecognised id, so it fell into the legacy bucket — and the key derivation
+*also* stripped fields on shape, collapsing it onto the plain title key where it
+excused a live namesake. Caught by probing the fix before committing it.
+
+So key derivation is gated on the same evidence: a trailing field is removed only
+when it is one of this run's ids, and a stamp comes off only **after** an id has
+been recognised — i.e. only once the name is known to be `slug--stamp--id`.
+Stripping a trailing stamp from an unrecognised name is precisely what let one file
+impersonate a plain export.
+
+### Mutations
+
+| # | Edit | Test that went red | EXIT |
+| --- | --- | --- | --- |
+| X | Classify by shape again. | `a file is classified by the ids in the run, not by how its name looks` | **1** |
+| Y | Strip a stamp even when the id was not recognised. | same | **1** |
+| Z | Strip an id field without checking `knownIds`. | same | **1** |
+
+**Mutant X survived its first run**, and that is the useful part. Reverting the
+classifier alone left all 108 tests green, because the key-derivation gate blocks the
+loss independently. The redundancy is welcome — but an untested branch is how the
+original guess survived four rounds, so each guard is now pinned on its own rather
+than only through its outcome.
+
+### Final adversarial battery — 16 cases, 0 false skips
+
+All four historical blockers, the risk this fix introduced, and eleven assorted
+shapes: 3-way namesakes with mixed file kinds, ids that are substrings of each other,
+a conversation id equal to another's slug, empty slugs, a path with no
+`chatgpt-export/` segment, a stamp-shaped slug, a `--` title, the same conversation
+listed twice, Windows separators, nothing-on-disk. Every ambiguity resolves to
+re-export. Safe-direction regressions hold: 40 legacy files with distinct titles give
+`pending = 0`, and a run's own timestamped file is recognised.
+
+### The pattern, for the record
+
+Four rounds, four instances, one cause: **inferring identity instead of testing it.**
+Each round fixed the arithmetic of the inference (set → count → ownership → shape)
+and the defect reappeared one layer down. It closed only when the inference was
+deleted — the ids were available the whole time.

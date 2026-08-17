@@ -107,15 +107,33 @@ test('resume matches the ABSOLUTE paths chrome.downloads.search really returns',
 test('resume survives a timestamped filename and Windows separators', () => {
   const popup = loadPopupExports();
 
-  // With the date-time stamp enabled the name carries the CURRENT run's stamp,
-  // so a file from a previous run can never match by name. Identity is the
-  // folder plus the stem, stamp stripped.
-  const run1 = popup.completionKeyForPath('/Downloads/chatgpt-export/proj/Chat/Chat--20260817-1000.md');
-  const run2 = popup.completionKeyForPath('C:\\Downloads\\chatgpt-export\\proj\\Chat\\Chat--20260817-1400.md');
+  // With the date-time stamp enabled the name carries the CURRENT run's stamp, so a
+  // file from a previous run can never match by name alone. Identity is the folder
+  // plus the stem, with the stamp stripped.
+  //
+  // The stamp comes off only once the ID has been recognised, i.e. once the name is
+  // known to be `slug--stamp--id`. Stripping a trailing stamp from a name whose id
+  // was NOT recognised would collapse `Chat--20260817-1000.md` onto the plain `Chat`
+  // key — but that name is genuinely ambiguous, since a conversation id may itself
+  // look like a stamp, and collapsing it let one file impersonate a plain export and
+  // excuse a different conversation. So both ids are supplied here, exactly as
+  // `filterPendingConversations` supplies them.
+  const ids = new Set(['abc123']);
+  const run1 = popup.completionKeyForPath(
+    '/Downloads/chatgpt-export/proj/Chat/Chat--20260817-1000--abc123.md', ids);
+  const run2 = popup.completionKeyForPath(
+    'C:\\Downloads\\chatgpt-export\\proj\\Chat\\Chat--20260817-1400--abc123.md', ids);
   const expected = popup.completionKeyForConversation('Chat', 'proj');
 
   assert.equal(run1, run2, 'two runs of the same conversation must share one key');
   assert.equal(run1, expected, 'the key must match what the batch will look up');
+
+  // An unstamped file from an older version still resolves to the same key, which is
+  // what keeps an upgrade from re-downloading an entire archive.
+  assert.equal(
+    popup.completionKeyForPath('/Downloads/chatgpt-export/proj/Chat/Chat.md', ids),
+    expected,
+  );
 });
 
 // A FALSE SKIP is the one resume failure that loses data permanently: the
@@ -222,6 +240,65 @@ test('a title containing a double dash does not corrupt the recovered id', () =>
     );
     assert.equal(pending.length, 0, slug + ' must be recognised as already exported');
   }
+});
+
+test('a file is classified by the ids in the run, not by how its name looks', () => {
+  const popup = loadPopupExports();
+
+  // ChatGPT ids are `[A-Za-z0-9-]+` (see the sidebar parser), so an id can look
+  // exactly like a date-time stamp. Deciding "does this name carry an id?" from the
+  // field's SHAPE therefore misfiled `Budget--20260817-1200.md` as an older,
+  // id-less export — and a different conversation sharing that title was then the
+  // only claimant of the title key, so the ambiguity guard never fired and it was
+  // skipped without ever being saved.
+  //
+  // The candidate ids are known at this point, so classification is a test against
+  // them rather than a guess about the name. This was the fourth recurrence of the
+  // same silent-loss class in this function family, every one traceable to a guess
+  // about identity.
+  const stampShapedId = '20260817-1200';
+  const ownerFile = '/Downloads/chatgpt-export/proj/Budget/Budget--' + stampShapedId + '.md';
+
+  const victim = popup.filterPendingConversations(
+    [{ id: 'c8f21ab4', slug: 'Budget' }],
+    new Set([ownerFile]),
+    'proj',
+  );
+  assert.deepEqual(
+    victim.map((c) => c.id),
+    ['c8f21ab4'],
+    'a conversation with no file of its own must never be skipped',
+  );
+
+  // The owner of that file must still be recognised, or the fix would just be
+  // "trust nothing" and every run would re-download it.
+  const owner = popup.filterPendingConversations(
+    [{ id: stampShapedId, slug: 'Budget' }],
+    new Set([ownerFile]),
+    'proj',
+  );
+  assert.equal(owner.length, 0, 'the conversation that owns the file must be skipped');
+
+  // Pin the CLASSIFIER itself, not only the outcome. Two independent guards now
+  // block this loss — classification and key derivation — so reverting either one
+  // alone leaves the suite green. That redundancy is welcome, but an untested branch
+  // is how the original guess survived four rounds, so each guard is pinned on its
+  // own.
+  assert.equal(
+    popup.pathCarriesKnownConversationId(ownerFile, new Set([stampShapedId])),
+    true,
+    'a stamp-shaped id that IS in the run must be recognised as an id',
+  );
+  assert.equal(
+    popup.pathCarriesKnownConversationId(ownerFile, new Set(['c8f21ab4'])),
+    false,
+    'a trailing field that is not one of this run\'s ids must not be treated as one',
+  );
+  assert.equal(
+    popup.pathCarriesKnownConversationId('/Downloads/chatgpt-export/proj/Chat/Chat.md', new Set(['abc'])),
+    false,
+    'a name with no trailing field carries no id',
+  );
 });
 
 test('a legacy file is not credited to a conversation whose own file already landed', () => {

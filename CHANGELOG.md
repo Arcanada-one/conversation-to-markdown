@@ -42,6 +42,12 @@ reported success while files were missing, truncated or unreadable.
   across its own separator, so with the stamp on — and for any title containing a
   double dash — the id came back wrong and every run re-downloaded the entire
   archive.
+- **A conversation whose id merely looks like a date is no longer mistaken for an
+  older export.** ChatGPT ids may consist of digits and dashes, so an id can be
+  shaped exactly like a timestamp; such a file was misread as coming from an earlier
+  version, and a different conversation sharing its title was then skipped without
+  ever being saved. Files are now matched against the ids of the conversations
+  actually being exported rather than by how their names look.
 - **A file written by an earlier version is trusted only when it is unambiguous.**
   Older exports carry no conversation id, so they can only be recognised by title —
   and when two conversations share that title, which one the file belongs to is
@@ -75,7 +81,7 @@ reported success while files were missing, truncated or unreadable.
 
 ### Verification
 
-See `MUTATION-EVIDENCE.md` § Wave 3, § Wave 3b and § Wave 3c. Each fix was mutated away and
+See `MUTATION-EVIDENCE.md` § Wave 3, § Wave 3b, § Wave 3c and § Wave 3d. Each fix was mutated away and
 the test written for it went red, with the exit code read from the test run itself.
 
 Wave 3b is worth reading on its own: the Wave 3 fix was handed to a fresh

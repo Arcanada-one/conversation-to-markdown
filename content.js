@@ -862,6 +862,13 @@ function slugifyTitle(title, maxLength) {
   const slug = String(title)
     .normalize('NFC')
     .replace(/[\\/:*?"<>|]+/g, ' ')
+    // `~` is reserved as the marker that introduces a conversation id in an export
+    // filename. Excluding it here is what makes the two name formats
+    // non-overlapping: a title can otherwise contain anything a separator or an id
+    // can contain, and a name written by an older version could then be read as a
+    // current one belonging to a different conversation. Removing the character from
+    // titles is cheap; the ambiguity it prevents cost a conversation.
+    .replace(/~+/g, '-')
     .replace(/[\s_]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, limit)

@@ -104,36 +104,33 @@ test('resume matches the ABSOLUTE paths chrome.downloads.search really returns',
   assert.equal(pending[0].slug, 'Second-chat');
 });
 
-test('resume survives a timestamped filename and Windows separators', () => {
+test('resume recognises its own stamped file, on either platform', () => {
   const popup = loadPopupExports();
 
-  // With the date-time stamp enabled the name carries the CURRENT run's stamp, so a
-  // file from a previous run can never match by name alone. Identity is the folder
-  // plus the stem, with the stamp stripped.
-  //
-  // The stamp comes off only once the ID has been recognised, i.e. once the name is
-  // known to be `slug--stamp--id`. Stripping a trailing stamp from a name whose id
-  // was NOT recognised would collapse `Chat--20260817-1000.md` onto the plain `Chat`
-  // key — but that name is genuinely ambiguous, since a conversation id may itself
-  // look like a stamp, and collapsing it let one file impersonate a plain export and
-  // excuse a different conversation. So both ids are supplied here, exactly as
-  // `filterPendingConversations` supplies them.
-  const ids = new Set(['abc123']);
-  const run1 = popup.completionKeyForPath(
-    '/Downloads/chatgpt-export/proj/Chat/Chat--20260817-1000--abc123.md', ids);
-  const run2 = popup.completionKeyForPath(
-    'C:\\Downloads\\chatgpt-export\\proj\\Chat\\Chat--20260817-1400--abc123.md', ids);
-  const expected = popup.completionKeyForConversation('Chat', 'proj');
+  // A stamp records when a past run happened, so a later run cannot reproduce it.
+  // Resume therefore collects the stamps present on disk and generates the names that
+  // could exist with them. Asserting the OUTCOME rather than an internal key means
+  // this test survives a change of mechanism — the previous version asserted a key
+  // shape and had to be rewritten when the mechanism changed, which is a sign it was
+  // testing the implementation.
+  const conv = { id: 'abc123', slug: 'Chat' };
+  const posix = '/Downloads/chatgpt-export/proj/Chat/' +
+    popup.batchMdFilename('Chat', 'abc123', true, '20260817-1000', false);
+  const windows = 'C:\\Downloads\\chatgpt-export\\proj\\Chat\\' +
+    popup.batchMdFilename('Chat', 'abc123', true, '20260817-1400', false);
 
-  assert.equal(run1, run2, 'two runs of the same conversation must share one key');
-  assert.equal(run1, expected, 'the key must match what the batch will look up');
-
-  // An unstamped file from an older version still resolves to the same key, which is
-  // what keeps an upgrade from re-downloading an entire archive.
   assert.equal(
-    popup.completionKeyForPath('/Downloads/chatgpt-export/proj/Chat/Chat.md', ids),
-    expected,
-  );
+    popup.filterPendingConversations([conv], new Set([posix]), 'proj').length, 0,
+    'a stamped file this conversation wrote must be recognised');
+  assert.equal(
+    popup.filterPendingConversations([conv], new Set([windows]), 'proj').length, 0,
+    'the same must hold for a Windows path');
+
+  // And an unstamped file from an older version, which is what keeps an upgrade from
+  // re-downloading an entire archive.
+  assert.equal(
+    popup.filterPendingConversations([conv],
+      new Set(['/Downloads/chatgpt-export/proj/Chat/Chat.md']), 'proj').length, 0);
 });
 
 // A FALSE SKIP is the one resume failure that loses data permanently: the
@@ -152,7 +149,8 @@ test('two conversations with the SAME title are both exported', () => {
     { id: 'bbbbbbbb-2222', slug: 'Untitled', title: 'Untitled' },
   ];
   const firstLanded = new Set([
-    '/Downloads/chatgpt-export/proj/Untitled/Untitled--aaaaaaaa-1111.md',
+    '/Downloads/chatgpt-export/proj/Untitled/' +
+      popup.batchMdFilename('Untitled', 'aaaaaaaa-1111', false, null, false),
   ]);
 
   const pending = popup.filterPendingConversations(conversations, firstLanded, 'proj');
@@ -172,7 +170,8 @@ test('conversations whose titles differ only by case are both exported', () => {
     { id: 'bbbbbbbb-2222', slug: 'budget' },
   ];
   const onlyFirstLanded = new Set([
-    '/Downloads/chatgpt-export/proj/Budget/Budget--aaaaaaaa-1111.md',
+    '/Downloads/chatgpt-export/proj/Budget/' +
+      popup.batchMdFilename('Budget', 'aaaaaaaa-1111', false, null, false),
   ]);
 
   const pending = popup.filterPendingConversations(conversations, onlyFirstLanded, 'proj');
@@ -190,7 +189,8 @@ test('a slug-less conversation does not skip every other slug-less one', () => {
     { id: 'cccccccc-3333', slug: '' },
   ];
   const firstLanded = new Set([
-    '/Downloads/chatgpt-export/proj/aaaaaaaa-1111/aaaaaaaa-1111--aaaaaaaa-1111.md',
+    '/Downloads/chatgpt-export/proj/aaaaaaaa-1111/' +
+      popup.batchMdFilename('aaaaaaaa-1111', 'aaaaaaaa-1111', false, null, false),
   ]);
 
   const pending = popup.filterPendingConversations(conversations, firstLanded, 'proj');
@@ -206,39 +206,87 @@ test('resume recognises its own file when the date-time stamp is enabled', () =>
   const popup = loadPopupExports();
 
   const id = '68a1f2c3-dead-beef-abcd';
-  const name = popup.batchMdFilename('Chat', id, true, '20260817-1830');
-  assert.ok(
-    popup.pathCarriesConversationId(name, id),
-    'the id must be recognised in ' + name + ' — a stamp sits between the slug and the id'
-  );
-
+  const name = popup.batchMdFilename('Chat', id, true, '20260817-1830', false);
   const pending = popup.filterPendingConversations(
     [{ id: id, slug: 'Chat' }],
     new Set(['/Downloads/chatgpt-export/proj/Chat/' + name]),
     'proj',
   );
-  assert.equal(pending.length, 0, 'a stamped file the run itself wrote must count as already exported');
+  assert.equal(pending.length, 0,
+    'a stamped file the run itself wrote must count as already exported: ' + name);
 });
 
-test('a title containing a double dash does not corrupt the recovered id', () => {
+test('a title containing a double dash does not confuse resume', () => {
   const popup = loadPopupExports();
 
-  // `--` is the separator, and it is also legal inside a slug: "Build -- v2"
-  // slugifies with the dashes intact. A parse that spans the separator captures
-  // part of the title as the id.
+  // `--` is legal inside a slug: `slugifyTitle` turns "Build -- v2" into `Build--v2`.
+  // Earlier schemes separated the id with `--` too, so a title could forge an id
+  // boundary. The id marker cannot appear in a slug, so this class is closed by
+  // construction — these cases pin it.
   const id = '68a1f2c3-dead-beef-abcd';
   for (const slug of ['Build--experimental-build', 'Chat--abc', 'A--1']) {
-    const name = popup.batchMdFilename(slug, id, false, null);
-    assert.ok(popup.pathCarriesConversationId(name, id), 'id recognised in ' + name);
-    // And it must not match a DIFFERENT id, or the check would be vacuous.
-    assert.ok(!popup.pathCarriesConversationId(name, 'ffffffff-0000-0000-0000'), 'no false match for ' + name);
+    const name = popup.batchMdFilename(slug, id, false, null, false);
+    const own = '/Downloads/chatgpt-export/proj/' + slug + '/' + name;
+    assert.equal(
+      popup.filterPendingConversations([{ id: id, slug: slug }], new Set([own]), 'proj').length,
+      0, slug + ' must be recognised as already exported');
+    // A different conversation must NOT be excused by that same file.
+    assert.equal(
+      popup.filterPendingConversations([{ id: 'other-id', slug: slug }], new Set([own]), 'proj').length,
+      1, 'a file naming another id must not excuse this conversation');
+  }
+});
 
-    const pending = popup.filterPendingConversations(
-      [{ id: id, slug: slug }],
-      new Set(['/Downloads/chatgpt-export/proj/' + slug + '/' + name]),
-      'proj',
+test('an older stamped export does not skip a conversation whose id looks like a stamp', () => {
+  const popup = loadPopupExports();
+
+  // `Chat--20260101-0900.md` written by an older version is an id-LESS stamped export
+  // of the title "Chat". It is also, character for character, what a conversation
+  // whose id is `20260101-0900` would have been named under the previous scheme. One
+  // conversation generating that name is the sole claimant, so no ambiguity guard can
+  // fire, and the file — belonging to a different conversation entirely — skipped it.
+  //
+  // Blocklisting stamp-shaped ids would have been a sixth guess in a row. The cause
+  // is that the two name formats shared an alphabet, so the current format now
+  // carries a marker no title can contain (see `ID_MARKER`) and the two spaces cannot
+  // overlap at all.
+  const olderStampedExport = '/Downloads/chatgpt-export/proj/Chat/Chat--20260101-0900.md';
+  const conv = { id: '20260101-0900', slug: 'Chat' };
+
+  const pending = popup.filterPendingConversations([conv], new Set([olderStampedExport]), 'proj');
+  assert.deepEqual(
+    pending.map((c) => c.id),
+    ['20260101-0900'],
+    'a conversation with no file of its own must never be skipped',
+  );
+
+  // Positive control: that conversation's OWN file must still be recognised, or the
+  // fix has degenerated into "trust nothing".
+  const ownFile = '/Downloads/chatgpt-export/proj/Chat/' +
+    popup.batchMdFilename('Chat', '20260101-0900', false, null, false);
+  assert.equal(
+    popup.filterPendingConversations([conv], new Set([ownFile]), 'proj').length,
+    0,
+    'the conversation must be skipped once its own file exists',
+  );
+});
+
+test('no title can forge the marker that introduces a conversation id', () => {
+  const parser = require('../content.js');
+
+  // The invariant the design now rests on: a slug cannot contain the id marker, so a
+  // name written by an older version can never be mistaken for a current one. Without
+  // this, every guard downstream is guessing again.
+  const hostile = ['a~b', '~x', 'id~', 'a~~b', 'Chat~~20260101-0900', '~~', '~'];
+  for (const title of hostile) {
+    const slug = parser.slugifyTitle(title);
+    if (slug === null) continue;
+    assert.doesNotMatch(
+      slug,
+      /~/,
+      'slug ' + JSON.stringify(slug) + ' from title ' + JSON.stringify(title) +
+        ' contains the id marker and could forge an id boundary',
     );
-    assert.equal(pending.length, 0, slug + ' must be recognised as already exported');
   }
 });
 
@@ -271,61 +319,30 @@ test('a title ending in another conversation id does not skip that conversation'
   );
 });
 
-test('a file is classified by the ids in the run, not by how its name looks', () => {
+test('an id-bearing name and an older name cannot be confused', () => {
   const popup = loadPopupExports();
 
-  // ChatGPT ids are `[A-Za-z0-9-]+` (see the sidebar parser), so an id can look
-  // exactly like a date-time stamp. Deciding "does this name carry an id?" from the
-  // field's SHAPE therefore misfiled `Budget--20260817-1200.md` as an older,
-  // id-less export — and a different conversation sharing that title was then the
-  // only claimant of the title key, so the ambiguity guard never fired and it was
-  // skipped without ever being saved.
-  //
-  // The candidate ids are known at this point, so classification is a test against
-  // them rather than a guess about the name. This was the fourth recurrence of the
-  // same silent-loss class in this function family, every one traceable to a guess
-  // about identity.
+  // The invariant: the current format carries a marker no slug may contain, so the
+  // two name spaces are disjoint. Before it, a stamp-shaped id made
+  // `Budget--20260817-1200.md` mean two different things and a conversation was
+  // skipped though it had never been saved.
   const stampShapedId = '20260817-1200';
-  const ownerFile = '/Downloads/chatgpt-export/proj/Budget/Budget--' + stampShapedId + '.md';
+  const current = popup.batchMdFilename('Budget', stampShapedId, false, null, false);
+  const older = 'Budget--' + stampShapedId + '.md';
 
-  const victim = popup.filterPendingConversations(
-    [{ id: 'c8f21ab4', slug: 'Budget' }],
-    new Set([ownerFile]),
-    'proj',
-  );
-  assert.deepEqual(
-    victim.map((c) => c.id),
-    ['c8f21ab4'],
-    'a conversation with no file of its own must never be skipped',
-  );
+  assert.notEqual(current, older, 'the two formats must not produce the same name');
+  assert.ok(current.includes(popup.ID_MARKER), 'the current format must carry the marker');
+  assert.ok(!older.includes(popup.ID_MARKER), 'an older name cannot contain the marker');
 
-  // The owner of that file must still be recognised, or the fix would just be
-  // "trust nothing" and every run would re-download it.
-  const owner = popup.filterPendingConversations(
-    [{ id: stampShapedId, slug: 'Budget' }],
-    new Set([ownerFile]),
-    'proj',
-  );
-  assert.equal(owner.length, 0, 'the conversation that owns the file must be skipped');
-
-  // Pin the MECHANISM, not only the outcome: names are GENERATED from each
-  // conversation and matched, so nothing about an unrecognised name is inferred.
-  const owned = popup.candidateExportNames({ id: stampShapedId, slug: 'Budget' }, 'proj', []).owned;
-  assert.ok(
-    owned.includes('chatgpt-export/proj/budget/budget--' + stampShapedId),
-    'the owner must generate the exact name it would have written; got ' + JSON.stringify(owned),
-  );
-
-  // The victim must not generate that name, whatever stamps exist on disk. This is
-  // the assertion that would have caught the defect: a stamped legacy candidate is
-  // indistinguishable from an id-bearing name, so it is never generated.
-  const victimNames = popup.candidateExportNames(
-    { id: 'c8f21ab4', slug: 'Budget' }, 'proj', [stampShapedId]);
-  assert.ok(
-    !victimNames.owned.concat(victimNames.legacy)
-      .includes('chatgpt-export/proj/budget/budget--' + stampShapedId),
-    'no conversation may generate a name that another conversation owns',
-  );
+  const conv = { id: stampShapedId, slug: 'Budget' };
+  assert.equal(
+    popup.filterPendingConversations([conv],
+      new Set(['/Downloads/chatgpt-export/proj/Budget/' + older]), 'proj').length,
+    1, 'an older stamped export must not excuse a stamp-shaped-id conversation');
+  assert.equal(
+    popup.filterPendingConversations([conv],
+      new Set(['/Downloads/chatgpt-export/proj/Budget/' + current]), 'proj').length,
+    0, 'its own file must still be recognised');
 });
 
 test('a legacy file is not credited to a conversation whose own file already landed', () => {
@@ -337,7 +354,8 @@ test('a legacy file is not credited to a conversation whose own file already lan
   // legacy file, leaving that credit to be spent by ID2 — a conversation that
   // never landed, skipped and reported as already exported.
   const completed = new Set([
-    '/Downloads/chatgpt-export/proj/Budget/Budget--ID1.md',
+    '/Downloads/chatgpt-export/proj/Budget/' +
+      popup.batchMdFilename('Budget', 'ID1', false, null, false),
     '/Downloads/chatgpt-export/proj/Budget/Budget.md',
   ]);
   const sameTitle = [{ id: 'ID1', slug: 'Budget' }, { id: 'ID2', slug: 'Budget' }];

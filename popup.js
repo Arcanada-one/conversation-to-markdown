@@ -172,6 +172,16 @@ function artifactFilename(url, label, index, slug, kind) {
   return prefix + stem + '_' + counter + '.' + ext;
 }
 
+/** Marker introducing the conversation id in a batch export filename.
+ *
+ *  `slugifyTitle` strips this character from every title, so a slug can never contain
+ *  it. That makes the current name format (`slug[--stamp]~id`) and the older,
+ *  id-less format (`slug[--stamp]`) structurally NON-OVERLAPPING: no name written by
+ *  an older version can be read as a current one. Every earlier scheme separated the
+ *  id with `--`, which a title may legally contain, and each of the resulting five
+ *  defects skipped a conversation that had never been saved. */
+var ID_MARKER = '~';
+
 /** Format a date as YYYYMMDD-HHMM for timestamped re-exports. */
 function formatExportTimestamp(date) {
   var d = date || new Date();
@@ -224,7 +234,12 @@ function batchMdFilename(convSlug, convId, useTimestamp, stamp, isPartial) {
   if (isPartial) base += '-partial';
   var parts = base;
   if (useTimestamp) parts += '--' + (stamp || formatExportTimestamp());
-  if (convId) parts += '--' + convId;
+  // The id is introduced by a marker `slugifyTitle` removes from every title, so no
+  // title can forge an id boundary. That is the invariant the whole resume mechanism
+  // rests on: without it the current and older name formats share an alphabet, and a
+  // stamped older export is character-for-character a valid current name belonging to
+  // some other conversation — which silently skipped that conversation.
+  if (convId) parts += ID_MARKER + convId;
   return parts + '.md';
 }
 
@@ -234,69 +249,6 @@ function mdDownloadPath(convSlug, projectSlug, useTimestamp, stamp, convId) {
   return conversationFolderPath(convSlug, projectSlug) + '/' + mdName;
 }
 
-/** Reduce a download path to the part that identifies a conversation export.
- *
- *  Two things made the naive comparison always fail, and both are why a
- *  restarted export used to re-download everything:
- *
- *  1. `chrome.downloads.search` reports an ABSOLUTE path
- *     (a full path under the user's Downloads folder), while the batch
- *     builds a RELATIVE one (`chatgpt-export/proj/Chat/Chat.md`). Comparing the
- *     two forms is a guaranteed miss, and a fixture that feeds relative paths
- *     back models a Chrome that does not exist.
- *  2. With the date-time stamp enabled the filename carries the CURRENT run's
- *     stamp, so a file from a previous run could never match by name.
- *
- *  So identity is the conversation FOLDER plus the stem, with any `--<stamp>`
- *  suffix and any leading directories above `chatgpt-export/` removed.
- *
- *  CASE IS SPLIT DELIBERATELY. The directories are compared case-INSENSITIVELY
- *  because on macOS and Windows `Budget/` and `budget/` are the SAME directory,
- *  so folding them is what the filesystem actually does. The STEM keeps its
- *  original case, because `slugifyTitle` does not lower-case and two distinct
- *  ChatGPT conversations may differ only by case. Folding the stem too made them
- *  share one key, so interrupting a run after `Budget` exported but before
- *  `budget` did — the exact situation resume exists for — skipped `budget`
- *  forever and reported it as "already downloaded". Re-downloading costs
- *  bandwidth; a false skip silently loses a conversation, so the two directions
- *  are not equally bad. */
-function completionKeyForPath(downloadPath, knownIds) {
-  var normalized = String(downloadPath || '').replace(/\\/g, '/');
-  var anchor = normalized.indexOf('chatgpt-export/');
-  if (anchor > 0) normalized = normalized.slice(anchor);
-  var segments = normalized.split('/').filter(Boolean);
-  if (!segments.length) return '';
-  var file = segments.pop();
-  // The batch appends `<slug>[--<stamp>][--<id>].md`, so fields come off the END one
-  // at a time. Splitting on the separator — rather than matching "id-shaped
-  // characters at the end" — is what keeps a title that itself contains `--` from
-  // being eaten: `-` is a legal id character, so a greedy pattern spans the
-  // separator and strips part of the title.
-  //
-  // `knownIds` is required to strip an id field, and it is deliberately NOT
-  // optional in spirit: a trailing field is removed only when it is PROVEN to be a
-  // stamp or one of this run's ids. Stripping on shape alone made a file belonging
-  // to a conversation outside this run key as though it belonged to a live
-  // namesake, which skipped that namesake without it ever being saved.
-  var stem = file.replace(/\.md$/i, '');
-  var idField = trailingField(stem);
-  if (idField && knownIds && knownIds.has(idField)) {
-    stem = stem.slice(0, stem.length - idField.length - 2);
-    // Only now may a stamp come off: this name is KNOWN to be `slug[--stamp]--id`,
-    // so whatever precedes the id is the run's own stamp. Stripping a trailing
-    // stamp from a name whose id was NOT recognised would collapse
-    // `Budget--20260817-1200.md` onto the plain `Budget` key — and that name is
-    // genuinely ambiguous (a timestamped export from an older version, or an export
-    // whose conversation id merely looks like a stamp). Collapsing it made the file
-    // impersonate a plain export and excuse a different conversation entirely.
-    var stampField = trailingField(stem);
-    if (/^\d{8}-\d{4}$/.test(stampField)) {
-      stem = stem.slice(0, stem.length - stampField.length - 2);
-    }
-  }
-  var folder = segments.join('/').toLowerCase();
-  return folder ? folder + '/' + stem : stem;
-}
 
 /** The trailing `--`-delimited field of a filename stem, or ''.
  *
@@ -317,17 +269,6 @@ function mdStem(downloadPath) {
   return file.replace(/\.md$/i, '');
 }
 
-/** Does this downloaded file belong to this conversation id?
- *
- *  Asked rather than answered: resume already knows the candidate ids, so testing
- *  a known id against the name is exact, whereas EXTRACTING an unknown id from an
- *  ambiguous name is guesswork. That guesswork is what broke — with the date-time
- *  stamp enabled the name is `slug--STAMP--id`, and a title may itself contain
- *  `--`, so no single pattern can tell the fields apart reliably. */
-function pathCarriesConversationId(downloadPath, convId) {
-  if (!convId) return false;
-  return trailingField(mdStem(downloadPath)) === String(convId);
-}
 
 /** The conversation folder a download path sits in, relative to the export root.
  *  Folds to lower case because macOS and Windows treat `Budget/` and `budget/` as
@@ -362,9 +303,9 @@ function candidateExportNames(conv, projectSlug, stamps) {
 
   if (conv.id) {
     var id = String(conv.id).toLowerCase();
-    owned.push(prefix + '--' + id);
+    owned.push(prefix + ID_MARKER + id);
     for (var s = 0; s < list.length; s++) {
-      owned.push(prefix + '--' + list[s] + '--' + id);
+      owned.push(prefix + '--' + list[s] + ID_MARKER + id);
     }
   }
   // A STAMPED legacy name is deliberately NOT generated. `slug--20260817-1200` is
@@ -386,31 +327,16 @@ function candidateExportNames(conv, projectSlug, stamps) {
 function stampsInPaths(paths) {
   var stamps = new Set();
   for (var i = 0; i < paths.length; i++) {
-    var fields = mdStem(paths[i]).split('--');
-    for (var f = 1; f < fields.length; f++) {
+    // Split on the id marker as well as the separator: in `slug--<stamp>~<id>` the
+    // stamp is followed by the marker, not by another separator.
+    var fields = mdStem(paths[i]).split(/--|~/);
+    for (var f = 0; f < fields.length; f++) {
       if (/^\d{8}-\d{4}$/.test(fields[f])) stamps.add(fields[f]);
     }
   }
   return Array.from(stamps);
 }
 
-/** True when a file's name carries the id of one of THESE conversations.
- *
- *  Classification is a test against the known ids, never a guess about the name's
- *  shape. Sniffing the shape is what failed: ChatGPT ids are `[A-Za-z0-9-]+`, so an
- *  id can look exactly like a date-time stamp, and `Budget--20260817-1200.md` was
- *  filed as an older id-less export. A conversation sharing that title was then the
- *  only claimant of the title key, so the ambiguity guard never fired and it was
- *  skipped without ever being saved.
- *
- *  Every recurrence of that defect in this function family came from inferring
- *  identity instead of testing it. The ids are right here; there is nothing to
- *  infer. */
-function pathCarriesKnownConversationId(downloadPath, conversationIds) {
-  if (!conversationIds || !conversationIds.size) return false;
-  var field = trailingField(mdStem(downloadPath));
-  return !!field && conversationIds.has(field);
-}
 
 /** Skip conversations whose markdown already landed in a prior partial run.
  *
@@ -489,12 +415,6 @@ function filterPendingConversations(conversations, completedPaths, projectSlug) 
   });
 }
 
-/** Build the completion key a conversation would have once exported. */
-function completionKeyForConversation(convSlug, projectSlug) {
-  // Built without a stamp or an id, so nothing needs stripping — the key of the
-  // plainest possible name for this conversation.
-  return completionKeyForPath(conversationFolderPath(convSlug, projectSlug) + '/' + (convSlug || 'conversation') + '.md');
-}
 
 /** Classify a per-conversation failure so the run can react instead of
  *  burning through the remaining list.
@@ -1226,7 +1146,7 @@ if (typeof module !== 'undefined' && module.exports) {
     bytesToDownloadUrl: bytesToDownloadUrl,
     waitForDownloadComplete: waitForDownloadComplete,
     ZIP_WRITE_TIMEOUT_MS: ZIP_WRITE_TIMEOUT_MS,
-    pathCarriesConversationId: pathCarriesConversationId,
+    ID_MARKER: ID_MARKER,
     candidateExportNames: candidateExportNames,
     conversationFolderFromPath: conversationFolderFromPath,
     mdStem: mdStem,
@@ -1235,8 +1155,6 @@ if (typeof module !== 'undefined' && module.exports) {
     conversationFolderPath: conversationFolderPath,
     downloadOne: downloadOne,
     filterPendingConversations: filterPendingConversations,
-    completionKeyForPath: completionKeyForPath,
-    completionKeyForConversation: completionKeyForConversation,
     classifyBatchFailure: classifyBatchFailure,
     backoffDelayMs: backoffDelayMs,
     waitWhilePaused: waitWhilePaused,

@@ -42,6 +42,10 @@ reported success while files were missing, truncated or unreadable.
   across its own separator, so with the stamp on — and for any title containing a
   double dash — the id came back wrong and every run re-downloaded the entire
   archive.
+- **A `~` in a conversation title becomes `-` in the saved filename.** The character
+  now marks where the conversation identifier begins, so a filename written by this
+  version can never be confused with one written by an earlier version — which is what
+  made resume skip conversations it had never saved.
 - **Resume no longer guesses which conversation a file belongs to.** It reconstructs
   the exact names each conversation would have written and looks for those. Reading a
   name to work out its owner failed in several ways, all with the same consequence —
@@ -92,7 +96,7 @@ reported success while files were missing, truncated or unreadable.
 
 ### Verification
 
-See `MUTATION-EVIDENCE.md` § Wave 3 and § Wave 3b through § Wave 3e. Each fix was mutated away and
+See `MUTATION-EVIDENCE.md` § Wave 3 and § Wave 3b through § Wave 3f. Each fix was mutated away and
 the test written for it went red, with the exit code read from the test run itself.
 
 Wave 3b is worth reading on its own: the Wave 3 fix was handed to a fresh

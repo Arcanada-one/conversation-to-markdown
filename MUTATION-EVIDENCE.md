@@ -747,3 +747,92 @@ and nothing else, so the incompleteness now lives in the NAME
   (including two both titled "Untitled"), run 2 exports 0 and skips 3, and deleting
   exactly one file re-exports exactly that one.
 - Upgrade path at scale: 40 older files with distinct titles, `pending = 0`.
+
+## Wave 3f — make the two name formats structurally disjoint
+
+A fifth reviewer found a **sixth** instance, and it exposed that Wave 3e enforced its
+own central rule in only one of the two places it mattered.
+
+3e said: never generate `slug--<stamp>`, because that string is simultaneously "an
+older stamped export of `slug`" and "an export of the conversation whose id is
+stamp-shaped". The rule was applied when building *legacy* candidates — and quietly
+violated when building *owned* ones, because `prefix + '--' + id` rebuilds the
+identical string whenever the id is itself stamp-shaped. One conversation generating it
+is the sole claimant, so no ambiguity guard could fire:
+
+```
+on disk (older version): chatgpt-export/proj/Chat/Chat--20260101-0900.md
+run:                     [{ id: '20260101-0900', slug: 'Chat' }]
+pending = []             -> skipped, never written, success reported
+```
+
+### Why this was fixed differently
+
+The reviewer's own suggestion — suppress the bare form when the id is stamp-shaped —
+would have been the **sixth inference in a row**, and the recurrence itself is the
+evidence that another guess is the wrong move. The actual cause is upstream of every
+guard: the current name format and the older one **shared an alphabet**, so a name from
+one could always be read as a name from the other.
+
+So the alphabets are now separated. The id is introduced by `~` (`ID_MARKER`), and
+`slugifyTitle` strips that character from every title. A slug therefore cannot contain
+it, and `slug[--stamp]~id` can never be produced by the older `slug[--stamp]` format.
+The two spaces are disjoint **by construction** rather than by a test that has to be
+right.
+
+Removing a character from titles is a real cost, paid once and visibly. The ambiguity
+it removes cost a conversation, five times.
+
+### Dead code deleted rather than left to rot
+
+`completionKeyForPath`, `completionKeyForConversation`, `pathCarriesConversationId`
+and `pathCarriesKnownConversationId` — about 5.7 KB — were relics of the four earlier
+designs. Nothing on the live path called them, yet they were still exported and still
+tested, so the suite was pinning behaviour the product no longer had. Every one of the
+six defects lived in exactly that kind of parsing helper.
+
+Four tests that exercised them were **rewritten against observable behaviour** rather
+than deleted: they now assert that a file is or is not recognised, not what an internal
+key looks like. One of them had to be rewritten precisely because it asserted a key
+shape — a sign it was testing the implementation.
+
+Hand-written `--<id>` filenames in five fixtures were replaced with calls to
+`batchMdFilename`. A fixture that duplicates the format silently rots when the format
+changes, which is what happened here: seven tests failed on a name-format change that
+was entirely intentional.
+
+### Mutations
+
+| # | Edit | Test that went red | EXIT |
+| --- | --- | --- | --- |
+| DD | `slugifyTitle` stops stripping the marker. | `no title can forge the marker that introduces a conversation id` | **1** |
+| EE | Separate the id with `--` again, so the formats overlap. | `resume recognises its own stamped file, on either platform` (+1) | **1** |
+| FF | Stamp harvester ignores the marker. | `resume recognises its own file when the date-time stamp is enabled` (+1) | **1** |
+
+### Verified: 29 adversarial cases, 0 false skips
+
+All six historical blockers; marker-specific attacks (a title that contained a tilde,
+an id containing a tilde, an id equal to another conversation's slug, a slug equal to
+another's `slug~id`); three-way namesakes with mixed file kinds; ids that are
+substrings of each other; case-only-different ids; empty/numeric/`__proto__` slugs and
+ids; 60-character truncation collisions; no `chatgpt-export` anchor; foreign-project
+and deleted-conversation rows; Windows separators; `.MD`; a duplicate listing;
+partial-vs-complete in both directions including a conversation legitimately titled
+"Draft-partial"; stamped files of the owner and of another conversation; the 40-file
+upgrade path; idempotence and non-mutation of the caller's inputs.
+
+**One flagged case was my probe's error, not the code's**, and is recorded because the
+distinction matters: `Budget---draft.md` genuinely belongs to the conversation whose
+slug *is* `Budget---draft`, so skipping that one is correct. The property that matters
+— the unrelated conversation whose id is `-draft` stays pending — holds.
+
+Two-run end-to-end through `runBatchExport`, stamp ON and OFF: run 1 exports 3
+(including two both titled "Untitled"), run 2 exports 0 and skips 3, and deleting
+exactly one file re-exports exactly that one.
+
+### The whole arc, in one line
+
+Six defects, one cause: **a name is not evidence of who wrote it unless the format
+makes it so.** Five rounds tried to read the name more cleverly. The sixth made the
+formats unable to collide, and the guards downstream became simple because they no
+longer had anything to guess.

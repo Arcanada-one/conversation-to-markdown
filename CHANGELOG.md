@@ -19,9 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Batch zip archive.** A minimal STORE-method zip writer bundles every
   exported folder into one `.zip` at the end of a batch run.
 
+### Changed
+
+- **Attachments keep their own filename.** A document offered in a conversation
+  as `report.pdf` or `Договор.docx` is saved under that name (behind an index,
+  e.g. `Chat-001-report.pdf`) instead of an anonymous `file_001.pdf`. Names are
+  sanitized for the Downloads folder, and a compound extension such as
+  `.tar.gz` is no longer truncated to `.gz`. Images keep the numbered scheme,
+  because an image label is alt text rather than a filename.
+
 ### Verification
 
-See `MUTATION-EVIDENCE.md` § Wave 2b.
+See `MUTATION-EVIDENCE.md` § Wave 2b and § Wave 2c.
 
 ## [1.3.0] — 2026-08-17
 

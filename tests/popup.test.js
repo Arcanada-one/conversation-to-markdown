@@ -225,6 +225,57 @@ test('writes a partial export to the clipboard instead of showing an error', asy
   assert.equal(harness.button.disabled, false);
 });
 
+test('keeps the original document name and a compound extension', () => {
+  const popup = loadPopupExports();
+
+  // A document is worth its own name on disk; `file_001.docx` throws away the
+  // one piece of information the user recognises.
+  assert.equal(
+    popup.artifactFilename('https://files.oaiusercontent.com/file-synth-abc/x', 'Договор.docx', 0, 'Chat', 'file'),
+    'Chat-001-Договор.docx',
+  );
+
+  // `.tar.gz` truncated to `.gz` misstates what the file is.
+  assert.equal(
+    popup.artifactFilename('https://files.oaiusercontent.com/file-synth-abc/archive.tar.gz', '', 1, 'Chat', 'file'),
+    'Chat-002-archive.tar.gz',
+  );
+
+  // No usable name anywhere -> a numbered stub, never an empty or extensionless name.
+  assert.equal(
+    popup.artifactFilename('https://files.oaiusercontent.com/file-synth-abc/opaque', '', 2, 'Chat', 'file'),
+    'Chat-file_003.bin',
+  );
+
+  // Images keep the numbered scheme: their label is alt text, not a filename.
+  assert.equal(
+    popup.artifactFilename('https://files.oaiusercontent.com/file-synth-abc/pic.png', 'a chart of sales', 3, 'Chat', 'image'),
+    'Chat-image_004.png',
+  );
+});
+
+test('never lets an attachment name escape the export folder', () => {
+  const popup = loadPopupExports();
+
+  // A label is page-controlled text. Path separators and traversal must not
+  // survive into a chrome.downloads filename.
+  const escaped = popup.artifactFilename(
+    'https://files.oaiusercontent.com/file-synth-abc/x',
+    '../../etc/passwd.txt',
+    0,
+    'Chat',
+    'file',
+  );
+  // The invariant that matters is that no PATH SEPARATOR survives: `..` with no
+  // slash is just characters in a filename and cannot leave the folder.
+  assert.doesNotMatch(escaped, /[\\/]/);
+  assert.match(escaped, /\.txt$/);
+
+  assert.equal(popup.sanitizeFilenamePart('a/b\\c.txt'), 'a-b-c.txt');
+  assert.equal(popup.sanitizeFilenamePart('...'), '');
+  assert.equal(popup.sanitizeFilenamePart('re<port>:"1".pdf'), 'report1.pdf');
+});
+
 test('sets conflictAction explicitly so Chrome does not uniquify to (1).md', async () => {
   const md = '# Title\n\nbody';
   const harness = createPopupHarness(async () => [{
@@ -372,11 +423,11 @@ test('downloads non-image attachment files alongside images', async () => {
   const paths = harness.downloads().map((d) => d.filename);
   assert.deepEqual(paths, [
     'chatgpt-export/Export/Export-image_001.png',
-    'chatgpt-export/Export/Export-file_002.pdf',
+    'chatgpt-export/Export/Export-002-report.pdf',
     'chatgpt-export/Export/Export.md',
   ]);
   assert.match(harness.clipboardValue(), /!\[chart\]\(\.\/Export-image_001\.png\)/);
-  assert.match(harness.clipboardValue(), /\[report\.pdf\]\(\.\/Export-file_002\.pdf\)/);
+  assert.match(harness.clipboardValue(), /\[report\.pdf\]\(\.\/Export-002-report\.pdf\)/);
   assert.match(harness.status.textContent, /Files: 2\/2 downloaded/);
 });
 

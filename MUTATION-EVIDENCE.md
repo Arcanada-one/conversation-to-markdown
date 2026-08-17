@@ -211,3 +211,62 @@ Baseline before mutations: **78 pass, 0 fail, EXIT=0**.
 | `nav a[href^="/c/"]` | Project sidebar conversation list in `listSidebarConversations` |
 | `aria-label` / `.truncate` on sidebar links | Conversation titles (shared with `titleFromSidebarLink`) |
 | `[data-turn-id]` / `[data-message-author-role]` | `waitForConversationReady` content gate |
+
+## Wave 2c — attachment filenames
+
+Operator question, 2026-08-17: "there can be archives, PDFs, Word documents —
+we should be able to download all of that, right?" Answer measured on the real
+code rather than reasoned about: yes. Downloadability is gated by HOST
+(`isDownloadableFileUrl`, popup.js) — `files.oaiusercontent.com` plus the
+`/files/` and `/estuary/` paths on chatgpt.com — and never by file type, so PDF,
+ZIP, DOCX, XLSX, PPTX and CSV all pass by construction; bytes move as
+`application/octet-stream`. Probing the shipped function confirmed each type,
+including a Cyrillic name, and confirmed that a URL on an unrelated host is
+correctly refused.
+
+Two real defects surfaced from that probe, both fixed here.
+
+**(1) The original filename was thrown away.** The link label — which for a
+document IS its filename — was used only to extract an extension, so
+`Договор.docx` landed as `Chat-file_001.docx`. In a batch export of many
+conversations every attachment became an indistinguishable numbered stub. Now a
+document keeps its own name behind the index (`Chat-001-Договор.docx`), while
+images stay numbered because their label is alt text, not a filename.
+
+**(2) `archive.tar.gz` became `.gz`**, misstating what the file is. Fixed as a
+by-product of (1): the stem now keeps everything before the last dot, so the
+compound extension recombines intact.
+
+### A. Original document name preserved
+
+| Field | Value |
+| --- | --- |
+| **Edit** | In `artifactFilename`, delete the `if (originalStem) { return prefix + counter + '-' + originalStem + '.' + ext; }` branch so every artifact falls back to the numbered stub. |
+| **Tests that went red** | `keeps the original document name and a compound extension`; `downloads non-image attachment files alongside images` |
+| **EXIT** | **1** |
+
+### B. Path separators cannot survive into a download filename
+
+| Field | Value |
+| --- | --- |
+| **Edit** | In `sanitizeFilenamePart`, remove the `.replace(/[\\/]+/g, '-')` step. |
+| **Test that went red** | `never lets an attachment name escape the export folder` |
+| **EXIT** | **1** |
+
+A label is page-controlled text, so this is a real boundary rather than a
+formality. Note the invariant the test asserts is that no PATH SEPARATOR
+survives — not that the string contains no `..`. An earlier draft of the test
+demanded the stricter thing and failed against `Chat-001--..-etc-passwd.txt`,
+which is harmless: `..` with no slash is just characters in a filename. The test
+was corrected to assert what actually matters instead of being weakened.
+
+### Removed rather than left untestable: compound-extension special case
+
+The first fix carried an explicit `(?:\.(?:tar|user))?` branch in
+`splitFilenameExtension`. Mutating it away left the full suite GREEN
+(**EXIT=0**), and direct probing showed why: with the original stem preserved,
+`archive.tar` + `.gz` recombines to `archive.tar.gz` either way, and on the image
+path the stem is discarded so only the extension whitelist applies. The branch
+changed no observable output on any reachable path, so it was DELETED rather than
+kept with a test written to fit it. A surviving mutant is a claim about the code,
+not only about the tests: here the honest reading was dead complexity.

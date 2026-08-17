@@ -80,25 +80,74 @@ function imageFilename(url, alt, index, slug) {
   return artifactFilename(url, alt, index, slug, 'image');
 }
 
-/** Derive a filename from an artifact URL or label text. */
+/** Sanitize one path segment for the Downloads folder: no separators, no
+ *  traversal, no reserved characters. Returns '' when nothing usable remains. */
+function sanitizeFilenamePart(value) {
+  if (!value) return '';
+  var cleaned = String(value)
+    .replace(/[\\/]+/g, '-')
+    .replace(/[\x00-\x1f<>:"|?*]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^\.+/, '')
+    .replace(/\.+$/, '');
+  return cleaned.slice(0, 80);
+}
+
+/** Split a filename into stem and extension.
+ *
+ *  A compound extension such as `.tar.gz` needs no special case here: the stem
+ *  keeps everything before the LAST dot, so `archive.tar` + `.gz` recombines to
+ *  `archive.tar.gz` unchanged. An earlier version carried an explicit
+ *  `(?:\.(?:tar|user))?` branch; a mutation proved it changed no observable
+ *  output, so it was removed rather than left as untestable complexity. */
+function splitFilenameExtension(name) {
+  var match = String(name || '').match(/^(.*?)(\.[A-Za-z0-9]{1,8})$/);
+  if (!match) return { stem: String(name || ''), ext: '' };
+  return { stem: match[1], ext: match[2].toLowerCase() };
+}
+
+/** Derive a filename from an artifact URL or label text.
+ *
+ *  Documents keep their ORIGINAL name when the link carries one: a Word file
+ *  offered as `Договор.docx` is worth more on disk under that name than as
+ *  `file_003.docx`, and a batch export of many conversations is unreadable
+ *  when every attachment is a numbered stub. Images stay numbered — their
+ *  labels are alt text, not filenames — and any name collision is still
+ *  disambiguated by the index prefix. */
 function artifactFilename(url, label, index, slug, kind) {
   var ext = kind === 'image' ? 'png' : 'bin';
-  var labelMatch = label && label.match(/\.([A-Za-z0-9]{1,8})(?:\?|$)/);
-  if (labelMatch) {
-    ext = labelMatch[1].toLowerCase();
+  var originalStem = '';
+
+  var fromLabel = splitFilenameExtension(sanitizeFilenamePart(label));
+  if (fromLabel.ext) {
+    ext = fromLabel.ext.replace(/^\./, '');
+    originalStem = fromLabel.stem;
   } else {
     try {
-      var pathMatch = new URL(url).pathname.match(/\.([A-Za-z0-9]{1,8})(?:\?|$)/i);
-      if (pathMatch) ext = pathMatch[1].toLowerCase();
+      var segments = new URL(url).pathname.split('/');
+      var last = sanitizeFilenamePart(decodeURIComponent(segments[segments.length - 1] || ''));
+      var fromPath = splitFilenameExtension(last);
+      if (fromPath.ext) {
+        ext = fromPath.ext.replace(/^\./, '');
+        originalStem = fromPath.stem;
+      }
     } catch (_e) {}
   }
+
   if (kind === 'image') {
     ext = ext.replace(/^jpe?g$/i, 'jpg');
     if (!/^(png|jpg|gif|webp|svg|bmp)$/i.test(ext)) ext = 'png';
+    originalStem = '';
   }
+
   var prefix = slug ? slug + '-' : '';
+  var counter = String(index + 1).padStart(3, '0');
+  if (originalStem) {
+    return prefix + counter + '-' + originalStem + '.' + ext;
+  }
   var stem = kind === 'image' ? 'image' : 'file';
-  return prefix + stem + '_' + String(index + 1).padStart(3, '0') + '.' + ext;
+  return prefix + stem + '_' + counter + '.' + ext;
 }
 
 /** Format a date as YYYYMMDD-HHMM for timestamped re-exports. */
@@ -617,6 +666,8 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     addZipEntry: addZipEntry,
     artifactFilename: artifactFilename,
+    sanitizeFilenamePart: sanitizeFilenamePart,
+    splitFilenameExtension: splitFilenameExtension,
     batchRootPath: batchRootPath,
     buildMdFilename: buildMdFilename,
     conversationFolderPath: conversationFolderPath,

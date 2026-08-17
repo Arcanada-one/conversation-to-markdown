@@ -40,12 +40,14 @@ function createPopupHarness(runScan, options = {}) {
   };
   // The image checkbox only exists when a test opts into the download path.
   const checkbox = options.downloadImages ? { checked: true } : null;
+  const timestampCheckbox = { checked: !!options.useTimestamp };
   const context = {
     document: {
       getElementById: (id) => {
         if (id === 'btn-copy') return button;
         if (id === 'btn-cancel') return cancelButton;
         if (id === 'chk-images') return checkbox;
+        if (id === 'chk-timestamp') return timestampCheckbox;
         return status;
       },
     },
@@ -138,17 +140,45 @@ test('waits for asynchronous scanning before writing Markdown to the clipboard',
   assert.equal(harness.button.textContent, 'Copy as Markdown');
 });
 
-test('shows an incomplete-scan error without touching the clipboard', async () => {
+test('writes a partial export to the clipboard instead of showing an error', async () => {
+  const md = '> **Partial export** — scan was stopped before reaching the end.\n\n# partial body';
   const harness = createPopupHarness(async () => [{
-    result: { ok: false, error: 'Conversation scan is incomplete.' },
+    result: { ok: true, md, partial: true, partialReason: 'cancelled', lines: 2, words: 3 },
   }]);
 
   await harness.click();
 
-  assert.equal(harness.clipboardValue(), null);
-  assert.equal(harness.status.className, 'error');
-  assert.equal(harness.status.textContent, 'Conversation scan is incomplete.');
+  assert.equal(harness.clipboardValue(), md);
+  assert.equal(harness.status.className, 'success');
+  assert.match(harness.status.textContent, /partial export/);
   assert.equal(harness.button.disabled, false);
+});
+
+test('sets conflictAction explicitly so Chrome does not uniquify to (1).md', async () => {
+  const md = '# Title\n\nbody';
+  const harness = createPopupHarness(async () => [{
+    result: { ok: true, md, title: 'Title', slug: 'Title', lines: 2, words: 1 },
+  }], { downloadImages: true, extracted: [] });
+
+  await harness.click();
+
+  const mdDownload = harness.downloads().find((d) => d.filename.endsWith('.md'));
+  assert.ok(mdDownload, 'must download the markdown file');
+  assert.equal(mdDownload.conflictAction, 'overwrite');
+  assert.equal(mdDownload.filename, 'chatgpt-export/Title/Title.md');
+});
+
+test('timestamp checkbox produces a stamped filename for re-export', async () => {
+  const md = '# chat\n\nbody';
+  const harness = createPopupHarness(async () => [{
+    result: { ok: true, md, title: 'chat', slug: 'chat', lines: 2, words: 1 },
+  }], { downloadImages: true, useTimestamp: true, extracted: [] });
+
+  await harness.click();
+
+  const mdDownload = harness.downloads().find((d) => d.filename.endsWith('.md'));
+  assert.match(mdDownload.filename, /chatgpt-export\/chat\/chat--\d{8}-\d{4}\.md$/);
+  assert.equal(mdDownload.conflictAction, 'overwrite');
 });
 
 test('prefixes downloaded image names with the conversation slug', async () => {

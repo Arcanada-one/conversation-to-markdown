@@ -221,46 +221,56 @@ test('elapsed time alone never ends a healthy scan', async () => {
   );
 });
 
-test('a stalled scan still fails, and does not return partial turns', async () => {
-  // The counterpart to the test above: removing the deadline must not remove
-  // the ability to detect a genuinely stuck scan. Here nothing ever moves and
-  // no new turn appears, so the no-progress guard must fire.
-  const container = createVirtualizedFixture([[{ turnId: 'u1', markdown: 'partial' }]], 12);
-  let steps = 0;
+test('a stalled scan returns partial turns with a notice in the artifact', async () => {
+  // When a scan genuinely stalls mid-conversation, whatever was captured must
+  // survive — never silently discarded. The partial notice lives in the markdown
+  // itself, not only in the popup.
+  const container = createVirtualizedFixture([
+    [{ turnId: 'u1', markdown: 'partial' }],
+    [{ turnId: 'u2', markdown: 'never reached' }],
+  ], 12);
+  const scanMeta = {};
 
-  await assert.rejects(
-    parser.scanTurns(container, {
-      readSections: () => [],
-      extractTurn: (turn) => turn,
-      settle: async () => {},
-      scrollTo: async () => { steps += 1; },
-      noProgressSteps: 5,
-    }),
-    /stopped making progress/
-  );
-  assert.ok(steps < 30, 'the stall is caught quickly, not after a long budget');
+  const turns = await parser.scanTurns(container, {
+    readSections: (target) => target.querySelectorAll('[data-turn-id]'),
+    extractTurn: (turn) => turn,
+    settle: async () => {},
+    scrollTo: async () => {},
+    noProgressSteps: 5,
+    scanMeta: scanMeta,
+  });
+
+  assert.deepEqual(turns.map((turn) => turn.turnId), ['u1']);
+  assert.equal(scanMeta.partial, true);
+  assert.equal(scanMeta.reason, 'stall');
   assert.equal(container.scrollTop, 12);
+  const md = parser.prefixPartialNotice(parser.buildConversationMarkdown(turns), scanMeta.reason);
+  assert.match(md, />\s*\*\*Partial export\*\*/);
 });
 
-test('the operator can cancel a scan at any point', async () => {
-  // Cancellation is the deliberate replacement for the deadline: the operator
-  // decides when a long job is too long, the code does not decide for them.
+test('the operator can cancel a scan and keep whatever was captured', async () => {
+  // Cancellation must not destroy turns already held in memory — the operator
+  // stopped the scan, they did not ask to discard it.
   const pages = [];
   for (let i = 1; i <= 40; i += 1) {
     pages.push([{ turnId: 't' + i, order: i, role: 'user', markdown: 'turn ' + i }]);
   }
   const container = createVirtualizedFixture(pages, 5);
   let steps = 0;
+  const scanMeta = {};
 
-  await assert.rejects(
-    parser.scanTurns(container, {
-      readSections: (target) => target.querySelectorAll('[data-turn-id]'),
-      extractTurn: (turn) => turn,
-      settle: async () => {},
-      isCancelled: () => { steps += 1; return steps > 3; },
-    }),
-    /cancelled/
-  );
+  const turns = await parser.scanTurns(container, {
+    readSections: (target) => target.querySelectorAll('[data-turn-id]'),
+    extractTurn: (turn) => turn,
+    settle: async () => {},
+    isCancelled: () => { steps += 1; return steps > 3; },
+    scanMeta: scanMeta,
+  });
+
+  assert.ok(turns.length > 0, 'cancelled scan must return captured turns');
+  assert.ok(turns.length < 40, 'cancelled scan must not claim completeness');
+  assert.equal(scanMeta.partial, true);
+  assert.equal(scanMeta.reason, 'cancelled');
   assert.equal(container.scrollTop, 5, 'a cancelled scan still restores the page');
 });
 
@@ -1002,6 +1012,12 @@ test('one never-resolving turn does not cost the rest of a long conversation', a
   assert.equal(turns.some((t) => t.turnId === 't23'), true, 'the scan must reach the final turn');
   assert.equal(turns.some((t) => t.turnId === 'straggler'), false, 'the bad turn is the only casualty');
   assert.ok(turns.length >= 20, `the conversation survives one bad turn (got ${turns.length})`);
+});
+
+test('prefixPartialNotice labels the markdown artifact itself', () => {
+  const md = parser.prefixPartialNotice('#### You said:\n\nHi', 'cancelled');
+  assert.match(md, />\s*\*\*Partial export\*\* — scan was stopped before reaching the end\./);
+  assert.match(md, /#### You said:/);
 });
 
 test('an assistant turn without the author-role wrapper is still captured', async () => {

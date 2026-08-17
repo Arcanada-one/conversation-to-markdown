@@ -2,6 +2,7 @@ const btn = document.getElementById('btn-copy');
 const btnCancel = document.getElementById('btn-cancel');
 const status = document.getElementById('status');
 const chkImages = document.getElementById('chk-images');
+const chkTimestamp = document.getElementById('chk-timestamp');
 
 // Id of the tab currently being scanned, so Stop knows where to send the flag.
 var scanningTabId = null;
@@ -56,8 +57,22 @@ function imageFilename(url, alt, index, slug) {
   return prefix + 'image_' + String(index + 1).padStart(3, '0') + '.' + ext;
 }
 
+/** Format a date as YYYYMMDD-HHMM for timestamped re-exports. */
+function formatExportTimestamp(date) {
+  var d = date || new Date();
+  var pad = function(n) { return String(n).padStart(2, '0'); };
+  return String(d.getFullYear()) + pad(d.getMonth() + 1) + pad(d.getDate()) +
+    '-' + pad(d.getHours()) + pad(d.getMinutes());
+}
+
+/** Build the .md filename; timestamp suffix implements re-export without uniquify suffixes. */
+function buildMdFilename(slug, useTimestamp, now) {
+  var base = slug || 'conversation';
+  return useTimestamp ? base + '--' + formatExportTimestamp(now) + '.md' : base + '.md';
+}
+
 /** Download one file via chrome.downloads. Returns {url, filename, ok, error}. */
-function downloadOne(url, filename, targetPath, timeoutMs) {
+function downloadOne(url, filename, targetPath, timeoutMs, conflictAction) {
   return new Promise(function(resolve) {
     var settled = false;
     var timer = setTimeout(function() {
@@ -67,6 +82,7 @@ function downloadOne(url, filename, targetPath, timeoutMs) {
       url: url,
       filename: targetPath || ('chatgpt-export/' + filename),
       saveAs: false,
+      conflictAction: conflictAction || 'overwrite',
     }, function(downloadId) {
       if (settled) return;
       settled = true;
@@ -168,9 +184,11 @@ btn.addEventListener('click', async () => {
 
     let md = result.md;
     const downloadImages = chkImages && chkImages.checked;
+    const useTimestamp = chkTimestamp && chkTimestamp.checked;
     // Conversation title drives both the .md filename and its export folder.
     const slug = result.slug || null;
-    const mdName = (slug || 'conversation') + '.md';
+    const mdName = buildMdFilename(slug, useTimestamp);
+    const partialSuffix = result.partial ? ' (partial export)' : '';
 
     if (downloadImages && typeof chrome.downloads !== 'undefined') {
       // Fetch images via content script (has host_permissions for CDN CORS bypass).
@@ -214,7 +232,7 @@ btn.addEventListener('click', async () => {
 
       // Save .md with local paths for successfully extracted images
       var mdFinal = dlOk > 0 ? mdChanged : md;
-      downloadOne(
+      await downloadOne(
         'data:text/markdown;charset=utf-8,' + encodeURIComponent(mdFinal),
         mdName,
         exportPath(slug, mdName)
@@ -222,18 +240,18 @@ btn.addEventListener('click', async () => {
 
       if (dlOk > 0) {
         showStatus('success',
-          '✓ Copied! ' + result.lines + ' lines · ' + result.words + ' words\n' +
+          '✓ Copied!' + partialSuffix + ' ' + result.lines + ' lines · ' + result.words + ' words\n' +
           'Images: ' + dlOk + '/' + refs.length + ' downloaded + ' + mdName
         );
       } else if (refs.length > 0) {
         var hint = dlErrors.length > 0 ? ' (' + dlErrors[0] + ')' : '';
         showStatus('success',
-          '✓ Copied! ' + result.lines + ' lines · ' + result.words + ' words\n' +
+          '✓ Copied!' + partialSuffix + ' ' + result.lines + ' lines · ' + result.words + ' words\n' +
           'Images: 0/' + refs.length + ' fetched' + hint + ' — original URLs kept in .md'
         );
       } else {
         showStatus('success',
-          '✓ Copied! ' + result.lines + ' lines · ' + result.words + ' words\n' +
+          '✓ Copied!' + partialSuffix + ' ' + result.lines + ' lines · ' + result.words + ' words\n' +
           mdName + ' saved'
         );
       }
@@ -248,7 +266,7 @@ btn.addEventListener('click', async () => {
 
     showStatus(
       'success',
-      '✓ Copied! ' + result.lines + ' lines · ' + result.words + ' words'
+      '✓ Copied!' + partialSuffix + ' ' + result.lines + ' lines · ' + result.words + ' words'
     );
   } catch (err) {
     showStatus('error', err.message || String(err));
@@ -260,3 +278,12 @@ btn.addEventListener('click', async () => {
     btn.textContent = 'Copy as Markdown';
   }
 });
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    buildMdFilename: buildMdFilename,
+    formatExportTimestamp: formatExportTimestamp,
+    exportPath: exportPath,
+    downloadOne: downloadOne,
+  };
+}

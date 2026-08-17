@@ -501,6 +501,22 @@ function nextScrollTop(container, atBottom) {
   return Math.min(container.scrollTop + increment, container.scrollHeight - container.clientHeight);
 }
 
+/** Record that a scan ended before reaching a stable bottom. */
+function markPartialScan(settings, reason) {
+  if (settings.scanMeta) {
+    settings.scanMeta.partial = true;
+    settings.scanMeta.reason = reason;
+  }
+}
+
+/** Prefix markdown with a visible partial-export notice — must live in the artifact itself. */
+function prefixPartialNotice(md, reason) {
+  var detail = reason === 'cancelled'
+    ? 'scan was stopped before reaching the end'
+    : 'scan did not reach the end (' + reason + ')';
+  return '> **Partial export** — ' + detail + '.\n\n' + md;
+}
+
 async function scanTurns(container, options) {
   const settings = createScanSettings(options);
   const originalScrollTop = container.scrollTop;
@@ -532,7 +548,8 @@ async function scanTurns(container, options) {
     await settings.settle(container);
     for (let step = 0; settings.maxSteps === 0 || step < settings.maxSteps; step += 1) {
       if (settings.isCancelled()) {
-        throw new Error('Conversation scan cancelled.');
+        markPartialScan(settings, 'cancelled');
+        return orderCapturedTurns(seen);
       }
       const observation = captureMountedTurns(settings.readSections(container), settings, seen, state);
       const atBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 1;
@@ -557,7 +574,8 @@ async function scanTurns(container, options) {
           stepsSinceProgress = 0;
         }
         if (stepsSinceProgress >= settings.noProgressSteps && !atBottom) {
-          throw new Error('Conversation scan stopped making progress before reaching the end.');
+          markPartialScan(settings, 'stall');
+          return orderCapturedTurns(seen);
         }
       }
 
@@ -587,6 +605,12 @@ async function scanTurns(container, options) {
     // Only reachable when a test supplies maxSteps; production leaves it 0 and
     // the loop above is bounded solely by stability, stall, or cancellation.
     throw new Error('Conversation scan exceeded its step limit before reaching a stable bottom.');
+  } catch (error) {
+    if (seen.size > 0) {
+      markPartialScan(settings, error.message || String(error));
+      return orderCapturedTurns(seen);
+    }
+    throw error;
   } finally {
     await settings.scrollTo(container, originalScrollTop, 'auto');
   }
@@ -677,6 +701,7 @@ async function getConversationMarkdown() {
   try {
     const firstSection = document.querySelector('[data-turn-id]');
     let md;
+    var scanMeta = null;
     if (!firstSection) {
       md = extractConversationLegacy();
     } else {
@@ -687,11 +712,13 @@ async function getConversationMarkdown() {
       // flag it can set and read with a separate one-liner injection. Guarded
       // because this function is also exercised outside a browser window.
       const scanState = { cancelled: false, captured: 0, observed: 0, elapsedMs: 0 };
+      scanMeta = {};
       if (typeof window !== 'undefined') window.__c2mScan = scanState;
       const turns = await scanTurns(container, {
         readSections: function() { return document.querySelectorAll('[data-turn-id]'); },
         extractTurn: extractTurn,
         isCancelled: function() { return scanState.cancelled === true; },
+        scanMeta: scanMeta,
         onProgress: function(p) {
           scanState.captured = p.captured;
           scanState.observed = p.observed;
@@ -699,6 +726,7 @@ async function getConversationMarkdown() {
         },
       });
       md = buildConversationMarkdown(turns);
+      if (scanMeta.partial) md = prefixPartialNotice(md, scanMeta.reason);
     }
     if (!md) return { ok: false, error: 'No conversation found on this page.' };
     const title = extractConversationTitle();
@@ -706,6 +734,8 @@ async function getConversationMarkdown() {
     return {
       ok: true,
       md: md,
+      partial: !!scanMeta && scanMeta.partial === true,
+      partialReason: scanMeta && scanMeta.reason ? scanMeta.reason : null,
       title: title,
       slug: slugifyTitle(title),
       lines: md.split('\n').length,
@@ -753,6 +783,7 @@ if (typeof module !== 'undefined' && module.exports) {
     nodeToMarkdown: nodeToMarkdown,
     orderCapturedTurns: orderCapturedTurns,
     parseTurnOrder: parseTurnOrder,
+    prefixPartialNotice: prefixPartialNotice,
     scanTurns: scanTurns,
   };
 }

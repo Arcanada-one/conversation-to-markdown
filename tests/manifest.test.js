@@ -29,7 +29,7 @@ test('manifest declares version 1.1.8 and a complete icon set', () => {
     128: 'icons/icon128.png',
   };
 
-  assert.equal(manifest.version, '1.1.8');
+  assert.equal(manifest.version, '1.2.0');
   assert.deepEqual(manifest.icons, expectedIcons);
   assert.deepEqual(manifest.action.default_icon, expectedIcons);
 

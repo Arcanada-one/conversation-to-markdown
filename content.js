@@ -415,6 +415,7 @@ function createScanSettings(options) {
     // Optional operator cancellation. Returning true aborts at the next step
     // boundary; the scan is never cut off by anything else.
     isCancelled: supplied.isCancelled || function() { return false; },
+    scanMeta: supplied.scanMeta || null,
     // Optional progress reporting, so a long scan is visibly alive.
     onProgress: supplied.onProgress || null,
     // Test-only escape hatch. Production never sets this: a step ceiling is a
@@ -604,13 +605,11 @@ async function scanTurns(container, options) {
     }
     // Only reachable when a test supplies maxSteps; production leaves it 0 and
     // the loop above is bounded solely by stability, stall, or cancellation.
-    throw new Error('Conversation scan exceeded its step limit before reaching a stable bottom.');
-  } catch (error) {
     if (seen.size > 0) {
-      markPartialScan(settings, error.message || String(error));
+      markPartialScan(settings, 'step limit');
       return orderCapturedTurns(seen);
     }
-    throw error;
+    throw new Error('Conversation scan exceeded its step limit before reaching a stable bottom.');
   } finally {
     await settings.scrollTo(container, originalScrollTop, 'auto');
   }

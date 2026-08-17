@@ -21,7 +21,7 @@ function readPngDimensions(filePath) {
   };
 }
 
-test('manifest declares version 1.1.8 and a complete icon set', () => {
+test('manifest declares version 1.2.0 and a complete icon set', () => {
   const expectedIcons = {
     16: 'icons/icon16.png',
     32: 'icons/icon32.png',

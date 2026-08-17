@@ -248,6 +248,32 @@ test('a stalled scan returns partial turns with a notice in the artifact', async
   assert.match(md, />\s*\*\*Partial export\*\*/);
 });
 
+test('an unexpected scan error propagates even when turns were captured', async () => {
+  const container = createVirtualizedFixture([
+    [{ turnId: 'u1', markdown: 'captured' }],
+    [{ turnId: 'u2', markdown: 'boom' }],
+  ], 0);
+  const scanMeta = {};
+  let capturedBeforeThrow = false;
+
+  await assert.rejects(
+    () => parser.scanTurns(container, {
+      readSections: (target) => target.querySelectorAll('[data-turn-id]'),
+      extractTurn: (turn) => {
+        if (turn.turnId === 'u1') capturedBeforeThrow = true;
+        if (turn.turnId === 'u2') throw new TypeError('extractor bug');
+        return turn;
+      },
+      settle: async () => {},
+      scanMeta: scanMeta,
+      noProgressSteps: 1000,
+    }),
+    /extractor bug/
+  );
+  assert.equal(capturedBeforeThrow, true);
+  assert.notEqual(scanMeta.partial, true);
+});
+
 test('the operator can cancel a scan and keep whatever was captured', async () => {
   // Cancellation must not destroy turns already held in memory — the operator
   // stopped the scan, they did not ask to discard it.
@@ -343,21 +369,23 @@ test('still times out when a reachable scroll target is never approached', async
       return [turn];
     },
   };
+  const scanMeta = {};
 
   try {
     global.requestAnimationFrame = (callback) => setImmediate(callback);
     Date.now = () => { clock += 500; return clock; };
 
-    await assert.rejects(
-      parser.scanTurns(container, {
-        extractTurn: (candidate) => candidate,
-        settle: async () => {},
-        stablePasses: 2,
-        maxSteps: 10,
-        timeoutMs: 120000,
-      }),
-      /Conversation scan exceeded its step limit before reaching a stable bottom/
-    );
+    const turns = await parser.scanTurns(container, {
+      extractTurn: (candidate) => candidate,
+      settle: async () => {},
+      stablePasses: 2,
+      maxSteps: 10,
+      timeoutMs: 120000,
+      scanMeta: scanMeta,
+    });
+    assert.equal(turns.length, 1);
+    assert.equal(scanMeta.partial, true);
+    assert.match(scanMeta.reason, /step limit/);
   } finally {
     global.requestAnimationFrame = previousAnimationFrame;
     Date.now = previousNow;

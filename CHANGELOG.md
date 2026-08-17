@@ -96,7 +96,7 @@ reported success while files were missing, truncated or unreadable.
 
 ### Verification
 
-See `MUTATION-EVIDENCE.md` § Wave 3 and § Wave 3b through § Wave 3f. Each fix was mutated away and
+See `MUTATION-EVIDENCE.md` § Wave 3 and § Wave 3b through § Wave 3g. Each fix was mutated away and
 the test written for it went red, with the exit code read from the test run itself.
 
 Wave 3b is worth reading on its own: the Wave 3 fix was handed to a fresh

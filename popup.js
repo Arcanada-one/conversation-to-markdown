@@ -182,6 +182,18 @@ function artifactFilename(url, label, index, slug, kind) {
  *  defects skipped a conversation that had never been saved. */
 var ID_MARKER = '~';
 
+/** Case-fold a candidate key up to the id marker, leaving the id itself untouched.
+ *
+ *  Two different rules for two different jobs: the path part must follow the
+ *  filesystem (macOS and Windows treat `Budget/` and `budget/` as one directory), while
+ *  the id must be compared exactly, because it is what makes a name attributable to
+ *  one conversation. Both sides of the comparison call this, so they cannot drift. */
+function foldExceptId(key) {
+  var at = String(key).indexOf(ID_MARKER);
+  if (at < 0) return String(key).toLowerCase();
+  return String(key).slice(0, at).toLowerCase() + String(key).slice(at);
+}
+
 /** Format a date as YYYYMMDD-HHMM for timestamped re-exports. */
 function formatExportTimestamp(date) {
   var d = date || new Date();
@@ -250,17 +262,6 @@ function mdDownloadPath(convSlug, projectSlug, useTimestamp, stamp, convId) {
 }
 
 
-/** The trailing `--`-delimited field of a filename stem, or ''.
- *
- *  `--` is the separator the batch appends with, but it is ALSO legal inside a
- *  slug: `slugifyTitle` turns "Build -- v2" into `Build--v2`. So the field is
- *  taken by splitting on the separator and reading the LAST part — a regex that
- *  matches "8+ id characters at the end" spans the separator, because `-` is an
- *  id character, and captures part of the title instead. */
-function trailingField(stem) {
-  var parts = String(stem || '').split('--');
-  return parts.length > 1 ? parts[parts.length - 1] : '';
-}
 
 /** Filename stem with the `.md` extension removed. */
 function mdStem(downloadPath) {
@@ -302,7 +303,14 @@ function candidateExportNames(conv, projectSlug, stamps) {
   var list = stamps || [];
 
   if (conv.id) {
-    var id = String(conv.id).toLowerCase();
+    // The id keeps its case. Folder and slug are folded because macOS and Windows
+    // fold them — that follows the filesystem. The id is different in kind: it is the
+    // one field the whole design relies on to be unforgeable, and folding it would
+    // collapse two distinct identities onto one name, so a conversation could be
+    // excused by a file belonging to another. Not reachable while ChatGPT ids are
+    // lowercase hex, but "this name can only mean one thing" is the assumption that
+    // produced every silent-loss defect in this file's history.
+    var id = String(conv.id);
     owned.push(prefix + ID_MARKER + id);
     for (var s = 0; s < list.length; s++) {
       owned.push(prefix + '--' + list[s] + ID_MARKER + id);
@@ -374,11 +382,13 @@ function filterPendingConversations(conversations, completedPaths, projectSlug) 
   var landed = new Set();
   for (var i = 0; i < paths.length; i++) {
     var name = mdStem(paths[i]);
-    // Keyed with the conversation folder so a name is only credited inside the
-    // folder it belongs to, and folded to match the filesystem's own case rules on
-    // macOS and Windows.
+    // Keyed with the conversation folder so a name is only credited inside the folder
+    // it belongs to. Everything up to the id marker is folded, matching the
+    // filesystem's own case rules on macOS and Windows; the id after the marker keeps
+    // its case, because it identifies the conversation rather than the file's place on
+    // disk. See `candidateExportNames`, which must fold exactly the same way.
     var folder = conversationFolderFromPath(paths[i]);
-    if (name) landed.add((folder + '/' + name).toLowerCase());
+    if (name) landed.add(foldExceptId(folder + '/' + name));
   }
 
   // How many conversations would generate each legacy name.
@@ -1147,11 +1157,11 @@ if (typeof module !== 'undefined' && module.exports) {
     waitForDownloadComplete: waitForDownloadComplete,
     ZIP_WRITE_TIMEOUT_MS: ZIP_WRITE_TIMEOUT_MS,
     ID_MARKER: ID_MARKER,
+    foldExceptId: foldExceptId,
     candidateExportNames: candidateExportNames,
     conversationFolderFromPath: conversationFolderFromPath,
     mdStem: mdStem,
     stampsInPaths: stampsInPaths,
-    trailingField: trailingField,
     conversationFolderPath: conversationFolderPath,
     downloadOne: downloadOne,
     filterPendingConversations: filterPendingConversations,

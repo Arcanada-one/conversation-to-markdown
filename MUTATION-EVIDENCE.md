@@ -836,3 +836,74 @@ Six defects, one cause: **a name is not evidence of who wrote it unless the form
 makes it so.** Five rounds tried to read the name more cleverly. The sixth made the
 formats unable to collide, and the guards downstream became simple because they no
 longer had anything to guess.
+
+## Wave 3g — the first clean verdict, and two things fixed anyway
+
+The sixth review round returned **ship**. It could not construct a false skip: a brute
+force over 41,472 two-conversation worlds and 1,645,920 three-conversation worlds —
+including foreign-project, stale and deleted-conversation history rows — found none.
+
+The important part is that the instrument was proven able to fail. The reviewer's first
+sweep came back green against a mutant that reintroduced the stamped-legacy defect,
+because the probe always placed a file's true writer in the run. Rebuilt with explicit
+ground truth (the writer may be absent), five mutants went red. **A green sweep from a
+probe that cannot fail is not evidence** — the same lesson as the pipe-swallowed exit
+code earlier in this file.
+
+It also verified the marker invariant at its source, and independently confirmed what
+was checked here: NFC does not fold any of the tilde look-alikes (U+FF5E, U+301C,
+U+223C, U+02DC, U+0303), the 60-character truncation runs after the strip, no other
+replacement can emit the marker, the project slug uses the same function, and the
+sidebar id regex `[A-Za-z0-9-]+` excludes the marker too.
+
+### Two non-blocking findings, fixed rather than filed
+
+**The conversation id was case-folded** (`popup.js`, `candidateExportNames`). Folder and
+slug are folded because macOS and Windows fold them — that follows the filesystem and is
+right. Folding the **id** collapses two identities onto one name, so a conversation could
+be excused by a file belonging to another:
+
+```
+on disk: chatgpt-export/proj/Chat/Chat~68a1b2c3-dead-beef-abcd.md
+run:     [{ id: '68A1B2C3-DEAD-BEEF-ABCD', slug: 'Chat' }]
+pending = []   -> never written, skipped, success reported
+```
+
+Not reachable today — ChatGPT ids are lowercase hex — which is why the verdict was still
+"ship". Fixed anyway, because "this name can only mean one thing" is the exact assumption
+that produced six consecutive silent-loss defects, and it sat one upstream change away
+from being live. `foldExceptId` now folds only up to the marker, and both sides of the
+comparison call it so they cannot drift.
+
+**`trailingField` was dead** — a name-*parsing* helper left exported after the redesign
+removed the last caller. Deleted. Wave 3f removed four such relics and missed the fifth;
+leaving a parsing primitive exported on a code path that just won its safety by refusing
+to parse is an invitation.
+
+### A test of my own that pinned nothing
+
+The first version of the normalisation test asserted that NFC does not fold the fullwidth
+tilde. Swapping `normalize('NFC')` for `'NFKC'` left it **green** — because the assertion
+was a fact about Unicode, not a property of this code. `slugifyTitle` normalises *first*
+and strips the marker *after*, so any tilde a normalisation form produces is then removed;
+the NFKC swap is genuinely harmless and its survival is correct.
+
+Rewritten to pin the **ordering**, which is what can actually break. Moving the strip
+before normalisation now goes red.
+
+### Mutations
+
+| # | Edit | Test that went red | EXIT |
+| --- | --- | --- | --- |
+| GG | Fold the id again. | `an id differing only in case does not excuse a conversation` (+1) | **1** |
+| HH | Fold the whole landed key again. | `a legacy file is not credited to a conversation whose own file already landed` | **1** |
+| II | `NFC` → `NFKC`. | none — **correctly survives**, see above | 0 |
+| JJ | Strip the marker BEFORE normalising. | `normalisation cannot smuggle the id marker past the strip` | **1** |
+
+114 tests, all green. The 29-case battery, the invariant sweep and the two-run
+end-to-end (stamp ON and OFF) all re-run clean after the change.
+
+One stale expectation in my own probe was corrected rather than left to mislead: for
+`Budget---draft.md`, skipping the conversation whose slug *is* `Budget---draft` is
+correct — that file is genuinely its own. The property under test is that the unrelated
+conversation whose id is `-draft` stays pending, and it does.

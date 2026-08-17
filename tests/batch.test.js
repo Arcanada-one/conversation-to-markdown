@@ -319,6 +319,60 @@ test('a title ending in another conversation id does not skip that conversation'
   );
 });
 
+test('an id differing only in case does not excuse a conversation', () => {
+  const popup = loadPopupExports();
+
+  // The folder and slug are case-folded because macOS and Windows fold them — that
+  // follows the filesystem and is right. The ID must NOT be folded: it is the one
+  // field the whole design relies on to be unforgeable, and folding it collapses two
+  // identities into one key.
+  //
+  // Not reachable today (ChatGPT ids are lowercase hex), which is why this is
+  // hardening rather than a fix. It is recorded and pinned because it is the same
+  // assumption — "this name can only mean one thing" — that produced six consecutive
+  // silent-loss defects, and it sits one upstream change away from being live.
+  const exported = '68a1b2c3-dead-beef-abcd';
+  const neverExported = '68A1B2C3-DEAD-BEEF-ABCD';
+  const landed = '/Downloads/chatgpt-export/proj/Chat/' +
+    popup.batchMdFilename('Chat', exported, false, null, false);
+
+  const pending = popup.filterPendingConversations(
+    [{ id: neverExported, slug: 'Chat' }], new Set([landed]), 'proj');
+  assert.deepEqual(pending.map((c) => c.id), [neverExported],
+    'a conversation whose id differs only in case has its own, different file');
+
+  // Positive control: the actual writer must still be recognised.
+  assert.equal(
+    popup.filterPendingConversations([{ id: exported, slug: 'Chat' }], new Set([landed]), 'proj').length,
+    0, 'the conversation that wrote the file must still be skipped');
+});
+
+test('normalisation cannot smuggle the id marker past the strip', () => {
+  const parser = require('../content.js');
+
+  // U+FF5E FULLWIDTH TILDE folds to ASCII `~` under NFKC (though not under NFC), so
+  // a normalisation form is one plausible way for a title to acquire the marker.
+  // What makes that harmless is ORDER: `slugifyTitle` normalises FIRST and strips the
+  // marker afterwards, so any tilde a normalisation produces is then removed.
+  //
+  // The first version of this test asserted only that NFC does not fold the
+  // fullwidth tilde — which is true unconditionally, so swapping NFC for NFKC left it
+  // green. It was pinning a fact about Unicode rather than a property of this code.
+  // This version asserts the ordering, which is the thing that can actually break.
+  assert.equal('\uFF5E'.normalize('NFKC'), '~', 'precondition: NFKC folds the fullwidth tilde');
+
+  for (const title of ['Chat\uFF5Eabc', '\uFF5E', 'a\uFF5E\uFF5Eb', 'Chat~abc']) {
+    const slug = parser.slugifyTitle(title);
+    if (slug === null) continue;
+    assert.doesNotMatch(
+      slug,
+      /~/,
+      'slug ' + JSON.stringify(slug) + ' from ' + JSON.stringify(title) +
+        ' carries the id marker; the strip must run AFTER normalisation',
+    );
+  }
+});
+
 test('an id-bearing name and an older name cannot be confused', () => {
   const popup = loadPopupExports();
 

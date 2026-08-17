@@ -1017,3 +1017,27 @@ project it reported `4 vs 2` — a false alarm on a correct archive — while on
 first-ever run (`landed=0`) it stays silent, which is exactly when the loss
 happens. A check that cries wolf on healthy archives and is blind to the primary
 failure trains the user to ignore it.
+
+### CodeQL found a hole in the fix itself
+
+The attachment fallback introduced `a[href*="files.oaiusercontent.com"]`, and
+CodeQL flagged it: **incomplete URL substring sanitization**. Correct, and worse
+than cosmetic — `popup.js` *fetches* attachment URLs, so a `[href*=]` selector
+turns `https://evil.example/?x=files.oaiusercontent.com` into something the
+extension requests. The fix for one silent failure had opened a different one.
+
+Anything found by an href-shaped fallback is now re-checked against the **parsed
+host** (`isConversationFileUrl`), exact comparison, https only. Mutants:
+
+| Mutant | Result |
+|---|---|
+| remove the host re-check entirely | KILLED |
+| `hostname === …` → `hostname.endsWith(…)` | **survived, then killed** |
+| drop the https requirement | KILLED |
+
+The `endsWith` mutant survived the first sweep because the hostile URLs in the
+test all ended with the *attacker's* domain (`files.oaiusercontent.com.attacker
+.example`) — none was a suffix impostor. Added `notfiles.oaiusercontent.com` and
+`evil-files.oaiusercontent.com`, which end with the real host and are not it, plus
+an `http://` downgrade. A test full of attack strings still tests nothing if none
+of them exercises the specific weakening under consideration.

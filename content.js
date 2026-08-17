@@ -278,6 +278,26 @@ const ATTACHMENT_CHIP_SELECTORS = [
   'a[href*="files.oaiusercontent.com"]',
 ];
 
+/** True only when the URL's PARSED host is one that serves conversation files.
+ *  Exact host comparison, never a substring: `evil.example/?x=files.oaiuser
+ *  content.com` and `files.oaiusercontent.com.attacker.net` both contain the
+ *  string and neither is the host. */
+function isConversationFileUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch (_e) {
+    return false;
+  }
+  if (parsed.protocol !== 'https:') return false;
+  if (parsed.hostname === 'files.oaiusercontent.com') return true;
+  if (parsed.hostname === 'chatgpt.com' || parsed.hostname === 'chat.openai.com') {
+    return parsed.pathname.indexOf('/files/') !== -1 ||
+      parsed.pathname.indexOf('/estuary/') !== -1;
+  }
+  return false;
+}
+
 /** Extract file attachments from a turn section outside the prose container.
  *  Returns the markdown links, and reports which selector actually matched so a
  *  drifted primary selector is distinguishable from a turn with no attachments —
@@ -305,6 +325,15 @@ function extractAttachmentsDetailed(section) {
     }
   }
 
+  // A `[href*="…"]` selector matches a SUBSTRING, so `https://evil.example/
+  // ?x=files.oaiusercontent.com` satisfies it. Anything the fallbacks find is
+  // therefore re-checked against the real parsed host before it is treated as an
+  // attachment — the popup fetches these URLs, so a substring match is not a
+  // sufficient reason to trust one.
+  const usedFallbackHrefMatch = matchedBy !== null &&
+    matchedBy !== ATTACHMENT_CHIP_SELECTORS[0] &&
+    matchedBy.indexOf('href') !== -1;
+
   for (const chip of chips) {
     if (typeof chip.closest === 'function' &&
         (chip.closest('.markdown') || chip.closest('[class*="prose"]'))) {
@@ -314,6 +343,7 @@ function extractAttachmentsDetailed(section) {
     if (!href || href.startsWith('sandbox:')) continue;
     const absHref = resolveImageUrl(href);
     if (!absHref || seenHrefs.has(absHref)) continue;
+    if (usedFallbackHrefMatch && !isConversationFileUrl(absHref)) continue;
     seenHrefs.add(absHref);
     results.push(markdownLink(labelFromAttachmentChip(chip), absHref));
   }

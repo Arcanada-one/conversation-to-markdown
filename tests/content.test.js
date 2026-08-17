@@ -1346,7 +1346,10 @@ function sectionMatching(chips) {
         if (selector === 'a[href*="/files/"]') return href.includes('/files/');
         if (selector === 'a[href*="/backend-api/files/"]') return href.includes('/backend-api/files/');
         if (selector === 'a[href*="files.oaiusercontent.com"]') {
-          return href.includes('files.oaiusercontent.com');
+          // Deliberately a substring test, because that is what a CSS `href*=`
+          // selector really does — including for a hostile URL that merely
+          // CONTAINS the host name. The code under test must not trust it.
+          return href.indexOf('files.oaiusercontent.com') !== -1;
         }
         return false;
       });
@@ -1374,6 +1377,40 @@ test('a renamed attachment testid still yields the attachment, and is reported a
     assert.equal(drifted.primaryMatched, false, 'and must be reported as drift, not as normal');
     assert.ok(drifted.matchedBy, 'the selector that rescued it is named');
   }
+});
+
+test('a fallback href match is re-checked against the real host, not a substring', () => {
+  // A `[href*="…"]` selector matches a substring, so these all satisfy it while
+  // pointing somewhere else entirely. The popup FETCHES attachment URLs, so a
+  // substring match must not be enough to treat one as a conversation file.
+  const hostile = [
+    'https://evil.example/steal?x=files.oaiusercontent.com',
+    'https://files.oaiusercontent.com.attacker.example/payload',
+    'https://attacker.example/chatgpt.com/files/report.pdf',
+    // A SUFFIX impostor: this host ends with the real one, so a check written
+    // with endsWith() instead of an exact comparison would accept it.
+    'https://notfiles.oaiusercontent.com/payload',
+    'https://evil-files.oaiusercontent.com/payload',
+    // http, not https — a downgrade that must not be followed.
+    'http://files.oaiusercontent.com/file-abc/report.pdf',
+  ];
+
+  for (const url of hostile) {
+    const found = parser.extractAttachmentsDetailed(
+      sectionMatching([attachmentChipWithTestid('renamed-away', url)])
+    );
+    assert.deepEqual(found.links, [], 'must not accept ' + url);
+  }
+
+  // The genuine host still works through the same fallback path, so the guard
+  // rejects impostors rather than disabling the fallback.
+  const genuine = parser.extractAttachmentsDetailed(
+    sectionMatching([
+      attachmentChipWithTestid('renamed-away', 'https://files.oaiusercontent.com/file-abc/report.pdf'),
+    ])
+  );
+  assert.equal(genuine.links.length, 1);
+  assert.equal(genuine.primaryMatched, false);
 });
 
 test('a turn with genuinely no attachment is distinguishable from selector drift', () => {

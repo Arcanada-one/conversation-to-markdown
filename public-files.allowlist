@@ -26,5 +26,6 @@ tests/content.test.js
 tests/manifest.test.js
 tests/popup.test.js
 tests/public-surface.test.js
+tests/sidebar.test.js
 tests/zip.test.js
 zip.js

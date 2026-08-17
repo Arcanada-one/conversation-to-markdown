@@ -37,7 +37,6 @@ reported success while files were missing, truncated or unreadable.
 - **Cyrillic filenames survive extraction from the zip.** Names were written as
   UTF-8 bytes but the header flag declaring so was never set, so extractors fell
   back to code page 437 and Russian titles unzipped as mojibake.
-
 - **Resume recognises its own files when the date-time stamp is enabled.** The id
   appended to a batch filename was parsed with a pattern that matched backwards
   across its own separator, so with the stamp on — and for any title containing a
@@ -73,8 +72,13 @@ reported success while files were missing, truncated or unreadable.
 
 ### Verification
 
-See `MUTATION-EVIDENCE.md` § Wave 3. Each fix was mutated away and the test
-written for it went red, with the exit code read from the test run itself.
+See `MUTATION-EVIDENCE.md` § Wave 3 and § Wave 3b. Each fix was mutated away and
+the test written for it went red, with the exit code read from the test run itself.
+
+Wave 3b is worth reading on its own: the Wave 3 fix was handed to a fresh
+adversarial reviewer, which found two blockers **in the fix**, both of the same
+silent-loss class it was written to remove. A fix that closes such a defect can
+reopen it through its own compatibility path.
 
 ## [1.5.0] — 2026-08-17
 

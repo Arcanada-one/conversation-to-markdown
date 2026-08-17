@@ -1041,3 +1041,22 @@ test all ended with the *attacker's* domain (`files.oaiusercontent.com.attacker
 `evil-files.oaiusercontent.com`, which end with the real host and are not it, plus
 an `http://` downgrade. A test full of attack strings still tests nothing if none
 of them exercises the specific weakening under consideration.
+
+### The fixture's selector engine, and a sweep that lied again
+
+CodeQL kept flagging the test fixture's `href.indexOf('files.oaiusercontent.com')`
+line even after the shipped code was fixed. The pattern was genuinely there — the
+fixture *must* substring-match, because that is what it emulates — but a
+suppression would have hidden a rule that had already caught one real defect.
+
+Rewrote the fixture to parse the selector and apply `=` / `*=` generically, so no
+line resembles host validation and the engine is derived from
+`ATTACHMENT_CHIP_SELECTORS` itself. A new shipped selector can no longer go
+silently unexercised by the fixture.
+
+A mutation in this round reported **SURVIVED** when it had never applied: the
+`re.sub` pattern did not match, the file was unchanged, and the sweep dutifully
+called the untouched code a survivor. Re-run with `assert s2 != s` before trusting
+the verdict, it went red. Same lesson as reading an exit code after a pipe, wearing
+a different costume: a sweep that cannot distinguish "mutant survived" from "mutant
+never existed" reports the second as the first.

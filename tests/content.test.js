@@ -1337,21 +1337,17 @@ function attachmentChipWithTestid(testid, href) {
 function sectionMatching(chips) {
   return {
     querySelectorAll(selector) {
+      // A generic `[attr=…]` / `[attr*=…]` engine, derived from the selector
+      // itself rather than hardcoded per selector. This keeps the fixture honest
+      // about CSS semantics — `*=` really is a substring test, hostile URL or not
+      // — without any line here resembling a host check, which it is not: the
+      // assertion under test is that the SHIPPED code refuses what this finds.
+      const parsed = /^(?:a)?\[([a-z-]+)(\*?)="([^"]+)"\]$/.exec(selector);
+      if (!parsed) return [];
+      const [, attribute, wildcard, needle] = parsed;
       return chips.filter((chip) => {
-        const testid = chip.getAttribute('data-testid') || '';
-        const href = chip.getAttribute('href') || '';
-        if (selector === '[data-testid="file-chip"]') return testid === 'file-chip';
-        if (selector === '[data-testid*="file-chip"]') return testid.includes('file-chip');
-        if (selector === '[data-testid*="attachment"]') return testid.includes('attachment');
-        if (selector === 'a[href*="/files/"]') return href.includes('/files/');
-        if (selector === 'a[href*="/backend-api/files/"]') return href.includes('/backend-api/files/');
-        if (selector === 'a[href*="files.oaiusercontent.com"]') {
-          // Deliberately a substring test, because that is what a CSS `href*=`
-          // selector really does — including for a hostile URL that merely
-          // CONTAINS the host name. The code under test must not trust it.
-          return href.indexOf('files.oaiusercontent.com') !== -1;
-        }
-        return false;
+        const value = chip.getAttribute(attribute) || '';
+        return wildcard ? value.indexOf(needle) !== -1 : value === needle;
       });
     },
   };

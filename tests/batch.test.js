@@ -242,6 +242,35 @@ test('a title containing a double dash does not corrupt the recovered id', () =>
   }
 });
 
+test('a title ending in another conversation id does not skip that conversation', () => {
+  const popup = loadPopupExports();
+
+  // `slugifyTitle` turns a spaced hyphen into `---`, so "Budget - draft" becomes
+  // `Budget---draft`, whose trailing `--`-delimited field is `-draft`. ChatGPT ids
+  // are `[A-Za-z0-9-]+`, so `-draft` is a legal id — and asking only "does the
+  // trailing field equal a known id?" then read this ordinary older file as an
+  // export OF the conversation whose id is `-draft`, skipping that conversation
+  // without it ever being written.
+  //
+  // Matching a field is necessary but NOT sufficient evidence of ownership. The
+  // only sufficient evidence is that the whole name is one this conversation would
+  // have written.
+  const conversations = [
+    { id: '-draft', slug: 'Weekly-sync', title: 'Weekly sync' },
+    { id: 'k9', slug: 'Budget---draft', title: 'Budget - draft' },
+  ];
+  const onlyLegacyBudgetLanded = new Set([
+    '/Downloads/chatgpt-export/proj/Budget---draft/Budget---draft.md',
+  ]);
+
+  const pending = popup.filterPendingConversations(conversations, onlyLegacyBudgetLanded, 'proj');
+  assert.ok(
+    pending.some((c) => c.id === '-draft'),
+    'a conversation with no file of its own must never be skipped; pending was ' +
+      JSON.stringify(pending.map((c) => c.id)),
+  );
+});
+
 test('a file is classified by the ids in the run, not by how its name looks', () => {
   const popup = loadPopupExports();
 
@@ -279,25 +308,23 @@ test('a file is classified by the ids in the run, not by how its name looks', ()
   );
   assert.equal(owner.length, 0, 'the conversation that owns the file must be skipped');
 
-  // Pin the CLASSIFIER itself, not only the outcome. Two independent guards now
-  // block this loss — classification and key derivation — so reverting either one
-  // alone leaves the suite green. That redundancy is welcome, but an untested branch
-  // is how the original guess survived four rounds, so each guard is pinned on its
-  // own.
-  assert.equal(
-    popup.pathCarriesKnownConversationId(ownerFile, new Set([stampShapedId])),
-    true,
-    'a stamp-shaped id that IS in the run must be recognised as an id',
+  // Pin the MECHANISM, not only the outcome: names are GENERATED from each
+  // conversation and matched, so nothing about an unrecognised name is inferred.
+  const owned = popup.candidateExportNames({ id: stampShapedId, slug: 'Budget' }, 'proj', []).owned;
+  assert.ok(
+    owned.includes('chatgpt-export/proj/budget/budget--' + stampShapedId),
+    'the owner must generate the exact name it would have written; got ' + JSON.stringify(owned),
   );
-  assert.equal(
-    popup.pathCarriesKnownConversationId(ownerFile, new Set(['c8f21ab4'])),
-    false,
-    'a trailing field that is not one of this run\'s ids must not be treated as one',
-  );
-  assert.equal(
-    popup.pathCarriesKnownConversationId('/Downloads/chatgpt-export/proj/Chat/Chat.md', new Set(['abc'])),
-    false,
-    'a name with no trailing field carries no id',
+
+  // The victim must not generate that name, whatever stamps exist on disk. This is
+  // the assertion that would have caught the defect: a stamped legacy candidate is
+  // indistinguishable from an id-bearing name, so it is never generated.
+  const victimNames = popup.candidateExportNames(
+    { id: 'c8f21ab4', slug: 'Budget' }, 'proj', [stampShapedId]);
+  assert.ok(
+    !victimNames.owned.concat(victimNames.legacy)
+      .includes('chatgpt-export/proj/budget/budget--' + stampShapedId),
+    'no conversation may generate a name that another conversation owns',
   );
 });
 
@@ -549,6 +576,31 @@ test('an accepted write is still counted, so the guard is not blanket', async ()
   const { res } = await runBatchAgainstFakeChrome(conversations, () => true);
   assert.equal(res.exported, 1);
   assert.equal(res.errors.length, 0);
+});
+
+test('a truncated export is still repairable on the NEXT run', () => {
+  const popup = loadPopupExports();
+
+  // Not banking the partial in memory only protects the run that wrote it. The
+  // truncated file is on disk and in download history, so the next run's lookup
+  // found it and skipped the conversation — refusing the one action that could
+  // repair the file. Resume sees filenames and nothing else, so the incompleteness
+  // has to be in the NAME, not only in a notice inside the file.
+  const partialName = popup.batchMdFilename('Chat', 'abc123', false, null, true);
+  const completeName = popup.batchMdFilename('Chat', 'abc123', false, null, false);
+
+  assert.notEqual(partialName, completeName, 'a partial file must not take the complete name');
+
+  const onDisk = new Set(['/Downloads/chatgpt-export/proj/Chat/' + partialName]);
+  const pending = popup.filterPendingConversations([{ id: 'abc123', slug: 'Chat' }], onDisk, 'proj');
+  assert.equal(pending.length, 1, 'a conversation whose only file is truncated must stay pending');
+
+  // The complete file must of course still be recognised, or nothing is ever skipped.
+  const complete = new Set(['/Downloads/chatgpt-export/proj/Chat/' + completeName]);
+  assert.equal(
+    popup.filterPendingConversations([{ id: 'abc123', slug: 'Chat' }], complete, 'proj').length,
+    0,
+  );
 });
 
 test('a truncated export is reported and NOT banked as done', async () => {

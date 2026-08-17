@@ -663,3 +663,87 @@ Four rounds, four instances, one cause: **inferring identity instead of testing 
 Each round fixed the arithmetic of the inference (set → count → ownership → shape)
 and the defect reappeared one layer down. It closed only when the inference was
 deleted — the ids were available the whole time.
+
+## Wave 3e — generate, don't parse
+
+A fourth reviewer found a **fifth** instance of the same false skip, and the input is
+depressingly ordinary:
+
+```
+slugifyTitle('Budget - draft')  ->  'Budget---draft'   trailing field: '-draft'
+```
+
+A spaced hyphen becomes `---`, and `-draft` is a legal ChatGPT id
+(`[A-Za-z0-9-]+`). So an id-less file from an older version, `Budget---draft.md`, was
+read as an export **of** the conversation whose id is `-draft` — and that
+conversation was skipped without ever being written. Title truncation at 60
+characters widens it further: it *manufactures* a trailing field from a title that
+had none.
+
+Round 3d's test — "does the trailing field equal a known id?" — is **necessary but
+not sufficient** evidence of ownership.
+
+### The design fault, finally named
+
+Five rounds, five instances, one cause: **reading a filename to decide which
+conversation wrote it.** Each round replaced one inference with a subtler one:
+
+| Round | Inference | Broke on |
+| --- | --- | --- |
+| 3 | Title key identifies a conversation | Duplicate titles |
+| 3b | Count files per title, spend per match | Credit spent by a non-owner; history rows double-counted |
+| 3c | One file, one owner, only if unambiguous | — (sound, but fed by a bad classifier) |
+| 3d | Trailing field equals a known id | A title whose tail *is* another conversation's id |
+
+A title can contain anything a separator or an id can contain, so no parse of an
+arbitrary name is safe.
+
+### The rule now: the format is ours, so ask forwards
+
+For each conversation, **generate the exact names it could have written** and check
+whether any of them landed. Nothing about an unrecognised name is inferred — it
+simply matches nothing. `candidateExportNames` builds `slug--id`,
+`slug--<stamp>--id` for each stamp actually present on disk, and the bare `slug` for
+older exports; `stampsInPaths` supplies the stamps, which is safe because
+`YYYYMMDD-HHMM` is a fixed shape and a false positive there only adds a candidate
+name that nothing matches.
+
+Two safety rules follow from the design rather than being bolted on:
+
+- **A name more than one conversation could have written is evidence about none of
+  them.** Claimants are counted across owned AND legacy candidates together, because
+  the spaces overlap.
+- **A stamped legacy name is never generated at all.** `slug--20260817-1200` is
+  simultaneously "an older stamped export of `slug`" and "an export of the
+  conversation whose id is `20260817-1200`". The overlap is exact and nothing in the
+  name resolves it, so such a file is never proof. Cost: one re-export of a stamped
+  older file. Alternative: losing a conversation. Not a close call.
+
+### Also fixed: a truncated export was repairable only within its own run
+
+Round 3's guard kept a partial out of the in-memory completed set, but the truncated
+file is on disk and in download history, so the NEXT run found it and skipped the
+conversation — refusing the one action that could repair it. Resume sees filenames
+and nothing else, so the incompleteness now lives in the NAME
+(`Chat-partial--<id>.md`), not only in the notice inside the file.
+
+### Mutations
+
+| # | Edit | Test that went red | EXIT |
+| --- | --- | --- | --- |
+| AA | Generate a stamped legacy candidate again. | `a file is classified by the ids in the run, not by how its name looks` | **1** |
+| BB | Ignore the claimant count. | `a legacy file is not credited to a conversation whose own file already landed` (+1) | **1** |
+| CC | Stop marking a partial in the name. | `a truncated export is still repairable on the NEXT run` | **1** |
+
+### Verified after the redesign
+
+- The 16-case adversarial battery: **0 false skips**, every ambiguity resolving to
+  re-export.
+- The `Budget - draft` case that opened this round: the victim stays pending.
+- Nine hostile-key cases: `__proto__`, `constructor` and `toString` as both slug and
+  id, numeric ids, ids differing only by case, `.MD`, a foreign project row, and a
+  60-character truncation collision.
+- **Two-run end-to-end through `runBatchExport`, stamp ON and OFF:** run 1 exports 3
+  (including two both titled "Untitled"), run 2 exports 0 and skips 3, and deleting
+  exactly one file re-exports exactly that one.
+- Upgrade path at scale: 40 older files with distinct titles, `pending = 0`.

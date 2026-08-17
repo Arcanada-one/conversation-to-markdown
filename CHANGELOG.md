@@ -42,6 +42,17 @@ reported success while files were missing, truncated or unreadable.
   across its own separator, so with the stamp on — and for any title containing a
   double dash — the id came back wrong and every run re-downloaded the entire
   archive.
+- **Resume no longer guesses which conversation a file belongs to.** It reconstructs
+  the exact names each conversation would have written and looks for those. Reading a
+  name to work out its owner failed in several ways, all with the same consequence —
+  a conversation skipped though it had never been saved. The clearest example: a chat
+  titled "Budget - draft" produces the file name `Budget---draft.md`, whose tail is a
+  valid conversation id, so it was read as belonging to a different chat entirely. A
+  name that more than one conversation could have produced is now treated as evidence
+  about none of them.
+- **A truncated export can be repaired by running again.** Previously the incomplete
+  file was recognised as finished on the next run, so the one action that could fix it
+  was refused. Such a file is now marked as partial in its name, not only inside it.
 - **A conversation whose id merely looks like a date is no longer mistaken for an
   older export.** ChatGPT ids may consist of digits and dashes, so an id can be
   shaped exactly like a timestamp; such a file was misread as coming from an earlier
@@ -81,7 +92,7 @@ reported success while files were missing, truncated or unreadable.
 
 ### Verification
 
-See `MUTATION-EVIDENCE.md` § Wave 3, § Wave 3b, § Wave 3c and § Wave 3d. Each fix was mutated away and
+See `MUTATION-EVIDENCE.md` § Wave 3 and § Wave 3b through § Wave 3e. Each fix was mutated away and
 the test written for it went red, with the exit code read from the test run itself.
 
 Wave 3b is worth reading on its own: the Wave 3 fix was handed to a fresh

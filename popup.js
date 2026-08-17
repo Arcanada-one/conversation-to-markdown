@@ -214,8 +214,14 @@ function conversationFolderPath(convSlug, projectSlug) {
  *  "Untitled" are ordinary inside a Project — and a resumed run has nothing but
  *  the download paths to identify what already landed. A single export keeps the
  *  clean, title-only name from `buildMdFilename`; only the batch pays the id. */
-function batchMdFilename(convSlug, convId, useTimestamp, stamp) {
+function batchMdFilename(convSlug, convId, useTimestamp, stamp, isPartial) {
   var base = convSlug || convId || 'conversation';
+  // A truncated export is marked IN THE NAME, not only inside the file. Resume can
+  // only see filenames, so an incomplete file under the complete name is
+  // indistinguishable from a finished one and the next run skips the conversation —
+  // refusing the one action that could repair it. The suffix goes before the stamp
+  // and id so those keep their positions.
+  if (isPartial) base += '-partial';
   var parts = base;
   if (useTimestamp) parts += '--' + (stamp || formatExportTimestamp());
   if (convId) parts += '--' + convId;
@@ -323,6 +329,71 @@ function pathCarriesConversationId(downloadPath, convId) {
   return trailingField(mdStem(downloadPath)) === String(convId);
 }
 
+/** The conversation folder a download path sits in, relative to the export root.
+ *  Folds to lower case because macOS and Windows treat `Budget/` and `budget/` as
+ *  the same directory — the comparison must follow the filesystem, not the string. */
+function conversationFolderFromPath(downloadPath) {
+  var normalized = String(downloadPath || '').replace(/\\/g, '/');
+  var anchor = normalized.indexOf('chatgpt-export/');
+  if (anchor > 0) normalized = normalized.slice(anchor);
+  var segments = normalized.split('/').filter(Boolean);
+  segments.pop();                                   // drop the filename
+  return segments.join('/');
+}
+
+/** Every name this conversation could have written, as folder-qualified keys.
+ *
+ *  `owned` names embed the conversation id and so belong to it alone. `legacy`
+ *  names — written before ids were recorded — are shared by every namesake, so the
+ *  caller must check for a single claimant before trusting one.
+ *
+ *  A stamp records when a past run happened and so cannot be reproduced from
+ *  scratch. Rather than pattern-matching it out of a name (the inference that failed
+ *  five times), the stamps actually present on disk are passed in and each is tried
+ *  as a candidate. Generating `slug--<stamp>--<id>` and asking whether that exact
+ *  name landed is an exact test of ownership. */
+function candidateExportNames(conv, projectSlug, stamps) {
+  var slug = conv.slug || conv.id || 'conversation';
+  var folder = conversationFolderPath(slug, projectSlug).toLowerCase();
+  var prefix = folder + '/' + String(slug).toLowerCase();
+  var owned = [];
+  var legacy = [prefix];
+  var list = stamps || [];
+
+  if (conv.id) {
+    var id = String(conv.id).toLowerCase();
+    owned.push(prefix + '--' + id);
+    for (var s = 0; s < list.length; s++) {
+      owned.push(prefix + '--' + list[s] + '--' + id);
+    }
+  }
+  // A STAMPED legacy name is deliberately NOT generated. `slug--20260817-1200` is
+  // simultaneously "an older export of `slug`, stamped" and "an export of the
+  // conversation whose id is `20260817-1200`" — the two name spaces overlap exactly
+  // there, and nothing in the name resolves it. Treating such a file as proof let it
+  // excuse a conversation that had never been written. The cost is that a stamped
+  // export from an older version is re-exported once; the alternative is losing a
+  // conversation, so the trade is not close.
+  return { owned: owned, legacy: legacy };
+}
+
+/** The `YYYYMMDD-HHMM` stamps that appear in these download names.
+ *
+ *  Collected so `candidateExportNames` can generate the stamped names that could
+ *  exist, instead of trying to recognise a stamp inside a name it did not build. A
+ *  stamp is a fixed, unambiguous shape — unlike an id or a title — so reading one
+ *  here is safe: a false positive only adds a candidate name that nothing matches. */
+function stampsInPaths(paths) {
+  var stamps = new Set();
+  for (var i = 0; i < paths.length; i++) {
+    var fields = mdStem(paths[i]).split('--');
+    for (var f = 1; f < fields.length; f++) {
+      if (/^\d{8}-\d{4}$/.test(fields[f])) stamps.add(fields[f]);
+    }
+  }
+  return Array.from(stamps);
+}
+
 /** True when a file's name carries the id of one of THESE conversations.
  *
  *  Classification is a test against the known ids, never a guess about the name's
@@ -356,54 +427,65 @@ function filterPendingConversations(conversations, completedPaths, projectSlug) 
     completedPaths.forEach(function(item) { paths.push(item); });
   }
 
-  // A file written before ids were recorded carries no way to say WHICH
-  // conversation it is — only a title. When two conversations share that title its
-  // owner is genuinely unknowable, and three rounds of trying to apportion such a
-  // file by counting produced three variants of the same silent loss: the credit
-  // was spent by whoever asked second, or one physical file appeared twice in
-  // download HISTORY and excused two conversations.
+  // GENERATE, DON'T PARSE. Five rounds of defects here all had one cause: reading a
+  // filename to work out which conversation wrote it. Every attempt — matching the
+  // whole stem, counting files per title, checking the trailing field against known
+  // ids — was a different inference, and each one silently lost a conversation,
+  // because a title can contain anything a separator or an id can contain.
+  // `slugifyTitle('Budget - draft')` is `Budget---draft`, whose trailing field is a
+  // legal ChatGPT id.
   //
-  // So ownership is RESOLVED rather than counted, and only when it is unambiguous:
-  // a legacy file excuses a conversation only if exactly ONE conversation in this
-  // run claims its title. Otherwise every claimant is re-exported. Re-exporting
-  // costs bandwidth; a false skip loses a conversation permanently and re-running
-  // cannot repair it, so the two directions are not equally bad and ambiguity must
-  // resolve to the cheap one.
-  var knownIds = new Set();
-  for (var k = 0; k < conversations.length; k++) {
-    if (conversations[k].id) knownIds.add(String(conversations[k].id));
-  }
-
-  var legacyKeys = new Set();
-  var idPaths = [];
+  // The format is ours, so the question is answered forwards instead: for each
+  // conversation, build the exact names it COULD have written, and look for those.
+  // Nothing about an unrecognised name is inferred — it simply matches nothing.
+  //
+  // Legacy names (no id) stay ambiguous by nature: two conversations sharing a
+  // title generate the same legacy name, and which one wrote the file is unknowable.
+  // Such a name is trusted only when a single conversation claims it; otherwise both
+  // re-export. Re-exporting costs bandwidth, a false skip loses a conversation
+  // permanently and re-running cannot repair it, so ambiguity resolves to the cheap
+  // direction.
+  var landed = new Set();
   for (var i = 0; i < paths.length; i++) {
-    if (pathCarriesKnownConversationId(paths[i], knownIds)) {
-      idPaths.push(paths[i]);
-    } else {
-      var key = completionKeyForPath(paths[i], knownIds);
-      // A Set of KEYS, not a count of paths: `chrome.downloads.search` reports
-      // history, so one file can appear under several absolute paths.
-      if (key) legacyKeys.add(key);
-    }
+    var name = mdStem(paths[i]);
+    // Keyed with the conversation folder so a name is only credited inside the
+    // folder it belongs to, and folded to match the filesystem's own case rules on
+    // macOS and Windows.
+    var folder = conversationFolderFromPath(paths[i]);
+    if (name) landed.add((folder + '/' + name).toLowerCase());
   }
 
+  // How many conversations would generate each legacy name.
+  var stamps = stampsInPaths(paths);
+
+  // How many conversations could have written each candidate name. Counted across
+  // owned AND legacy candidates together, because the two spaces overlap: a stamped
+  // legacy name `Budget--20260817-1200` is also the id-bearing name of a
+  // conversation whose id happens to be `20260817-1200`. A name more than one
+  // conversation could have written is evidence about none of them.
   var claimants = Object.create(null);
   for (var c = 0; c < conversations.length; c++) {
-    var claimKey = completionKeyForConversation(
-      conversations[c].slug || conversations[c].id, projectSlug);
-    claimants[claimKey] = (claimants[claimKey] || 0) + 1;
+    var all = candidateExportNames(conversations[c], projectSlug, stamps);
+    var every = all.owned.concat(all.legacy);
+    // Count each conversation once per distinct name, so a conversation cannot
+    // inflate a name's count by generating it twice.
+    var seen = new Set();
+    for (var n = 0; n < every.length; n++) {
+      if (seen.has(every[n])) continue;
+      seen.add(every[n]);
+      claimants[every[n]] = (claimants[every[n]] || 0) + 1;
+    }
   }
 
   return conversations.filter(function(conv) {
-    // An id-bearing file names its conversation, so this is a test, not a guess.
-    if (conv.id) {
-      for (var j = 0; j < idPaths.length; j++) {
-        if (pathCarriesConversationId(idPaths[j], conv.id)) return false;
-      }
+    var names = candidateExportNames(conv, projectSlug, stamps);
+    var every = names.owned.concat(names.legacy);
+    for (var a = 0; a < every.length; a++) {
+      // A landed name excuses this conversation only when no other conversation
+      // could have produced the same name.
+      if (landed.has(every[a]) && claimants[every[a]] === 1) return false;
     }
-    var slug = conv.slug || conv.id;
-    var key = completionKeyForConversation(slug, projectSlug);
-    return !(legacyKeys.has(key) && claimants[key] === 1);
+    return true;
   });
 }
 
@@ -622,7 +704,7 @@ async function saveConversationExport(tabId, result, options) {
   // a single export keeps the clean, title-only name.
   var conversationId = options.conversationId || null;
   var mdName = conversationId
-    ? batchMdFilename(slug, conversationId, useTimestamp, batchStamp)
+    ? batchMdFilename(slug, conversationId, useTimestamp, batchStamp, result.partial)
     : buildMdFilename(slug, useTimestamp, null, batchStamp);
   var folderPath = projectSlug
     ? conversationFolderPath(convSlug, projectSlug)
@@ -854,7 +936,7 @@ async function runBatchExport(tab, options) {
       writeError = saved.mdError;
     } else {
       var slug = result.slug || conv.slug || conv.id;
-      var mdName = batchMdFilename(slug, conv.id, useTimestamp, batchStamp);
+      var mdName = batchMdFilename(slug, conv.id, useTimestamp, batchStamp, result.partial);
       var folder = conversationFolderPath(slug, projectSlug);
       var write = await downloadOne(
         'data:text/markdown;charset=utf-8,' + encodeURIComponent(result.md),
@@ -1145,7 +1227,10 @@ if (typeof module !== 'undefined' && module.exports) {
     waitForDownloadComplete: waitForDownloadComplete,
     ZIP_WRITE_TIMEOUT_MS: ZIP_WRITE_TIMEOUT_MS,
     pathCarriesConversationId: pathCarriesConversationId,
-    pathCarriesKnownConversationId: pathCarriesKnownConversationId,
+    candidateExportNames: candidateExportNames,
+    conversationFolderFromPath: conversationFolderFromPath,
+    mdStem: mdStem,
+    stampsInPaths: stampsInPaths,
     trailingField: trailingField,
     conversationFolderPath: conversationFolderPath,
     downloadOne: downloadOne,

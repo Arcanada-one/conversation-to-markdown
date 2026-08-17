@@ -179,6 +179,71 @@ test('a slug-less conversation does not skip every other slug-less one', () => {
   assert.deepEqual(pending.map((c) => c.id), ['bbbbbbbb-2222', 'cccccccc-3333']);
 });
 
+// The id is recovered from the FILENAME, because there is no extension storage
+// to consult. That makes the parse load-bearing: get it wrong and resume either
+// re-downloads the whole archive every run, or skips something that never
+// landed. These pin both directions against the two shapes the earlier fixtures
+// never built — the timestamp enabled, and a title containing `--`.
+test('resume recognises its own file when the date-time stamp is enabled', () => {
+  const popup = loadPopupExports();
+
+  const id = '68a1f2c3-dead-beef-abcd';
+  const name = popup.batchMdFilename('Chat', id, true, '20260817-1830');
+  assert.ok(
+    popup.pathCarriesConversationId(name, id),
+    'the id must be recognised in ' + name + ' — a stamp sits between the slug and the id'
+  );
+
+  const pending = popup.filterPendingConversations(
+    [{ id: id, slug: 'Chat' }],
+    new Set(['/Downloads/chatgpt-export/proj/Chat/' + name]),
+    'proj',
+  );
+  assert.equal(pending.length, 0, 'a stamped file the run itself wrote must count as already exported');
+});
+
+test('a title containing a double dash does not corrupt the recovered id', () => {
+  const popup = loadPopupExports();
+
+  // `--` is the separator, and it is also legal inside a slug: "Build -- v2"
+  // slugifies with the dashes intact. A parse that spans the separator captures
+  // part of the title as the id.
+  const id = '68a1f2c3-dead-beef-abcd';
+  for (const slug of ['Build--experimental-build', 'Chat--abc', 'A--1']) {
+    const name = popup.batchMdFilename(slug, id, false, null);
+    assert.ok(popup.pathCarriesConversationId(name, id), 'id recognised in ' + name);
+    // And it must not match a DIFFERENT id, or the check would be vacuous.
+    assert.ok(!popup.pathCarriesConversationId(name, 'ffffffff-0000-0000-0000'), 'no false match for ' + name);
+
+    const pending = popup.filterPendingConversations(
+      [{ id: id, slug: slug }],
+      new Set(['/Downloads/chatgpt-export/proj/' + slug + '/' + name]),
+      'proj',
+    );
+    assert.equal(pending.length, 0, slug + ' must be recognised as already exported');
+  }
+});
+
+test('a legacy file cannot account for more conversations than it is', () => {
+  const popup = loadPopupExports();
+
+  // A file written before ids were recorded is identified only by its title, so
+  // it can vouch for exactly ONE conversation. When two conversations share that
+  // title the fallback cannot tell which, and answering "both" silently loses the
+  // one that never landed — reintroducing, through the compatibility path, the
+  // very defect the id keying removed. Re-exporting one file is the safe answer.
+  const legacyFile = new Set(['/Downloads/chatgpt-export/proj/Budget/Budget.md']);
+  const sameTitle = [{ id: 'ID1', slug: 'Budget' }, { id: 'ID2', slug: 'Budget' }];
+
+  const pending = popup.filterPendingConversations(sameTitle, legacyFile, 'proj');
+  assert.equal(
+    pending.length,
+    1,
+    'one legacy file may account for one conversation, not two — got ' +
+      JSON.stringify(pending.map((c) => c.id))
+  );
+});
+
 test('classifies a dead network apart from a bad conversation', () => {
   const popup = loadPopupExports();
 
@@ -203,8 +268,10 @@ test('backs off exponentially with a finite ceiling', () => {
 /** Drive the REAL runBatchExport against a fake `chrome`, so the assertions are
  *  about what reached `chrome.downloads` rather than about a mock's own shape.
  *  `downloadBehaviour` decides Chrome's answer per filename. */
-function runBatchAgainstFakeChrome(conversations, downloadBehaviour, options) {
+function runBatchAgainstFakeChrome(conversations, downloadBehaviour, options, chromeOptions) {
   const attempted = [];
+  const chromeOpts = chromeOptions || {};
+  const listeners = [];
   const zipSource = fs.readFileSync(path.join(__dirname, '..', 'zip.js'), 'utf8');
   const context = {
     module: { exports: {} },
@@ -235,6 +302,16 @@ function runBatchAgainstFakeChrome(conversations, downloadBehaviour, options) {
       downloads: {
         download(o, cb) {
           attempted.push(o.filename);
+          // The accept budget reaches downloadOne as a setTimeout delay, so the
+          // wrapper below attributes it to the file being written. Observing the
+          // value that actually flows through the real code path — rather than
+          // asserting the constant — is what makes a mutant that stops PASSING
+          // the budget fail this test.
+          if (chromeOpts.recordTimeout) {
+            // downloadOne arms its timeout BEFORE calling download(), so the most
+            // recently observed delay belongs to THIS file.
+            chromeOpts.recordTimeout(o.filename, context.__lastDelay);
+          }
           // Chrome REJECTS a filename containing a `..` back-reference; it calls
           // the callback with undefined and sets runtime.lastError.
           const accepted = downloadBehaviour(o.filename);
@@ -244,15 +321,34 @@ function runBatchAgainstFakeChrome(conversations, downloadBehaviour, options) {
             context.chrome.runtime.lastError = null;
             return;
           }
-          cb(attempted.length);
+          const id = attempted.length;
+          cb(id);
+          // Real Chrome reports COMPLETION separately, after acceptance — the
+          // whole reason a blob URL must not be revoked on the callback alone.
+          if (chromeOpts.downloadState) {
+            setTimeout(() => {
+              for (const l of listeners.slice()) {
+                l({ id: id, state: { current: chromeOpts.downloadState } });
+              }
+            }, 0);
+          }
         },
         search(_q, cb) { cb([]); },
-        onChanged: { addListener() {}, removeListener() {} },
+        onChanged: {
+          addListener(l) { listeners.push(l); },
+          removeListener(l) {
+            const i = listeners.indexOf(l);
+            if (i >= 0) listeners.splice(i, 1);
+          },
+        },
       },
       runtime: { lastError: null },
     },
     __cursor: 0,
-    setTimeout: (fn) => setTimeout(fn, 0),
+    setTimeout: (fn, ms) => {
+      context.__lastDelay = ms;
+      return setTimeout(fn, 0);
+    },
     clearTimeout, setInterval: () => 0, clearInterval() {},
     URL, encodeURIComponent, decodeURIComponent,
     btoa: (v) => Buffer.from(v, 'binary').toString('base64'),
@@ -327,6 +423,71 @@ test('a truncated export is reported and NOT banked as done', async () => {
   assert.ok(
     res.errors.some((e) => /incompletely|re-run/i.test(e)),
     'the user must be told which conversation needs re-running, got: ' + JSON.stringify(res.errors)
+  );
+});
+
+test('an interrupted archive is not reported as saved', async () => {
+  // `waitForDownloadComplete` distinguishes `complete` from `interrupted`, but its
+  // answer only matters if the caller reads it. Reporting the archive's name for a
+  // write that was interrupted is the same silent-success class this release set
+  // out to remove: the popup names a file that is not there.
+  const conversations = [{ id: 'aaaa-1111', href: '/c/aaaa-1111', title: 'One', slug: 'One' }];
+  const { res } = await runBatchAgainstFakeChrome(
+    conversations,
+    () => true,
+    { buildZip: true },
+    { downloadState: 'interrupted' },
+  );
+
+  assert.equal(res.exported, 1, 'the conversation itself did land');
+  assert.equal(res.zipName, null, 'an interrupted archive must not be named as saved');
+  assert.ok(
+    res.errors.some((e) => /archive not completed/i.test(e)),
+    'the failure must be reported, got: ' + JSON.stringify(res.errors)
+  );
+});
+
+test('a completed archive IS reported, so the check is not blanket', async () => {
+  // Positive control: without it, "zipName === null" would pass for a build that
+  // never produces an archive at all.
+  const conversations = [{ id: 'aaaa-1111', href: '/c/aaaa-1111', title: 'One', slug: 'One' }];
+  const { res } = await runBatchAgainstFakeChrome(
+    conversations,
+    () => true,
+    { buildZip: true },
+    { downloadState: 'complete' },
+  );
+
+  assert.match(String(res.zipName), /\.zip$/);
+  assert.equal(res.errors.length, 0);
+});
+
+test('the archive gets a longer accept budget than a single conversation file', async () => {
+  // A blob archive can take longer to be ACCEPTED than a small data: URL. If the
+  // accept budget were the per-file default, `downloadOne` would report a timeout
+  // while Chrome was still reading the blob, and the caller would then revoke the
+  // URL mid-write — corrupting the archive and blaming the network.
+  //
+  // Asserting the constant's value would be tautological (a mutant that stops
+  // PASSING it survives), so this asserts the budget actually reaching
+  // chrome.downloads for the zip versus for a conversation file.
+  const conversations = [{ id: 'aaaa-1111', href: '/c/aaaa-1111', title: 'One', slug: 'One' }];
+  const budgets = [];
+  const { res } = await runBatchAgainstFakeChrome(
+    conversations,
+    () => true,
+    { buildZip: true },
+    { downloadState: 'complete', recordTimeout: (name, ms) => budgets.push({ name, ms }) },
+  );
+
+  assert.match(String(res.zipName), /\.zip$/, 'the archive must have been written');
+  const zip = budgets.find((b) => /\.zip$/.test(b.name));
+  const md = budgets.find((b) => /\.md$/.test(b.name));
+  assert.ok(zip && md, 'both a conversation file and an archive must have been attempted');
+  assert.ok(
+    zip.ms > md.ms,
+    'the archive needs a longer accept budget than a conversation file; got zip=' +
+      zip.ms + ' md=' + md.ms
   );
 });
 

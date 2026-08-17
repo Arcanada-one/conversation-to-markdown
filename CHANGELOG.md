@@ -38,6 +38,18 @@ reported success while files were missing, truncated or unreadable.
   UTF-8 bytes but the header flag declaring so was never set, so extractors fell
   back to code page 437 and Russian titles unzipped as mojibake.
 
+- **Resume recognises its own files when the date-time stamp is enabled.** The id
+  appended to a batch filename was parsed with a pattern that matched backwards
+  across its own separator, so with the stamp on — and for any title containing a
+  double dash — the id came back wrong and every run re-downloaded the entire
+  archive.
+- **A file written by an earlier version can account for one conversation, not
+  many.** Older exports carry no conversation id, so they are recognised by title;
+  when two conversations share that title, treating one old file as proof that both
+  are done silently lost the one that never landed.
+- **An interrupted archive is no longer reported as saved,** and the archive is
+  given a write budget long enough that a large one is not abandoned — and its
+  data released — while the browser is still reading it.
 - **A large archive is no longer lost to a URL length limit.** The zip was handed
   to the browser as a `data:` URL, which Chrome caps at a couple of megabytes — so
   the one workload the zip exists for was the one that would fail. It is now

@@ -261,28 +261,65 @@ function completionKeyForPath(downloadPath) {
   var segments = normalized.split('/').filter(Boolean);
   if (!segments.length) return '';
   var file = segments.pop();
-  // Strip in the order the batch appends: `<slug>[--<stamp>][--<id>].md`. The id
-  // goes last, so it must come off first or the stamp pattern no longer anchors.
-  var stem = file
-    .replace(/\.md$/i, '')
-    .replace(/--[A-Za-z0-9-]{8,}$/, '')
-    .replace(/--\d{8}-\d{4}$/, '');
+  // The batch appends `<slug>[--<stamp>][--<id>].md`, so fields come off the END
+  // one at a time. Splitting on the separator — rather than matching "id-shaped
+  // characters at the end" — is what keeps a title that itself contains `--` from
+  // being eaten: `-` is a legal id character, so a greedy pattern spans the
+  // separator and strips part of the title.
+  var stem = file.replace(/\.md$/i, '');
+  var idField = trailingField(stem);
+  if (idField && !/^\d{8}-\d{4}$/.test(idField)) {
+    stem = stem.slice(0, stem.length - idField.length - 2);
+  }
+  var stampField = trailingField(stem);
+  if (/^\d{8}-\d{4}$/.test(stampField)) {
+    stem = stem.slice(0, stem.length - stampField.length - 2);
+  }
   var folder = segments.join('/').toLowerCase();
   return folder ? folder + '/' + stem : stem;
 }
 
-/** Extract the conversation id a downloaded file was named for, if any.
+/** The trailing `--`-delimited field of a filename stem, or ''.
  *
- *  The id is the only identity ChatGPT guarantees unique. The batch appends it to
- *  the filename precisely so a resumed run can recover it from the path alone —
- *  there is no extension storage to consult, by design. */
-function conversationIdFromPath(downloadPath) {
+ *  `--` is the separator the batch appends with, but it is ALSO legal inside a
+ *  slug: `slugifyTitle` turns "Build -- v2" into `Build--v2`. So the field is
+ *  taken by splitting on the separator and reading the LAST part — a regex that
+ *  matches "8+ id characters at the end" spans the separator, because `-` is an
+ *  id character, and captures part of the title instead. */
+function trailingField(stem) {
+  var parts = String(stem || '').split('--');
+  return parts.length > 1 ? parts[parts.length - 1] : '';
+}
+
+/** Filename stem with the `.md` extension removed. */
+function mdStem(downloadPath) {
   var normalized = String(downloadPath || '').replace(/\\/g, '/');
   var file = normalized.split('/').filter(Boolean).pop() || '';
-  var match = file.replace(/\.md$/i, '').match(/--([A-Za-z0-9-]{8,})$/);
-  if (!match) return '';
-  // A date-time stamp also matches "8+ chars after a double dash"; it is not an id.
-  return /^\d{8}-\d{4}$/.test(match[1]) ? '' : match[1];
+  return file.replace(/\.md$/i, '');
+}
+
+/** Does this downloaded file belong to this conversation id?
+ *
+ *  Asked rather than answered: resume already knows the candidate ids, so testing
+ *  a known id against the name is exact, whereas EXTRACTING an unknown id from an
+ *  ambiguous name is guesswork. That guesswork is what broke — with the date-time
+ *  stamp enabled the name is `slug--STAMP--id`, and a title may itself contain
+ *  `--`, so no single pattern can tell the fields apart reliably. */
+function pathCarriesConversationId(downloadPath, convId) {
+  if (!convId) return false;
+  return trailingField(mdStem(downloadPath)) === String(convId);
+}
+
+/** True when a file's name carries ANY conversation id, i.e. it was written by a
+ *  version that records them. Used only to tell such files apart from legacy ones;
+ *  the id itself is matched by `pathCarriesConversationId`, never parsed here.
+ *
+ *  A date-time stamp occupies the same position when no id follows it, so it must
+ *  not be mistaken for one. */
+function pathCarriesAnyConversationId(downloadPath) {
+  var field = trailingField(mdStem(downloadPath));
+  if (!field) return false;
+  return !/^\d{8}-\d{4}$/.test(field);
 }
 
 /** Skip conversations whose markdown already landed in a prior partial run.
@@ -295,31 +332,42 @@ function conversationIdFromPath(downloadPath) {
  *  Conversations with no id fall back to the slug key, which is the old
  *  behaviour and still better than exporting nothing. */
 function filterPendingConversations(conversations, completedPaths, projectSlug) {
-  var ids = new Set();
-  var legacySlugKeys = new Set();
+  var paths = [];
   if (completedPaths && typeof completedPaths.forEach === 'function') {
-    completedPaths.forEach(function(item) {
-      var id = conversationIdFromPath(item);
-      if (id) {
-        ids.add(id);
-        return;   // an id-bearing file identifies itself; it must not also seed
-                  // the title-keyed set, or two same-titled conversations would
-                  // collide there and one would be skipped without landing.
-      }
-      var key = completionKeyForPath(item);
-      if (key) legacySlugKeys.add(key);
-    });
+    completedPaths.forEach(function(item) { paths.push(item); });
   }
+
+  // Files written before ids were recorded are identified only by their title, so
+  // each can vouch for exactly ONE conversation. Counting them is the whole point:
+  // with two conversations sharing a title and one legacy file, answering "both
+  // are done" silently loses the one that never landed — reintroducing, through
+  // the compatibility path, the very defect id-keying removed. So legacy credit is
+  // a BUDGET that gets spent, not a set membership test.
+  var legacyCredit = Object.create(null);
+  var idPaths = [];
+  for (var i = 0; i < paths.length; i++) {
+    if (pathCarriesAnyConversationId(paths[i])) {
+      idPaths.push(paths[i]);
+    } else {
+      var key = completionKeyForPath(paths[i]);
+      if (key) legacyCredit[key] = (legacyCredit[key] || 0) + 1;
+    }
+  }
+
   return conversations.filter(function(conv) {
-    if (conv.id && ids.has(conv.id)) return false;
-    // Fall back to the title-derived key so files written by an EARLIER version —
-    // which carried no id — are still recognised; otherwise upgrading the
-    // extension would re-download an entire archive. This fallback is what makes
-    // a title collision skip a conversation, so it applies only when the id was
-    // not found among the id-bearing files: `legacySlugKeys` excludes any path
-    // that carries an id of its own.
+    // An id-bearing file identifies itself exactly, so this is a test, not a guess.
+    if (conv.id) {
+      for (var j = 0; j < idPaths.length; j++) {
+        if (pathCarriesConversationId(idPaths[j], conv.id)) return false;
+      }
+    }
     var slug = conv.slug || conv.id;
-    return !legacySlugKeys.has(completionKeyForConversation(slug, projectSlug));
+    var key = completionKeyForConversation(slug, projectSlug);
+    if (legacyCredit[key] > 0) {
+      legacyCredit[key] -= 1;   // spent: one file, one conversation
+      return false;
+    }
+    return true;
   });
 }
 
@@ -424,14 +472,24 @@ function addZipEntry(zipEntries, projectSlug, convSlug, filename, content) {
   });
 }
 
+/** How long a project archive may take to be accepted AND written. A batch zip is
+ *  orders of magnitude larger than a single conversation, so it does not share the
+ *  per-file budget: `downloadOne`'s default would give up while Chrome was still
+ *  reading the blob, and the caller would then revoke the URL mid-write. */
+var ZIP_WRITE_TIMEOUT_MS = 120000;
+
 /** Wait until Chrome has finished writing a download, so a blob URL backing it
  *  is not revoked out from under a write still in progress.
  *
  *  `chrome.downloads.download` reports acceptance, not completion: its callback
  *  fires with a download id while the bytes are still being written. Revoking the
  *  URL at that point truncates exactly the large archive a blob URL exists to
- *  carry. Resolves anyway on timeout — a stuck download must not wedge the run,
- *  and leaking one URL for the popup's lifetime is the cheaper failure. */
+ *  carry.
+ *
+ *  Returns whether the file is known to have been written. A timeout resolves
+ *  `false` — not because the write certainly failed, but because it is not known
+ *  to have succeeded, and on a backup tool an unverified file must not be reported
+ *  as saved. The run continues either way; a stuck download must not wedge it. */
 function waitForDownloadComplete(downloadId, timeoutMs) {
   return new Promise(function(resolve) {
     if (downloadId === undefined || downloadId === null ||
@@ -803,12 +861,24 @@ async function runBatchExport(tab, options) {
     try {
       var zipBytes = buildStoreZip(zipEntries);
       handle = bytesToDownloadUrl(zipBytes, 'application/zip');
-      var zipWrite = await downloadOne(handle.url, candidateName, batchRootPath(projectSlug) + '/' + candidateName);
+      // The archive is a large blob, so Chrome may take longer to ACCEPT it than
+      // a small data: URL — and if `downloadOne` gave up first, the `finally`
+      // below would revoke the URL while Chrome was still reading it. The accept
+      // budget is therefore aligned with the write budget rather than left at the
+      // 12s default meant for per-conversation files.
+      var zipWrite = await downloadOne(
+        handle.url, candidateName, batchRootPath(projectSlug) + '/' + candidateName, ZIP_WRITE_TIMEOUT_MS);
       if (zipWrite.ok) {
         // Chrome accepted the download; the bytes are still being written. Wait
-        // before the `finally` below revokes the blob URL backing them.
-        await waitForDownloadComplete(zipWrite.downloadId);
-        zipName = candidateName;
+        // before the `finally` below revokes the blob URL backing them — and
+        // believe the ANSWER, not the acceptance: an interrupted write leaves no
+        // archive, so reporting its name would be another silent success.
+        var written = await waitForDownloadComplete(zipWrite.downloadId, ZIP_WRITE_TIMEOUT_MS);
+        if (written) {
+          zipName = candidateName;
+        } else {
+          errors.push('archive not completed — the exported files are still on disk');
+        }
       } else {
         errors.push('archive not saved (' + (zipWrite.error || 'download rejected') + ') — the exported files are still on disk');
       }
@@ -1034,7 +1104,11 @@ if (typeof module !== 'undefined' && module.exports) {
     buildMdFilename: buildMdFilename,
     batchMdFilename: batchMdFilename,
     bytesToDownloadUrl: bytesToDownloadUrl,
-    conversationIdFromPath: conversationIdFromPath,
+    waitForDownloadComplete: waitForDownloadComplete,
+    ZIP_WRITE_TIMEOUT_MS: ZIP_WRITE_TIMEOUT_MS,
+    pathCarriesConversationId: pathCarriesConversationId,
+    pathCarriesAnyConversationId: pathCarriesAnyConversationId,
+    trailingField: trailingField,
     conversationFolderPath: conversationFolderPath,
     downloadOne: downloadOne,
     filterPendingConversations: filterPendingConversations,

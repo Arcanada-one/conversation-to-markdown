@@ -447,3 +447,83 @@ selectors remain fixture-derived. A LIVE pass on a real Project page is still
 required before submission. A partial sidebar match would export a
 plausible-looking subset and report completion — that specific risk is
 unguarded, because there is no expected count to compare against.
+
+## Wave 3b — the Wave 3 fix was itself defective
+
+Wave 3's own fixes were handed to a fresh adversarial reviewer, which found **two
+blockers in the fix itself** — both of the same class the fix was written to
+remove. This is the entry worth reading: a fix that closes a silent-loss defect
+can reopen it through its own compatibility path.
+
+### Blocker 1 — the legacy fallback reintroduced the collision
+
+Resume now keys on the conversation id, but files written by v1.5 carry no id, so
+a fallback recognises them by title. Two conversations sharing that title both
+matched the single legacy key, so **both** were skipped — including the one that
+never landed. Reproduced: one legacy `Budget.md` on disk, two conversations
+titled `Budget` → `pending = 0`, where it must be 1. Anyone upgrading from v1.5
+with duplicate titles was exposed, i.e. the entire installed base.
+
+The fix is conceptual, not cosmetic: a legacy file is evidence of **one** export,
+so legacy credit is now a *budget that gets spent* rather than a set membership
+test. One file vouches for one conversation; the second namesake stays pending.
+
+### Blocker 2 — the id parse spanned its own separator
+
+`/--([A-Za-z0-9-]{8,})$/` puts `-` inside the character class, so the capture
+matched backwards across the `--` separator. The stamp-exclusion guard therefore
+never fired, because the capture was never a bare stamp:
+
+| filename | captured | correct |
+| --- | --- | --- |
+| `Chat--68a1f2c3-…` | `68a1f2c3-…` | yes |
+| `Chat--20260817-1830--68a1f2c3-…` (stamp ON) | `20260817-1830--68a1f2c3-…` | **no** |
+| `Build--experimental-build--68a1f2c3-…` | `experimental-build--68a1f2c3-…` | **no** |
+
+Consequence: with the date-time stamp enabled, resume **never recognised its own
+files** — unbounded re-download of the whole archive on every run, which is the
+exact failure resume exists to prevent.
+
+Two changes, one structural and one conceptual. Fields are now taken by
+**splitting on the separator** and reading the last one, because no regex can
+reliably tell `--` the separator from `--` inside a title. And identity is now
+*asked* rather than *extracted*: resume already knows the candidate ids, so
+`pathCarriesConversationId(path, id)` is an exact test, whereas recovering an
+unknown id from an ambiguous name is guesswork.
+
+### Two more, same silent-success class
+
+- **An interrupted archive was reported as saved.** `waitForDownloadComplete`
+  correctly distinguished `complete` from `interrupted`, but the caller discarded
+  its answer and named the archive anyway. The popup named a file that was not
+  there.
+- **The blob could be revoked mid-write.** `downloadOne`'s 12s accept budget and
+  the 120s write wait were inconsistent: for a large archive Chrome may take
+  longer than 12s merely to ACCEPT, after which `downloadOne` reported a timeout,
+  `waitForDownloadComplete` was never called, and the `finally` revoked the URL
+  while Chrome was still reading it — corrupting the archive and blaming the
+  network. The archive now gets a single budget shared by both waits.
+
+### Mutations
+
+| # | Edit | Test that went red | EXIT |
+| --- | --- | --- | --- |
+| Q | Parse the id with the greedy regex again. | `resume recognises its own file when the date-time stamp is enabled` (+1) | **1** |
+| R | Legacy credit becomes a set again (unlimited vouching). | `a legacy file cannot account for more conversations than it is` | **1** |
+| S | Interrupted archive reported as saved. | `an interrupted archive is not reported as saved` | **1** |
+| T | Zip accept budget back to the per-file default. | `the archive gets a longer accept budget than a single conversation file` | **1** |
+
+**Mutant T survived its first test, and that is recorded rather than tidied
+away.** The original assertion read the exported constant's value, so a mutant
+that stopped *passing* the constant to `downloadOne` left it green — a
+tautological test of exactly the kind criticised elsewhere in this file. Rewritten
+to observe the budget that actually reaches `chrome.downloads` through the real
+`downloadOne`, it kills T (`zip=12000 md=12000`).
+
+### Why the Wave 3 suite missed both blockers
+
+Every resume fixture passed `useTimestamp: false`, and every fixture slug was
+`--`-free (`Untitled`, `Budget`, `alpha`, `One`). The two broken configurations
+were the two the fixtures never constructed. The lesson is the one this task keeps
+relearning: a fixture set that only builds the shapes the author had in mind
+tests the author's mental model, not the code.

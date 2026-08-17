@@ -70,23 +70,39 @@ function createPopupHarness(runScan, options = {}) {
       cancelHandler = handler;
     },
   };
-  // The image checkbox only exists when a test opts into the download path.
-  const checkbox = options.downloadImages ? { checked: true } : null;
-  const timestampCheckbox = { checked: !!options.useTimestamp };
-  const batchCheckbox = { checked: !!options.batchMode };
-  const batchWarning = {
-    classList: {
-      _names: new Set(),
-      toggle(name, force) {
-        if (force === true) this._names.add(name);
-        else if (force === false) this._names.delete(name);
-        else if (this._names.has(name)) this._names.delete(name);
-        else this._names.add(name);
+  // A real checkbox element carries addEventListener; the popup attaches change
+  // handlers so the option caveats appear BEFORE the run rather than after it.
+  // A stub that is only `{checked}` models an element the DOM does not have.
+  function makeCheckbox(checked) {
+    return {
+      checked: checked,
+      _handlers: {},
+      addEventListener(event, handler) { this._handlers[event] = handler; },
+      dispatchChange() { if (this._handlers.change) return this._handlers.change(); },
+    };
+  }
+  function makeWarning() {
+    return {
+      classList: {
+        _names: new Set(),
+        contains(name) { return this._names.has(name); },
+        toggle(name, force) {
+          if (force === true) this._names.add(name);
+          else if (force === false) this._names.delete(name);
+          else if (this._names.has(name)) this._names.delete(name);
+          else this._names.add(name);
+        },
+        add(name) { this._names.add(name); },
+        remove(name) { this._names.delete(name); },
       },
-      add(name) { this._names.add(name); },
-      remove(name) { this._names.delete(name); },
-    },
-  };
+    };
+  }
+  // The image checkbox only exists when a test opts into the download path.
+  const checkbox = options.downloadImages ? makeCheckbox(true) : null;
+  const timestampCheckbox = makeCheckbox(!!options.useTimestamp);
+  const batchCheckbox = makeCheckbox(!!options.batchMode);
+  const batchWarning = makeWarning();
+  const linksWarning = makeWarning();
   // The pause control needs a real element: the popup attaches a listener to
   // it, and the harness default (`return status`) has no addEventListener.
   const pauseButton = {
@@ -112,6 +128,7 @@ function createPopupHarness(runScan, options = {}) {
         if (id === 'chk-timestamp') return timestampCheckbox;
         if (id === 'chk-batch') return batchCheckbox;
         if (id === 'batch-warning') return batchWarning;
+        if (id === 'links-warning') return linksWarning;
         return status;
       },
     },
@@ -197,8 +214,50 @@ function createPopupHarness(runScan, options = {}) {
     clipboardValue: () => clipboardValue,
     scriptCalls: () => scriptCalls,
     downloads: () => downloads,
+    batchCheckbox,
+    imagesCheckbox: checkbox,
+    batchWarningVisible: () => batchWarning.classList.contains('visible'),
+    linksWarningVisible: () => linksWarning.classList.contains('visible'),
   };
 }
+
+test('the batch caveats appear when the option is ticked, not after the run starts', () => {
+  // Both warnings used to be revealed inside the click handler — after the user
+  // had already committed. A caveat that arrives then is a status message.
+  const harness = createPopupHarness(() => ({ ok: true, md: '#', slug: 's', lines: 1, words: 1 }), {});
+
+  assert.equal(harness.batchWarningVisible(), false, 'nothing to warn about before the option is chosen');
+  assert.equal(harness.linksWarningVisible(), false);
+
+  harness.batchCheckbox.checked = true;
+  harness.batchCheckbox.dispatchChange();
+
+  assert.equal(harness.batchWarningVisible(), true, 'the popup-must-stay-open caveat must show on ticking batch');
+  // Attachment links ChatGPT serves are signed and short-lived, so a project
+  // archive that keeps links instead of files is an archive that expires.
+  assert.equal(
+    harness.linksWarningVisible(),
+    true,
+    'a batch without the save-files option must warn that links expire'
+  );
+});
+
+test('the expiring-links caveat disappears once files are being saved', () => {
+  const harness = createPopupHarness(
+    () => ({ ok: true, md: '#', slug: 's', lines: 1, words: 1 }),
+    { downloadImages: true },
+  );
+
+  harness.batchCheckbox.checked = true;
+  harness.batchCheckbox.dispatchChange();
+
+  assert.equal(harness.batchWarningVisible(), true);
+  assert.equal(
+    harness.linksWarningVisible(),
+    false,
+    'with files saved there are no expiring links to warn about'
+  );
+});
 
 test('waits for asynchronous scanning before writing Markdown to the clipboard', async () => {
   let resolveScan;

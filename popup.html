@@ -180,6 +180,12 @@
 
   <p id="batch-warning" class="batch-warning">Keep this popup open until the batch finishes. Closing it cancels the run; restart to resume — already-exported conversations are skipped.</p>
 
+  <!-- Shown when a batch is requested WITHOUT the save-files option. The links
+       ChatGPT serves for attachments are signed and short-lived, so an archive
+       that keeps them instead of the files is an archive that expires. The
+       caveat has to appear before the run, not in the summary afterwards. -->
+  <p id="links-warning" class="batch-warning">Attachment links in the saved Markdown expire within hours. Tick <strong>Save .md + files</strong> above to keep the files themselves.</p>
+
   <div id="status"></div>
 
   <p class="hint">Open a ChatGPT conversation or project,<br>then click the button.</p>

@@ -38,8 +38,19 @@ reported success while files were missing, truncated or unreadable.
   UTF-8 bytes but the header flag declaring so was never set, so extractors fell
   back to code page 437 and Russian titles unzipped as mojibake.
 
+- **A large archive is no longer lost to a URL length limit.** The zip was handed
+  to the browser as a `data:` URL, which Chrome caps at a couple of megabytes — so
+  the one workload the zip exists for was the one that would fail. It is now
+  passed by handle. The writer also refuses, loudly, an archive with more entries
+  or more bytes than the zip format can address, rather than emitting a corrupt
+  file that reports no error.
+
 ### Changed
 
+- **The caveats now appear while the choice is still a choice.** Ticking the batch
+  option immediately shows that the popup must stay open, and — when files are not
+  being saved — that attachment links in the Markdown expire within hours. Both
+  were previously revealed only after the run had been started.
 - **`activeTab` permission removed.** It was never load-bearing: `scripting` is
   authorised by the declared host permissions. It was also misleading — an
   `activeTab` grant is revoked on navigation, and a batch export navigates the

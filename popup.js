@@ -6,6 +6,26 @@ const chkImages = document.getElementById('chk-images');
 const chkTimestamp = document.getElementById('chk-timestamp');
 const chkBatch = document.getElementById('chk-batch');
 const batchWarning = document.getElementById('batch-warning');
+const linksWarning = document.getElementById('links-warning');
+
+/** Show the caveats that should inform the choice, while it is still a choice.
+ *
+ *  Both were previously revealed inside the click handler, i.e. after the user
+ *  had already committed to the run. A warning that arrives then is a status
+ *  message, not a warning.
+ *
+ *  The links caveat matters most for a batch: attachment links ChatGPT serves are
+ *  signed and short-lived, so a project archive that keeps the links instead of
+ *  the files is an archive that expires. */
+function refreshOptionWarnings() {
+  var batchOn = !!(chkBatch && chkBatch.checked);
+  var filesOn = !!(chkImages && chkImages.checked);
+  if (batchWarning) batchWarning.classList.toggle('visible', batchOn);
+  if (linksWarning) linksWarning.classList.toggle('visible', batchOn && !filesOn);
+}
+
+if (chkBatch) chkBatch.addEventListener('change', refreshOptionWarnings);
+if (chkImages) chkImages.addEventListener('change', refreshOptionWarnings);
 
 // Id of the tab currently being scanned, so Stop knows where to send the flag.
 var scanningTabId = null;
@@ -859,7 +879,7 @@ btn.addEventListener('click', async () => {
   btnCancel.textContent = batchMode ? 'Stop export' : 'Stop scanning';
   status.className = '';
   status.textContent = '';
-  if (batchWarning) batchWarning.classList.toggle('visible', batchMode);
+  refreshOptionWarnings();
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });

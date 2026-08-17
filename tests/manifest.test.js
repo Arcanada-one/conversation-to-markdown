@@ -21,7 +21,7 @@ function readPngDimensions(filePath) {
   };
 }
 
-test('manifest declares version 1.6.0 and a complete icon set', () => {
+test('manifest version matches the changelog, with a complete icon set', () => {
   const expectedIcons = {
     16: 'icons/icon16.png',
     32: 'icons/icon32.png',
@@ -29,7 +29,11 @@ test('manifest declares version 1.6.0 and a complete icon set', () => {
     128: 'icons/icon128.png',
   };
 
-  assert.equal(manifest.version, '1.6.0');
+  // Sourced from the CHANGELOG so the two cannot drift apart unnoticed.
+  const changelog = fs.readFileSync(path.join(projectRoot, 'CHANGELOG.md'), 'utf8');
+  const topChangelogVersion = (changelog.match(/^## \[(\d+\.\d+\.\d+)\]/m) || [])[1];
+  assert.ok(topChangelogVersion, 'the changelog must name a released version');
+  assert.equal(manifest.version, topChangelogVersion);
   assert.deepEqual(manifest.icons, expectedIcons);
   assert.deepEqual(manifest.action.default_icon, expectedIcons);
 

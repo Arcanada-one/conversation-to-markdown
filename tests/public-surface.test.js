@@ -46,7 +46,10 @@ test('uses a neutral public identity throughout the extension', () => {
   const manifest = JSON.parse(read('manifest.json'));
   const popup = read('popup.html');
   assert.equal(manifest.name, 'Conversation to Markdown');
-  assert.equal(manifest.version, '1.6.0');
+  // Read from the CHANGELOG rather than restated here: a hardcoded literal turns
+  // every release into a test edit, and an edited assertion is not a check.
+  const topChangelogVersion = (read('CHANGELOG.md').match(/^## \[(\d+\.\d+\.\d+)\]/m) || [])[1];
+  assert.equal(manifest.version, topChangelogVersion);
   assert.match(popup, /Conversation to Markdown/);
   assert.doesNotMatch(popup, /ChatGPT\s*→\s*Markdown/);
   // An exact-set lock, not a subset check: a permission added without a

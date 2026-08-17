@@ -114,6 +114,16 @@
       border: 1px solid #e0525233;
     }
 
+    /* The run finished, but its coverage could not be confirmed. Deliberately
+       not green: an unconfirmed list must not look like a clean success. */
+    #status.warning {
+      display: block;
+      background: #2a230d;
+      color: #e0b152;
+      border: 1px solid #e0b15233;
+      white-space: pre-line;
+    }
+
     .toggle {
       display: flex;
       align-items: center;
@@ -178,7 +188,7 @@
     <span>Export all sidebar conversations (project batch)</span>
   </label>
 
-  <p id="batch-warning" class="batch-warning">Keep this popup open until the batch finishes. Closing it cancels the run; restart to resume — already-exported conversations are skipped.</p>
+  <p id="batch-warning" class="batch-warning">Keep this popup open until the batch finishes. Closing it cancels the run; restart to resume — conversations already saved to disk are skipped. Only conversations the sidebar lists can be exported, so scroll it to the end first.</p>
 
   <!-- Shown when a batch is requested WITHOUT the save-files option. The links
        ChatGPT serves for attachments are signed and short-lived, so an archive

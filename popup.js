@@ -721,12 +721,23 @@ async function runBatchExport(tab, options) {
   var completedPaths = await searchCompletedDownloadPaths(projectSlug);
   var listResult = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
-    func: function() {
-      if (typeof listSidebarConversations === 'function') return listSidebarConversations();
-      return [];
+    func: async function() {
+      // Scroll the virtualized sidebar so every row mounts. The one-frame
+      // reader is the fallback only: it can return a subset, and a subset
+      // exported as "the whole Project" is invisible to the user.
+      if (typeof collectSidebarConversations === 'function') {
+        return await collectSidebarConversations();
+      }
+      if (typeof listSidebarConversations === 'function') {
+        return { conversations: listSidebarConversations(), complete: false, reason: 'no-collector' };
+      }
+      return { conversations: [], complete: false, reason: 'no-collector' };
     },
   });
-  var conversations = listResult?.[0]?.result || [];
+  var listed = listResult?.[0]?.result || {};
+  var conversations = (listed && listed.conversations) || [];
+  var listComplete = !!(listed && listed.complete);
+  var listReason = (listed && listed.reason) || 'unknown';
   if (!conversations.length) {
     return { ok: false, error: 'No conversations found in the sidebar. Open a ChatGPT Project page first.' };
   }
@@ -953,6 +964,11 @@ async function runBatchExport(tab, options) {
     partial: partial,
     networkWaits: held,
     cancelled: controls.isCancelled(),
+    // False when the sidebar walk could not prove it reached the end of the
+    // list. The export is then a SUBSET of the Project, and saying so is the
+    // whole point: the user cannot detect a missing conversation themselves.
+    listComplete: listComplete,
+    listReason: listReason,
     errors: errors,
     zipName: zipName,
   };
@@ -1046,12 +1062,31 @@ btn.addEventListener('click', async () => {
         return;
       }
 
-      var summary = '✓ Batch export complete: ' + batchResult.exported + ' saved';
-      if (batchResult.skipped > 0) summary += ', ' + batchResult.skipped + ' skipped (already exported)';
+      // "Complete" is claimed ONLY when the sidebar walk proved it reached the
+      // end of the list. Otherwise the run covered the conversations it could
+      // see, which may be a subset — and the user cannot notice a conversation
+      // that was never listed, so the wording has to carry the doubt.
+      var summary = batchResult.listComplete
+        ? '✓ Batch export complete: ' + batchResult.exported + ' saved'
+        : '⚠ Exported ' + batchResult.exported + ' of the conversations the sidebar listed'
+          + ' — the full list could not be confirmed';
+      if (batchResult.skipped > 0) {
+        // Never "already exported" on an unconfirmed list: that phrasing reads as
+        // verified coverage and argues the user out of checking.
+        summary += batchResult.listComplete
+          ? ', ' + batchResult.skipped + ' skipped (already exported)'
+          : ', ' + batchResult.skipped + ' skipped (files already on disk)';
+      }
+      if (batchResult.partial > 0) {
+        summary += ', ' + batchResult.partial + ' incomplete (re-run to repair)';
+      }
       if (batchResult.cancelled) summary += ' — stopped early';
+      if (!batchResult.listComplete) {
+        summary += '\nScroll the sidebar to the end and re-run to pick up anything missing.';
+      }
       if (batchResult.zipName) summary += '\nZip: ' + batchResult.zipName;
       if (batchResult.errors.length) summary += '\nErrors: ' + batchResult.errors.join('; ');
-      showStatus('success', summary);
+      showStatus(batchResult.listComplete ? 'success' : 'warning', summary);
       return;
     }
 

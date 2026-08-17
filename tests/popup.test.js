@@ -513,8 +513,8 @@ test('batch mode reports per-conversation progress and writes a zip archive', as
   ];
   const harness = createPopupHarness(async (opts) => {
     const source = String(opts.func || '');
-    if (source.includes('listSidebarConversations')) {
-      return [{ result: conversations }];
+    if (source.includes('collectSidebarConversations') || source.includes('listSidebarConversations')) {
+      return [{ result: { conversations: conversations, complete: true, reason: 'reached-end' } }];
     }
     if (source.includes('extractConversationTitle')) {
       return [{ result: { title: 'My Project', slug: 'My-Project' } }];

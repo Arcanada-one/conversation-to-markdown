@@ -19,6 +19,7 @@ Long conversations are difficult to archive when the page keeps only part of the
 - **Downloads all attachments, not just images** — PDF, Word, spreadsheets, archives. What can be saved is decided by the host serving the file, never by its extension.
 - **Survives a long run:** transient failures retry with a capped backoff, a dropped network or an unreachable site pauses the run instead of consuming the rest of the list, and the run can be paused, resumed, or cancelled. Cancelling keeps everything already written.
 - **Resumes without re-downloading.** A restarted export recognises what already landed and skips it, identifying each conversation by its ChatGPT id — so two conversations sharing a title, including several called "Untitled", never mask one another.
+- **Says when it cannot prove it saw the whole list.** The sidebar is virtualized, so a long Project mounts only part of itself at a time. The export walks it to the end and verifies it observed every row with no gaps; an unconfirmed walk is reported as unconfirmed rather than as a complete export.
 - **Re-exports without overwriting**, when you ask for it: a date-time stamp in the filename keeps the previous version alongside the new one.
 - Preserves paragraphs, headings, lists, blockquotes, links, code, tables, and visible generated images.
 - Removes query parameters from exported page links; image URLs keep the parameters their host requires to serve the file.
@@ -109,7 +110,8 @@ See [PRIVACY.md](PRIVACY.md) for the complete data-handling statement.
 - Chrome appends `(1)`, `(2)`, … when a filename already exists, so re-exporting the same conversation creates a new copy rather than overwriting the old one. A Chrome extension cannot append to an existing file; the date-time stamp option exists because of that limit, not as a preference.
 - **A batch export needs the popup to stay open.** There is no background worker by design, so closing the popup ends the run. What already landed is kept, and restarting resumes from there.
 - **A batch export navigates the tab** through each conversation in turn, so the tab is in use for the duration of the run.
-- The Project conversation list is read from the page's sidebar, so only conversations the sidebar shows can be exported.
+- The Project conversation list is read from the page's sidebar. The extension scrolls that sidebar to its end and checks that it observed the whole list without gaps; when it cannot confirm that, the run says so instead of reporting a complete export. Only conversations the sidebar can show are reachable at all.
+- Batch mode exports what the **sidebar** lists, which is not the same thing as verified Project membership: the extension has no way to ask ChatGPT which conversations belong to a Project. Start the run from the Project page you mean to export.
 
 ## Development
 

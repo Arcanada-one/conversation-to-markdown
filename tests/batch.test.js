@@ -604,9 +604,18 @@ function runBatchAgainstFakeChrome(conversations, downloadBehaviour, options, ch
 
   const scripting = context.chrome.scripting;
   const original = scripting.executeScript;
+  // The real injected function returns the collector's envelope
+  // {conversations, complete, reason} — not a bare array. The stub mirrors that
+  // shape so a change to the contract shows up here instead of silently
+  // yielding `undefined` conversations.
+  const listEnvelope = Object.prototype.hasOwnProperty.call(options || {}, 'listEnvelope')
+    ? options.listEnvelope
+    : { conversations: conversations, complete: true, reason: 'reached-end' };
   scripting.executeScript = async (o) => {
     const src = String(o.func || '');
-    if (/listSidebarConversations/.test(src)) return [{ result: conversations }];
+    if (/collectSidebarConversations|listSidebarConversations/.test(src)) {
+      return [{ result: listEnvelope }];
+    }
     return original(o);
   };
 

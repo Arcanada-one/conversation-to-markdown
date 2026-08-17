@@ -1318,6 +1318,73 @@ test('extracts file attachment chips outside the prose container', () => {
   ]);
 });
 
+/** A chip carrying a real file link, with a caller-chosen data-testid. */
+function attachmentChipWithTestid(testid, href) {
+  return {
+    getAttribute(name) {
+      if (name === 'data-testid') return testid;
+      if (name === 'href') return href;
+      return null;
+    },
+    tagName: 'A',
+    closest: () => null,
+    querySelector: () => null,
+    textContent: 'report.pdf',
+  };
+}
+
+/** A section whose querySelectorAll understands the shipped selector shapes. */
+function sectionMatching(chips) {
+  return {
+    querySelectorAll(selector) {
+      return chips.filter((chip) => {
+        const testid = chip.getAttribute('data-testid') || '';
+        const href = chip.getAttribute('href') || '';
+        if (selector === '[data-testid="file-chip"]') return testid === 'file-chip';
+        if (selector === '[data-testid*="file-chip"]') return testid.includes('file-chip');
+        if (selector === '[data-testid*="attachment"]') return testid.includes('attachment');
+        if (selector === 'a[href*="/files/"]') return href.includes('/files/');
+        if (selector === 'a[href*="/backend-api/files/"]') return href.includes('/backend-api/files/');
+        if (selector === 'a[href*="files.oaiusercontent.com"]') {
+          return href.includes('files.oaiusercontent.com');
+        }
+        return false;
+      });
+    },
+  };
+}
+
+test('a renamed attachment testid still yields the attachment, and is reported as drift', () => {
+  // The failure this guards: one private testid was the ONLY way an attachment
+  // was recognised, so a rename stripped every file from every conversation
+  // while the export still reported success (0 of 0 saved).
+  const url = 'https://chatgpt.com/files/report.pdf';
+
+  const intact = parser.extractAttachmentsDetailed(
+    sectionMatching([attachmentChipWithTestid('file-chip', url)])
+  );
+  assert.equal(intact.links.length, 1);
+  assert.equal(intact.primaryMatched, true);
+
+  for (const renamed of ['file-chip-v2', 'attachment-tile', 'something-else-entirely']) {
+    const drifted = parser.extractAttachmentsDetailed(
+      sectionMatching([attachmentChipWithTestid(renamed, url)])
+    );
+    assert.equal(drifted.links.length, 1, 'testid "' + renamed + '" must still yield the file');
+    assert.equal(drifted.primaryMatched, false, 'and must be reported as drift, not as normal');
+    assert.ok(drifted.matchedBy, 'the selector that rescued it is named');
+  }
+});
+
+test('a turn with genuinely no attachment is distinguishable from selector drift', () => {
+  const none = parser.extractAttachmentsDetailed(sectionMatching([]));
+  assert.deepEqual(none.links, []);
+  // The distinguishing signal: nothing matched at all, versus matchedBy naming a
+  // fallback. Previously both cases were an empty array and nothing else.
+  assert.equal(none.matchedBy, null);
+  assert.equal(none.primaryMatched, false);
+});
+
 test('includes user-uploaded attachments in the turn markdown', () => {
   const chip = {
     getAttribute(name) {

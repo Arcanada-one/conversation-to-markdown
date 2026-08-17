@@ -5,6 +5,50 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] — 2026-08-17
+
+A third adversarial audit — this one aimed squarely at the fact that the Project
+sidebar selectors had never been checked against a live browser — found that the
+batch export could quietly cover only **part** of a Project and report the result
+as complete. The 114-test suite passed clean throughout, because every fixture
+mounted the whole list and so was complete by construction.
+
+### Fixed
+
+- **A batch export no longer covers part of a Project and calls it complete.**
+  The conversation list was read once, synchronously, from whatever the sidebar
+  happened to have mounted. ChatGPT virtualizes that list, so a Project longer
+  than the visible window exported a plausible subset — 15 of 60 — and reported
+  `✓ Batch export complete: 15 saved`. The missing conversations appeared in no
+  counter, and re-running rediscovered the same truncated list, so the loss was
+  permanent. The sidebar is now walked to its end before the export starts, and
+  the walk's own coverage is **measured**: the vertical spans over which rows were
+  actually observed must leave no gap across the list. A gap, a blocked scroller,
+  or running out of rounds is reported as an unconfirmed list rather than a
+  success.
+- **An unconfirmed list no longer reads as verified coverage.** The summary said
+  "skipped (already exported)" — wording that argues the reader out of checking.
+  When coverage cannot be proved the run now reports how many conversations the
+  sidebar listed, says the full list could not be confirmed, and suggests
+  scrolling the sidebar before re-running.
+- **A renamed attachment test id no longer strips every file silently.**
+  Attachments were recognised by one private `data-testid`. A rename would have
+  returned an empty list for every conversation — byte-identical to "this chat has
+  no files" — while the export reported `0/0` saved. Attachments are now matched by
+  a family of selectors ending in the file-host URL shape, so a rename degrades to
+  a fallback instead of to zero, and a fallback match is distinguishable from a
+  genuine absence.
+- **A sidebar whose scroll position cannot be written reports the real cause.**
+  It previously surfaced as "No conversations found in the sidebar. Open a ChatGPT
+  Project page first." — blaming the page the user was already on.
+
+### Changed
+
+- The batch checkbox note now states that only conversations the sidebar lists
+  can be exported, and asks for the sidebar to be scrolled to its end first. The
+  status line uses a distinct warning style when coverage is unconfirmed, so an
+  unproved run cannot look like a clean success.
+
 ## [1.6.0] — 2026-08-17
 
 Release-readiness pass. Two independent adversarial audits of 1.5.0 — one on DOM

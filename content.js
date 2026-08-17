@@ -263,14 +263,48 @@ function extractImages(section) {
   return results;
 }
 
+/** Selectors that have identified an attachment chip, most specific first.
+ *  More than one on purpose: a single `data-testid` value is a private contract
+ *  that can be renamed without notice, and if the only selector misses, every
+ *  attachment in every conversation disappears while the export still reports
+ *  success. The fallbacks are shape-based (a link to a file host) so a rename
+ *  degrades coverage instead of zeroing it. */
+const ATTACHMENT_CHIP_SELECTORS = [
+  '[data-testid="file-chip"]',
+  '[data-testid*="file-chip"]',
+  '[data-testid*="attachment"]',
+  'a[href*="/files/"]',
+  'a[href*="/backend-api/files/"]',
+  'a[href*="files.oaiusercontent.com"]',
+];
+
 /** Extract file attachments from a turn section outside the prose container.
- *  Selector is fixture-derived (data-testid="file-chip"); needs a live check. */
-function extractAttachments(section) {
+ *  Returns the markdown links, and reports which selector actually matched so a
+ *  drifted primary selector is distinguishable from a turn with no attachments —
+ *  the two were previously both an empty array. */
+function extractAttachmentsDetailed(section) {
   const seenHrefs = new Set();
   const results = [];
-  if (!section.querySelectorAll) return results;
+  const empty = { links: results, matchedBy: null, primaryMatched: false };
+  if (!section || !section.querySelectorAll) return empty;
 
-  const chips = section.querySelectorAll('[data-testid="file-chip"]');
+  let chips = [];
+  let matchedBy = null;
+  for (const selector of ATTACHMENT_CHIP_SELECTORS) {
+    let found;
+    try {
+      found = section.querySelectorAll(selector);
+    } catch (_e) {
+      continue;
+    }
+    const list = found ? Array.from(found) : [];
+    if (list.length) {
+      chips = list;
+      matchedBy = selector;
+      break;
+    }
+  }
+
   for (const chip of chips) {
     if (typeof chip.closest === 'function' &&
         (chip.closest('.markdown') || chip.closest('[class*="prose"]'))) {
@@ -284,7 +318,19 @@ function extractAttachments(section) {
     results.push(markdownLink(labelFromAttachmentChip(chip), absHref));
   }
 
-  return results;
+  return {
+    links: results,
+    matchedBy: matchedBy,
+    // False when attachments were found only by a fallback: the primary testid
+    // no longer matches, which is worth surfacing before it silently becomes
+    // "this conversation had no files".
+    primaryMatched: matchedBy === ATTACHMENT_CHIP_SELECTORS[0],
+  };
+}
+
+/** Backwards-compatible view: just the markdown links. */
+function extractAttachments(section) {
+  return extractAttachmentsDetailed(section).links;
 }
 
 function orderCapturedTurns(turns) {
@@ -792,9 +838,15 @@ function extractConversationTitle(doc) {
 }
 
 /**
- * Enumerate every conversation link visible in the sidebar.
+ * Enumerate the conversation links CURRENTLY MOUNTED in the sidebar.
  * Fixture-derived selector: nav a[href^="/c/"] — needs a live check on a
  * ChatGPT Project page.
+ *
+ * This reads one frame only. The sidebar is virtualized, so on a long list this
+ * returns a SUBSET. Callers exporting a whole Project must use
+ * collectSidebarConversations(), which scrolls until the set stops growing and
+ * reports whether the end was actually reached — a subset presented as the
+ * complete Project is the failure this split exists to prevent.
  */
 function listSidebarConversations(doc) {
   const root = doc || (typeof document !== 'undefined' ? document : null);
@@ -817,6 +869,251 @@ function listSidebarConversations(doc) {
     });
   }
   return results;
+}
+
+/** Locate the scrollable sidebar element holding the conversation list. */
+function findSidebarScroller(doc) {
+  const root = doc || (typeof document !== 'undefined' ? document : null);
+  if (!root || !root.querySelector) return null;
+  const anchor = root.querySelector('nav a[href^="/c/"]');
+  if (!anchor) return null;
+  let current = anchor.parentElement;
+  while (current) {
+    let overflowY = '';
+    try {
+      overflowY = (typeof getComputedStyle === 'function'
+        ? (getComputedStyle(current).overflowY || '')
+        : '');
+    } catch (_e) {
+      overflowY = '';
+    }
+    const scrollable = /(auto|scroll|overlay)/.test(overflowY) ||
+      (current.scrollHeight || 0) > (current.clientHeight || 0) + 1;
+    if (scrollable && (current.scrollHeight || 0) > (current.clientHeight || 0) + 1) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+  return null;
+}
+
+/**
+ * Enumerate EVERY conversation in the sidebar, scrolling to force virtualized
+ * rows to mount, and report whether the end of the list was reached.
+ *
+ * Returns { conversations, complete, reason }. `complete` is false when the
+ * walk ran out of rounds while rows were still arriving, or when the list is
+ * scrollable but no scroll container could be found — in both cases the caller
+ * holds a SUBSET and must not present it as the whole Project. A subset that
+ * silently reports success is unfalsifiable for the user: they have nothing to
+ * compare the export against.
+ */
+async function collectSidebarConversations(options) {
+  const supplied = options || {};
+  const doc = supplied.doc || (typeof document !== 'undefined' ? document : null);
+  const maxRounds = supplied.maxRounds || 200;
+  const settleMs = supplied.settleMs || 250;
+  // Consecutive rounds that must add nothing AND move nothing before the walk
+  // is judged finished. Only consulted once the viewport is already at the
+  // bottom, so this is what absorbs a lazy loader that appends after a pause.
+  const quietRounds = supplied.quietRounds || 3;
+  // Fraction of the viewport to advance per round. Below 1 on purpose: the
+  // overlap is what guarantees no band of rows is stepped over unobserved.
+  const scrollStepRatio = supplied.scrollStepRatio || 0.5;
+  const sleep = supplied.sleep || function(ms) {
+    return new Promise(function(resolve) { setTimeout(resolve, ms); });
+  };
+
+  const byId = new Map();
+  // Height of the band of rows actually MOUNTED in the last read, measured from
+  // the rows themselves. The step must never exceed this: stepping by the
+  // viewport when the virtualizer mounts a shorter band jumps over rows that
+  // were never in the DOM, and the walk still finishes at the bottom looking
+  // complete. Measured, not assumed.
+  let mountedBand = 0;
+  // Vertical spans, in DOCUMENT space, over which rows were actually observed.
+  // Completeness is then a measurable property — "the observed spans cover the
+  // scrollable range" — instead of an inference from the walk having gone quiet.
+  // Quiescence cannot distinguish "the list ended" from "I stopped looking".
+  const coveredSpans = [];
+  function recordCoverage(scrollTop) {
+    if (!doc || !doc.querySelectorAll) return 0;
+    let links;
+    try {
+      links = doc.querySelectorAll('nav a[href^="/c/"]');
+    } catch (_e) {
+      return 0;
+    }
+    let top = Infinity;
+    let bottom = -Infinity;
+    let measured = 0;
+    for (const link of links) {
+      if (!link || typeof link.getBoundingClientRect !== 'function') continue;
+      let rect;
+      try {
+        rect = link.getBoundingClientRect();
+      } catch (_e) {
+        continue;
+      }
+      if (!rect) continue;
+      const rTop = typeof rect.top === 'number' ? rect.top : 0;
+      const rBottom = typeof rect.bottom === 'number' ? rect.bottom : rTop;
+      if (rBottom <= rTop) continue;
+      top = Math.min(top, rTop);
+      bottom = Math.max(bottom, rBottom);
+      measured += 1;
+    }
+    if (!measured || bottom <= top) return 0;
+    // Viewport-relative rects become document-relative by adding the offset the
+    // rows were read at.
+    coveredSpans.push([top + scrollTop, bottom + scrollTop]);
+    return bottom - top;
+  }
+
+  /** True when the observed spans leave no gap across the scrollable range. */
+  function coverageIsContiguous(scrollHeight) {
+    if (!coveredSpans.length) return false;
+    const spans = coveredSpans.slice().sort(function(a, b) { return a[0] - b[0]; });
+    // A row taller than this between two observations would be missed, so the
+    // tolerance is deliberately small — one hairline, not one row.
+    const slack = 2;
+    let reach = spans[0][1];
+    if (spans[0][0] > slack) return false;   // never observed the top of the list
+    for (let i = 1; i < spans.length; i++) {
+      if (spans[i][0] > reach + slack) return false;  // an unobserved band
+      reach = Math.max(reach, spans[i][1]);
+    }
+    return reach >= (scrollHeight || 0) - slack;
+  }
+
+  const scroller = supplied.scroller || findSidebarScroller(doc);
+
+  function absorb() {
+    let added = 0;
+    const batch = listSidebarConversations(doc);
+    for (const conv of batch) {
+      if (byId.has(conv.id)) continue;
+      byId.set(conv.id, conv);
+      added += 1;
+    }
+    mountedBand = recordCoverage(scroller ? (scroller.scrollTop || 0) : 0);
+    return added;
+  }
+
+  absorb();
+
+  if (!scroller) {
+    // Nothing to scroll. Either the whole list already fits, or the container
+    // moved and we cannot tell how much is missing — say which.
+    return {
+      conversations: Array.from(byId.values()),
+      complete: true,
+      reason: 'no-scroll-container',
+    };
+  }
+
+  const startTop = scroller.scrollTop || 0;
+  let quiet = 0;
+  let rounds = 0;
+  let complete = false;
+  let blocked = false;
+  let reachedBottom = false;
+  // True when the completeness verdict rests on measured coverage rather than on
+  // quiescence. Surfaced so a caller can tell a proof from a best guess.
+  let coverageVerified = false;
+
+  while (rounds < maxRounds) {
+    rounds += 1;
+    const maxTop = Math.max(0, (scroller.scrollHeight || 0) - (scroller.clientHeight || 0));
+    const before = scroller.scrollTop || 0;
+    const heightBefore = scroller.scrollHeight || 0;
+    // Step a FRACTION of what was actually observed. Two rules, both learned the
+    // hard way: never step further than the band of rows currently mounted (a
+    // virtualizer may mount less than a viewport, and the excess is stepped over
+    // unseen), and always keep overlap so a partially-visible row at the seam is
+    // read by the next round too. When the rows cannot be measured, fall back to
+    // the viewport — the pre-measurement behaviour, not a wider guess.
+    const reach = mountedBand > 0
+      ? Math.min(mountedBand, scroller.clientHeight || mountedBand)
+      : (scroller.clientHeight || 0);
+    const step = Math.max(1, Math.floor(reach * scrollStepRatio));
+    const nextTop = Math.min(maxTop, before + step);
+    try {
+      scroller.scrollTop = nextTop;
+    } catch (_e) {
+      // A scroller whose scrollTop refuses writes cannot be walked. Stop with a
+      // reason of its own instead of letting the injected function reject — the
+      // caller would otherwise surface "no conversations found — open a Project
+      // page", which blames the wrong thing.
+      blocked = true;
+      break;
+    }
+    await sleep(settleMs);
+
+    const added = absorb();
+    const nowTop = scroller.scrollTop || 0;
+    const nowMaxTop = Math.max(0, (scroller.scrollHeight || 0) - (scroller.clientHeight || 0));
+    const atBottom = nowTop >= nowMaxTop - 1;
+    // A list still getting TALLER is still loading, even when this round read no
+    // new row: the rows exist but have not mounted yet.
+    const stillGrowing = (scroller.scrollHeight || 0) > heightBefore;
+
+    // Progress means a NEW id or the viewport actually moving. scrollHeight
+    // merely growing is not progress toward the end — the same lesson the
+    // message scanner learned — but it IS evidence the list has not ended,
+    // which is why it blocks the completeness verdict below.
+    if (added > 0 || Math.abs(nowTop - before) >= 1) {
+      quiet = 0;
+    } else {
+      quiet += 1;
+    }
+
+    if (atBottom && added === 0 && !stillGrowing && quiet >= quietRounds) {
+      // Quiescence alone is not a coverage proof. When row geometry was
+      // measurable, require the observed spans to leave no gap; a gap means rows
+      // were stepped over and never mounted, which is precisely the silent
+      // subset. Without geometry there is nothing to verify against, so the
+      // quiescent verdict stands — the honest limit of what can be known.
+      reachedBottom = true;
+      // With geometry, completeness is VERIFIED: the observed spans must leave
+      // no gap across the scrollable range. Without geometry there is nothing to
+      // verify against and the verdict falls back to quiescence — which cannot
+      // tell "the list ended" from "the loader had not answered yet". That
+      // fallback is the known limit of this walk, not a proof.
+      coverageVerified = coveredSpans.length > 0;
+      complete = coverageVerified
+        ? coverageIsContiguous(scroller.scrollHeight || 0)
+        : true;
+      break;
+    }
+  }
+
+  // Put the sidebar back where the user left it.
+  try {
+    scroller.scrollTop = startTop;
+  } catch (_e) {
+    /* restoring the view is best-effort; never fail the walk over it */
+  }
+
+  let reason;
+  if (complete) {
+    reason = 'reached-end';
+  } else if (blocked) {
+    reason = 'scroll-blocked';
+  } else if (reachedBottom) {
+    // Went quiet at the bottom, but the observed spans had a hole in them: some
+    // rows were never mounted where the walk looked.
+    reason = 'coverage-gap';
+  } else {
+    reason = 'round-limit';
+  }
+
+  return {
+    conversations: Array.from(byId.values()),
+    complete: complete,
+    reason: reason,
+    coverageVerified: coverageVerified,
+  };
 }
 
 /** Wait until a navigated conversation page has mountable message content. */
@@ -960,10 +1257,14 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     buildConversationMarkdown: buildConversationMarkdown,
     extractAttachments: extractAttachments,
+    extractAttachmentsDetailed: extractAttachmentsDetailed,
+    ATTACHMENT_CHIP_SELECTORS: ATTACHMENT_CHIP_SELECTORS,
     extractConversationTitle: extractConversationTitle,
     extractImages: extractImages,
     fetchImageDataUrls: fetchImageDataUrls,
     listSidebarConversations: listSidebarConversations,
+    collectSidebarConversations: collectSidebarConversations,
+    findSidebarScroller: findSidebarScroller,
     slugifyTitle: slugifyTitle,
     extractTurn: extractTurn,
     findScrollContainer: findScrollContainer,

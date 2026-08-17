@@ -917,3 +917,103 @@ One stale expectation in my own probe was corrected rather than left to mislead:
 `Budget---draft.md`, skipping the conversation whose slug *is* `Budget---draft` is
 correct — that file is genuinely its own. The property under test is that the unrelated
 conversation whose id is `-draft` stays pending, and it does.
+
+## Wave 4 — the sidebar walk (v1.7.0)
+
+Wave 3 shipped a batch export whose conversation list was read **once**,
+synchronously, from whatever the virtualized sidebar had mounted. The 114-test
+suite passed clean because every fixture mounted the whole list — a fixture that
+mounts everything is complete by construction and cannot express "there were rows
+you never saw". The technique to test it properly was already in the repo
+(`createUnmountingFixture`, applied to message turns); it had never been pointed
+at the sidebar.
+
+Ground truth added: the fixture holds `allIds`, which **no selector under test can
+reach**. A partial read is therefore detectable.
+
+### Mutants — the walk
+
+| Mutant | Change | Result |
+|---|---|---|
+| M1 | never scroll (drop the `scrollTop` write) | KILLED |
+| M2 | `complete: true` unconditionally | KILLED |
+| M4 | skip the scroll-position restore | KILLED |
+| M5 | declare complete without `atBottom` | KILLED |
+| M7 | stop re-reading after the first absorb | KILLED |
+| M8 | `maxRounds` 200 → 1 | KILLED |
+| M9 | disable de-duplication | KILLED |
+| M3 | `quietRounds` 3 → 1 | **survived, then killed** |
+
+M3 first survived because the patience test compared budgets against a loader fast
+enough that both budgets won — the knob looked decorative. Probing with slower
+loaders showed it *is* load-bearing (8 rows vs 18 at `appendAfter=10`); the test was
+retuned to a delay where the budgets genuinely diverge.
+
+### Mutants — coverage verification
+
+Quiescence is not a coverage proof: "the list ended" and "I stopped looking" are
+indistinguishable from the walk's own vantage point. Completeness is therefore
+**measured** — the vertical spans over which rows were observed must leave no gap
+across the scrollable range.
+
+| Mutant | Change | Result |
+|---|---|---|
+| C1 | completeness ignores coverage | KILLED |
+| C2 | contiguity always true | KILLED |
+| C3 | gap tolerance 2px → 9999px | KILLED |
+| C4 | skip the top-of-list check | KILLED (after adding the scrolled-start test) |
+| C5 | ignore whether the tail was reached | KILLED |
+| C8 | record coverage without the scroll offset | KILLED |
+| C9 | `scrollStepRatio` 0.5 → 1.0 | KILLED |
+| C10 | a blocked scroller reported as complete | KILLED (after adding the throwing-setter test) |
+| C6 | step by the full viewport again | **survived, correctly** |
+| C7 | ignore the measured mounted band | **survived, correctly** |
+
+C6 and C7 survive **by design**: with coverage verification in place, a coarser
+step loses rows but is *caught* — `complete` goes false and `reason` becomes
+`coverage-gap`. The step size is now an optimisation (fewer missed rows, fewer
+rounds), not a correctness guard. Recording this rather than forcing them red:
+a mutant that survives for a good reason is a result to explain, not to defeat.
+
+### A fixture that modelled an impossible DOM
+
+An intermediate fixture mounted `mount` rows starting at `scrollTop / rowHeight`,
+which made the last rows **unreachable at any legal scroll position** — a
+virtualizer that cannot render its own tail. Measured against it, every step-size
+fix still "lost" the final rows, and the next move would have been to contort the
+code to satisfy it. The fixture was wrong, not the code: a real virtualizer renders
+what is visible, which at the bottom includes the last row. Corrected to render the
+visible span (capped at `mountCap`), the same code went from 32 missed rows to 6,
+and coverage verification then took the remainder to "reported, not silent".
+
+### Two of my own tests proved nothing
+
+- The step-over test originally asserted inside `if (missed.length)`, so it would
+  have passed **vacuously** had the scenario stopped losing rows. A counter now
+  asserts the scenario still reproduces.
+- `assert.equal(manifest.version, '1.6.0')` in two suites made every release a test
+  edit — a restated literal, not a check. Both now read the version from the
+  CHANGELOG, and the coupling was verified by mutation (manifest → `9.9.9` goes red).
+
+### Attachment selector drift
+
+`extractAttachments` matched exactly one private `data-testid`. A rename returns
+`[]` for every conversation — byte-identical to "this chat has no files" — while
+the export reports `0/0` saved and no error. Verified by executing a renamed
+mutant: the summary was character-for-character identical to the healthy run.
+
+Fixed with a family of selectors ending in the file-host URL shape, so a rename
+degrades to a fallback rather than to zero, and `matchedBy: null` distinguishes a
+genuine absence from a rescue. Mutation: collapsing the family back to the single
+testid goes red.
+
+### A cross-check deliberately NOT built
+
+Comparing the discovered list size against the count of already-landed files was
+proposed and rejected on evidence. `chrome.downloads.search` returns download
+**rows**, not files: re-downloads duplicate, Chrome's `(1)` uniquifying adds more,
+and rows survive the files' deletion. Executed against a healthy two-conversation
+project it reported `4 vs 2` — a false alarm on a correct archive — while on a
+first-ever run (`landed=0`) it stays silent, which is exactly when the loss
+happens. A check that cries wolf on healthy archives and is blind to the primary
+failure trains the user to ignore it.

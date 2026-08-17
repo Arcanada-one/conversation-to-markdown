@@ -11,7 +11,7 @@ Copying a conversation uses two permissions:
 
 ## Saving files and artifacts
 
-If you tick **Save .md + images to chatgpt-export/** before pressing the button, the extension additionally writes the Markdown file and the conversation's attachments to your Downloads folder. Attachments are not limited to images: any file the conversation carries — PDF, Word, spreadsheet, archive — is saved the same way, because what may be downloaded is decided by the host serving it, never by the file's type. This is the only mode in which it makes network requests, and it uses two permissions:
+If you tick **Save .md + files to chatgpt-export/** before pressing the button, the extension additionally writes the Markdown file and the conversation's attachments to your Downloads folder. Attachments are not limited to images: any file the conversation carries — PDF, Word, spreadsheet, archive — is saved the same way, because what may be downloaded is decided by the host serving it, never by the file's type. This is the only mode in which it makes network requests, and it uses two permissions:
 
 - `downloads` — writes the files to your Downloads folder, and reads download history (see below).
 - Host access to `https://files.oaiusercontent.com/*` — the host that serves files inside ChatGPT conversations.
@@ -23,6 +23,14 @@ In this mode the extension requests each file directly from that host, converts 
 If you tick the batch option on a ChatGPT Project page, the extension reads the conversation list from the page's sidebar and exports each conversation in turn. It does this by **navigating the tab you are looking at** through those conversations one at a time, and returns control to you when the run ends. This is a change from single-conversation export, where only the page already open is read. The run can be paused, resumed and cancelled; cancelling keeps whatever already landed.
 
 **Resume reads your download history.** To avoid downloading the same conversation twice, the extension asks the browser which files it has previously downloaded, filtered to paths inside the `chatgpt-export/` folder. The browser's answer can include entries from other downloads, so this is worth stating plainly: the extension inspects that list only to decide what it already saved, keeps no copy of it, and sends it nowhere. It is used for nothing else. There is no alternative that avoids the lookup — the extension deliberately stores no state of its own, so the files on your disk are the only record of what a previous run accomplished.
+
+## The zip archive
+
+When a batch export is asked to produce a single archive, the `.zip` is built **in the
+page's own memory** by code shipped in this extension and handed to the browser's
+download mechanism like any other file. Nothing is uploaded, no compression service is
+contacted, and no library is fetched at runtime. The archive contains exactly the files
+the export already wrote to your Downloads folder.
 
 ## What the extension never does
 

@@ -14,7 +14,7 @@ Long conversations are difficult to archive when the page keeps only part of the
 
 - Captures user and assistant turns across a virtualized conversation, including very long threads.
 - Names the export after the conversation title shown in the sidebar, and adds that title as the document's `#` heading.
-- Optionally downloads every image to `chatgpt-export/<title>/` and rewrites the Markdown to point at the local copies.
+- Optionally downloads every attachment to `chatgpt-export/<title>/` and rewrites the Markdown to point at the local copies.
 - **Exports every conversation in a ChatGPT Project in one run**, each into its own folder, optionally bundled into a single `.zip`.
 - **Downloads all attachments, not just images** — PDF, Word, spreadsheets, archives. What can be saved is decided by the host serving the file, never by its extension.
 - **Survives a long run:** transient failures retry with a capped backoff, a dropped network or an unreachable site pauses the run instead of consuming the rest of the list, and the run can be paused, resumed, or cancelled. Cancelling keeps everything already written.
@@ -33,7 +33,9 @@ Long conversations are difficult to archive when the page keeps only part of the
 
 ## Install in Chrome
 
-This repository is distributed as an unpacked Manifest V3 extension; it is not a Chrome Web Store listing.
+Published on the Chrome Web Store. This repository is also the source, so it can be
+loaded unpacked — useful for reviewing the code or running a version before it reaches
+the store.
 
 1. Clone this repository, or choose **Code → Download ZIP** on GitHub and unzip it.
 2. Open `chrome://extensions` in Chrome.
@@ -68,9 +70,9 @@ How should I archive this conversation?
 Copy it as structured Markdown.
 ```
 
-### Saving images alongside the Markdown
+### Saving files alongside the Markdown
 
-Tick **Save .md + images to chatgpt-export/** before pressing the button. The extension then downloads the conversation and every image it references into your Downloads folder:
+Tick **Save .md + files to chatgpt-export/** before pressing the button — the label says *files* because attachments of every type are saved, not only images. The extension then downloads the conversation and every file it references into your Downloads folder:
 
 ```
 Downloads/chatgpt-export/How-to-archive-a-conversation/

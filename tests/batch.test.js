@@ -224,23 +224,87 @@ test('a title containing a double dash does not corrupt the recovered id', () =>
   }
 });
 
-test('a legacy file cannot account for more conversations than it is', () => {
+test('a legacy file is not credited to a conversation whose own file already landed', () => {
   const popup = loadPopupExports();
 
-  // A file written before ids were recorded is identified only by its title, so
-  // it can vouch for exactly ONE conversation. When two conversations share that
-  // title the fallback cannot tell which, and answering "both" silently loses the
-  // one that never landed — reintroducing, through the compatibility path, the
-  // very defect the id keying removed. Re-exporting one file is the safe answer.
+  // Both files on disk belong to ID1: a v1.5 export and a v1.6 re-export. ID2
+  // shares the title and never landed. Counting files rather than resolving
+  // OWNERSHIP let ID1 be excused by its id-bearing file without consuming its own
+  // legacy file, leaving that credit to be spent by ID2 — a conversation that
+  // never landed, skipped and reported as already exported.
+  const completed = new Set([
+    '/Downloads/chatgpt-export/proj/Budget/Budget--ID1.md',
+    '/Downloads/chatgpt-export/proj/Budget/Budget.md',
+  ]);
+  const sameTitle = [{ id: 'ID1', slug: 'Budget' }, { id: 'ID2', slug: 'Budget' }];
+
+  assert.deepEqual(
+    popup.filterPendingConversations(sameTitle, completed, 'proj').map((c) => c.id),
+    ['ID2'],
+  );
+});
+
+test('two history rows for one file do not yield two credits', () => {
+  const popup = loadPopupExports();
+
+  // `chrome.downloads.search` returns download HISTORY, so the same relative file
+  // can appear under two absolute paths — the Downloads directory moved, or the
+  // file was deleted and fetched again. Both normalise to one key, so counting
+  // rows invented a second file that does not exist and skipped a second
+  // conversation that never landed.
+  // Two different absolute roots for the same relative file. (Written without a
+  // real home-directory shape: the public-surface gate bans those in tracked
+  // files, and it is right to — an absolute home path is the user's name.)
+  const twoRowsOneFile = new Set([
+    '/downloads-a/chatgpt-export/proj/Budget/Budget.md',
+    '/downloads-b/chatgpt-export/proj/Budget/Budget.md',
+  ]);
+
+  // Two conversations claim this title, so the file's owner is unknowable and
+  // BOTH are re-exported. What must never happen is a second, invented credit
+  // excusing a conversation that never landed.
+  const sameTitle = [{ id: 'ID1', slug: 'Budget' }, { id: 'ID2', slug: 'Budget' }];
+  assert.equal(
+    popup.filterPendingConversations(sameTitle, twoRowsOneFile, 'proj').length,
+    2,
+    'an ambiguous title must re-export, never skip',
+  );
+
+  // With a single claimant the title is unambiguous, so the duplicate history rows
+  // must still resolve to one recognised file rather than confusing the lookup.
+  const oneClaimant = [{ id: 'ID1', slug: 'Budget' }];
+  assert.equal(
+    popup.filterPendingConversations(oneClaimant, twoRowsOneFile, 'proj').length,
+    0,
+    'duplicate history rows for an unambiguous title must still be recognised',
+  );
+});
+
+test('a legacy file whose owner is ambiguous excuses nobody', () => {
+  const popup = loadPopupExports();
+
+  // A file written before ids were recorded carries only a title, so when two
+  // conversations share that title its owner is genuinely unknowable. Apportioning
+  // it — by counting, or by first-come — is a guess, and a wrong guess skips a
+  // conversation that never landed, permanently, while reporting success.
+  // Ambiguity therefore resolves to re-export: bandwidth, not loss.
   const legacyFile = new Set(['/Downloads/chatgpt-export/proj/Budget/Budget.md']);
   const sameTitle = [{ id: 'ID1', slug: 'Budget' }, { id: 'ID2', slug: 'Budget' }];
 
-  const pending = popup.filterPendingConversations(sameTitle, legacyFile, 'proj');
+  assert.deepEqual(
+    popup.filterPendingConversations(sameTitle, legacyFile, 'proj').map((c) => c.id),
+    ['ID1', 'ID2'],
+    'neither claimant may be skipped on the strength of a file that could belong to either',
+  );
+
+  // The unambiguous case must still be recognised, or upgrading from an older
+  // version would re-download an entire archive. Without this half, "never trust a
+  // legacy file" would pass the assertion above and destroy the upgrade path.
+  const single = [{ id: 'ID1', slug: 'Budget' }];
   assert.equal(
-    pending.length,
-    1,
-    'one legacy file may account for one conversation, not two — got ' +
-      JSON.stringify(pending.map((c) => c.id))
+    popup.filterPendingConversations(single, legacyFile, 'proj').length,
+    0,
+    'a legacy file with exactly one claimant must still be recognised',
   );
 });
 

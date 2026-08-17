@@ -337,25 +337,41 @@ function filterPendingConversations(conversations, completedPaths, projectSlug) 
     completedPaths.forEach(function(item) { paths.push(item); });
   }
 
-  // Files written before ids were recorded are identified only by their title, so
-  // each can vouch for exactly ONE conversation. Counting them is the whole point:
-  // with two conversations sharing a title and one legacy file, answering "both
-  // are done" silently loses the one that never landed — reintroducing, through
-  // the compatibility path, the very defect id-keying removed. So legacy credit is
-  // a BUDGET that gets spent, not a set membership test.
-  var legacyCredit = Object.create(null);
+  // A file written before ids were recorded carries no way to say WHICH
+  // conversation it is — only a title. When two conversations share that title its
+  // owner is genuinely unknowable, and three rounds of trying to apportion such a
+  // file by counting produced three variants of the same silent loss: the credit
+  // was spent by whoever asked second, or one physical file appeared twice in
+  // download HISTORY and excused two conversations.
+  //
+  // So ownership is RESOLVED rather than counted, and only when it is unambiguous:
+  // a legacy file excuses a conversation only if exactly ONE conversation in this
+  // run claims its title. Otherwise every claimant is re-exported. Re-exporting
+  // costs bandwidth; a false skip loses a conversation permanently and re-running
+  // cannot repair it, so the two directions are not equally bad and ambiguity must
+  // resolve to the cheap one.
+  var legacyKeys = new Set();
   var idPaths = [];
   for (var i = 0; i < paths.length; i++) {
     if (pathCarriesAnyConversationId(paths[i])) {
       idPaths.push(paths[i]);
     } else {
       var key = completionKeyForPath(paths[i]);
-      if (key) legacyCredit[key] = (legacyCredit[key] || 0) + 1;
+      // A Set of KEYS, not a count of paths: `chrome.downloads.search` reports
+      // history, so one file can appear under several absolute paths.
+      if (key) legacyKeys.add(key);
     }
   }
 
+  var claimants = Object.create(null);
+  for (var c = 0; c < conversations.length; c++) {
+    var claimKey = completionKeyForConversation(
+      conversations[c].slug || conversations[c].id, projectSlug);
+    claimants[claimKey] = (claimants[claimKey] || 0) + 1;
+  }
+
   return conversations.filter(function(conv) {
-    // An id-bearing file identifies itself exactly, so this is a test, not a guess.
+    // An id-bearing file names its conversation, so this is a test, not a guess.
     if (conv.id) {
       for (var j = 0; j < idPaths.length; j++) {
         if (pathCarriesConversationId(idPaths[j], conv.id)) return false;
@@ -363,11 +379,7 @@ function filterPendingConversations(conversations, completedPaths, projectSlug) 
     }
     var slug = conv.slug || conv.id;
     var key = completionKeyForConversation(slug, projectSlug);
-    if (legacyCredit[key] > 0) {
-      legacyCredit[key] -= 1;   // spent: one file, one conversation
-      return false;
-    }
-    return true;
+    return !(legacyKeys.has(key) && claimants[key] === 1);
   });
 }
 

@@ -527,3 +527,67 @@ Every resume fixture passed `useTimestamp: false`, and every fixture slug was
 were the two the fixtures never constructed. The lesson is the one this task keeps
 relearning: a fixture set that only builds the shapes the author had in mind
 tests the author's mental model, not the code.
+
+## Wave 3c — stop apportioning what cannot be apportioned
+
+Wave 3b was verified by another fresh reviewer, which found **two more blockers**,
+again in the new code, again the same silent-loss class. Three rounds of the same
+defect is a design verdict, not a run of bad luck, so this round changed the rule
+rather than the arithmetic.
+
+### What kept going wrong
+
+A file written before conversation ids were recorded carries **only a title**. When
+two conversations share that title, the file's owner is *genuinely unknowable*.
+Each round tried to apportion it anyway, and each attempt leaked differently:
+
+| Round | Mechanism | How it lost a conversation |
+| --- | --- | --- |
+| 3 | Set of title keys | One file excused every namesake. |
+| 3b | Count of files, spent per match | An id-matched conversation returned early without consuming its OWN legacy file, so the orphaned credit was spent by a namesake that never landed. |
+| 3b | Count incremented per PATH | `chrome.downloads.search` returns history, so one physical file under two absolute paths (Downloads moved, or deleted and re-fetched) invented a second credit. |
+
+### The rule now
+
+Ownership is **resolved, not counted**, and only when unambiguous: a legacy file
+excuses a conversation only if exactly **one** conversation in this run claims its
+title. Otherwise every claimant is re-exported. Legacy paths are collected as a Set
+of KEYS, so history rows cannot multiply into extra files.
+
+This is not a smaller guess — it removes the guess. Re-exporting costs bandwidth; a
+false skip loses a conversation permanently and re-running cannot repair it, so
+ambiguity must resolve to the cheap direction.
+
+### Mutations
+
+| # | Edit | Test that went red | EXIT |
+| --- | --- | --- | --- |
+| U | Ambiguity ignored — a legacy file excuses every claimant. | `a legacy file whose owner is ambiguous excuses nobody` (+2) | **1** |
+| V | Legacy keys collected per path again. | `two history rows for one file do not yield two credits` (+2) | **1** |
+| W | Legacy fallback removed entirely. | `filterPendingConversations skips paths already downloaded` (+2) | **1** |
+
+W matters as much as U: without it, "never trust a legacy file" would satisfy every
+safety assertion while destroying the upgrade path — an entire archive re-downloaded
+on first run after updating. Both directions are pinned.
+
+### Re-verified after the redesign
+
+The eleven-case false-skip hunt was re-run: **no false skip in any case**, and every
+ambiguous case resolves to re-export. Both blocker reproductions now behave. The
+upgrade path was re-checked at scale — 40 legacy files with distinct titles, stamped
+and unstamped, `pending = 0`.
+
+### One more of my own gates caught me
+
+The first version of the history-row test used a real home-directory path shape, and
+the public-surface gate failed the build: an absolute home path is the user's name,
+and it is banned in tracked files. Rewritten with neutral roots. Worth recording
+because the gate was doing exactly its job on the person who wrote the test.
+
+### Known, accepted, safe-direction
+
+A legacy file whose TITLE contains `--` (`Build--v2.md`) is read as id-bearing and
+so earns no legacy credit, meaning that conversation re-exports on every run. It
+fails toward bandwidth rather than loss. Not fixed, because distinguishing a title's
+`--` from the separator's `--` in a name written by a version that recorded no id is
+the same unknowable problem as above; recording it beats pretending it is handled.

@@ -42,10 +42,13 @@ reported success while files were missing, truncated or unreadable.
   across its own separator, so with the stamp on — and for any title containing a
   double dash — the id came back wrong and every run re-downloaded the entire
   archive.
-- **A file written by an earlier version can account for one conversation, not
-  many.** Older exports carry no conversation id, so they are recognised by title;
-  when two conversations share that title, treating one old file as proof that both
-  are done silently lost the one that never landed.
+- **A file written by an earlier version is trusted only when it is unambiguous.**
+  Older exports carry no conversation id, so they can only be recognised by title —
+  and when two conversations share that title, which one the file belongs to is
+  unknowable. Guessing skipped a conversation that had never been saved. Now such a
+  file is trusted only when exactly one conversation claims its title; otherwise
+  both are exported again. An archive from an older version is still recognised, so
+  updating does not re-download everything.
 - **An interrupted archive is no longer reported as saved,** and the archive is
   given a write budget long enough that a large one is not abandoned — and its
   data released — while the browser is still reading it.
@@ -72,7 +75,7 @@ reported success while files were missing, truncated or unreadable.
 
 ### Verification
 
-See `MUTATION-EVIDENCE.md` § Wave 3 and § Wave 3b. Each fix was mutated away and
+See `MUTATION-EVIDENCE.md` § Wave 3, § Wave 3b and § Wave 3c. Each fix was mutated away and
 the test written for it went red, with the exit code read from the test run itself.
 
 Wave 3b is worth reading on its own: the Wave 3 fix was handed to a fresh

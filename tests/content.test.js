@@ -696,6 +696,37 @@ test('preserves every assistant message segment within one turn', () => {
   }
 });
 
+// Closes the surviving mutant recorded as Wave 2a / A: removing the
+// isAttachmentChip branch from nodeToMarkdown left the whole suite green,
+// because every chip fixture wrapped an inner <a href> and therefore still
+// exported through `case 'a'`. A chip carrying no resolvable href has no such
+// fallback -- without the branch it degrades to bare text and the reader is
+// never told a file was attached.
+test('names an attachment chip that carries no link', () => {
+  const chip = {
+    nodeType: 1,
+    tagName: 'div',
+    getAttribute(name) {
+      return name === 'data-testid' ? 'file-chip' : null;
+    },
+    querySelector() {
+      return null;
+    },
+    childNodes: [],
+    textContent: 'quarterly-report.pdf',
+  };
+
+  const previousNode = global.Node;
+  global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
+  try {
+    const md = parser.nodeToMarkdown(chip, 0);
+    assert.match(md, /quarterly-report\.pdf/);
+    assert.notEqual(md.trim(), '');
+  } finally {
+    global.Node = previousNode;
+  }
+});
+
 test('falls back to the child author role when data-turn is absent', () => {
   const bubble = { textContent: 'Fallback question' };
   const message = {

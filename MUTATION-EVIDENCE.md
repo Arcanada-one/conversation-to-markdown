@@ -88,10 +88,19 @@ Baseline before mutations: **66 pass, 0 fail, EXIT=0**.
 | Field | Value |
 | --- | --- |
 | **Edit** | Remove the `if (isAttachmentChip(node)) { … }` block from `nodeToMarkdown`. |
-| **Test that went red** | none — full suite stayed **66 pass, EXIT=0** |
-| **EXIT** | **0** |
+| **Test that went red** | `names an attachment chip that carries no link` |
+| **EXIT** | **1** |
 
-Chip fixtures that wrap an inner `<a href>` still export via `case 'a'`. Turn-level attachment capture is isolated in **F** below.
+**This mutant SURVIVED when first measured, and the gap was real rather than mere
+redundancy.** Every chip fixture in the suite wrapped an inner `<a href>`, so removing
+the branch still exported the file through `case 'a'` and nothing went red. But the
+branch also handles two paths that `case 'a'` cannot reach: a chip with no resolvable
+href (falls to `labelFromAttachmentChip`) and a chip whose href uses the `sandbox:`
+scheme. Without it, a linkless chip degrades to bare text and the reader is never told
+a file was attached — silent loss of exactly the kind this task exists to remove.
+A test for the linkless chip was added (`tests/content.test.js`), and re-running the
+same mutation now yields **EXIT=1** on that test. Turn-level capture remains isolated
+in **F** below.
 
 ### B. Sandbox Code Interpreter links
 

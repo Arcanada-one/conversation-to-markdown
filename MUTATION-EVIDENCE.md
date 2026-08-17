@@ -903,6 +903,16 @@ before normalisation now goes red.
 114 tests, all green. The 29-case battery, the invariant sweep and the two-run
 end-to-end (stamp ON and OFF) all re-run clean after the change.
 
+### Known limitation, safe direction
+
+`foldExceptId` folds up to the FIRST marker in the whole key, so a `~` appearing in a
+*directory* name stops the folder folding (`A~B/C~ID` → `a~B/C~ID`). Unreachable in
+practice — `slugifyTitle` strips the marker from both the conversation slug and the
+project slug — and harmless if it were reached: the generated side is lowercased up to
+its own first marker, so a mismatch can only leave a file UNRECOGNISED, i.e. re-exported.
+It can never make a file match a different conversation. Verified by construction and by
+running it, and recorded rather than "fixed" with another special case.
+
 One stale expectation in my own probe was corrected rather than left to mislead: for
 `Budget---draft.md`, skipping the conversation whose slug *is* `Budget---draft` is
 correct — that file is genuinely its own. The property under test is that the unrelated

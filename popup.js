@@ -1,5 +1,6 @@
 const btn = document.getElementById('btn-copy');
 const btnCancel = document.getElementById('btn-cancel');
+const btnPause = document.getElementById('btn-pause');
 const status = document.getElementById('status');
 const chkImages = document.getElementById('chk-images');
 const chkTimestamp = document.getElementById('chk-timestamp');
@@ -10,6 +11,7 @@ const batchWarning = document.getElementById('batch-warning');
 var scanningTabId = null;
 var progressTimer = null;
 var batchCancelled = false;
+var batchPaused = false;
 
 function showStatus(type, message) {
   status.className = type;
@@ -192,12 +194,84 @@ function mdDownloadPath(convSlug, projectSlug, useTimestamp, stamp) {
   return conversationFolderPath(convSlug, projectSlug) + '/' + mdName;
 }
 
+/** Reduce a download path to the part that identifies a conversation export.
+ *
+ *  Two things made the naive comparison always fail, and both are why a
+ *  restarted export used to re-download everything:
+ *
+ *  1. `chrome.downloads.search` reports an ABSOLUTE path
+ *     (a full path under the user's Downloads folder), while the batch
+ *     builds a RELATIVE one (`chatgpt-export/proj/Chat/Chat.md`). Comparing the
+ *     two forms is a guaranteed miss, and a fixture that feeds relative paths
+ *     back models a Chrome that does not exist.
+ *  2. With the date-time stamp enabled the filename carries the CURRENT run's
+ *     stamp, so a file from a previous run could never match by name.
+ *
+ *  So identity is the conversation FOLDER plus the stem, with any `--<stamp>`
+ *  suffix and any leading directories above `chatgpt-export/` removed. */
+function completionKeyForPath(downloadPath) {
+  var normalized = String(downloadPath || '').replace(/\\/g, '/');
+  var anchor = normalized.indexOf('chatgpt-export/');
+  if (anchor > 0) normalized = normalized.slice(anchor);
+  var segments = normalized.split('/').filter(Boolean);
+  if (!segments.length) return '';
+  var file = segments.pop();
+  var stem = file.replace(/\.md$/i, '').replace(/--\d{8}-\d{4}$/, '');
+  return segments.concat(stem).join('/').toLowerCase();
+}
+
+/** Build the completion key a conversation would have once exported. */
+function completionKeyForConversation(convSlug, projectSlug) {
+  return completionKeyForPath(conversationFolderPath(convSlug, projectSlug) + '/' + (convSlug || 'conversation') + '.md');
+}
+
 /** Skip conversations whose markdown already landed in a prior partial run. */
-function filterPendingConversations(conversations, completedPaths, projectSlug, useTimestamp, stamp) {
+function filterPendingConversations(conversations, completedPaths, projectSlug) {
+  var keys = new Set();
+  if (completedPaths && typeof completedPaths.forEach === 'function') {
+    completedPaths.forEach(function(item) {
+      var key = completionKeyForPath(item);
+      if (key) keys.add(key);
+    });
+  }
   return conversations.filter(function(conv) {
     var slug = conv.slug || conv.id;
-    return !completedPaths.has(mdDownloadPath(slug, projectSlug, useTimestamp, stamp));
+    return !keys.has(completionKeyForConversation(slug, projectSlug));
   });
+}
+
+/** Classify a per-conversation failure so the run can react instead of
+ *  burning through the remaining list.
+ *
+ *  A dropped network is NOT a property of the conversation being exported: on
+ *  a 40-conversation run it would otherwise fail 39 more times and report 39
+ *  broken conversations. Offline and unreachable are therefore HOLD conditions,
+ *  while a genuine per-conversation problem is RETRY then SKIP. */
+function classifyBatchFailure(message) {
+  var text = String(message || '').toLowerCase();
+  if (typeof navigator !== 'undefined' && navigator && navigator.onLine === false) return 'offline';
+  if (/failed to fetch|network ?error|net::|err_internet|err_network|err_name_not_resolved|err_connection/.test(text)) return 'offline';
+  if (/\b(?:502|503|504)\b|bad gateway|service unavailable|gateway timeout|too many requests|\b429\b/.test(text)) return 'unreachable';
+  if (/did not load|timed out|timeout/.test(text)) return 'transient';
+  return 'conversation';
+}
+
+/** Exponential backoff with a finite budget: 1s, 2s, 4s, capped. */
+function backoffDelayMs(attempt) {
+  return Math.min(1000 * Math.pow(2, Math.max(0, attempt - 1)), 8000);
+}
+
+function sleep(ms) {
+  return new Promise(function(resolve) { setTimeout(resolve, ms); });
+}
+
+/** Block while the operator has paused, and report cancellation. */
+async function waitWhilePaused(controls) {
+  while (controls && controls.isPaused && controls.isPaused()) {
+    if (controls.isCancelled && controls.isCancelled()) return false;
+    await sleep(250);
+  }
+  return !(controls && controls.isCancelled && controls.isCancelled());
 }
 
 /** Resume a batch by reading prior download paths — no extension storage API. */
@@ -395,17 +469,22 @@ async function runBatchExport(tab, options) {
     return { ok: false, error: 'No conversations found in the sidebar. Open a ChatGPT Project page first.' };
   }
 
-  var pending = filterPendingConversations(conversations, completedPaths, projectSlug, useTimestamp, batchStamp);
+  var pending = filterPendingConversations(conversations, completedPaths, projectSlug);
   var skipped = conversations.length - pending.length;
   var exported = 0;
   var errors = [];
 
-  for (var index = 0; index < pending.length; index++) {
-    if (batchCancelled) break;
-    var conv = pending[index];
-    var progressTitle = conv.title || conv.slug || conv.id;
-    if (onProgress) onProgress(index, pending.length, progressTitle);
+  var retried = 0;
+  var held = 0;
+  var maxAttempts = options.maxAttempts || 3;
+  var maxHoldRounds = options.maxHoldRounds || 20;
+  var controls = {
+    isPaused: options.isPaused || function() { return batchPaused; },
+    isCancelled: options.isCancelled || function() { return batchCancelled; },
+  };
 
+  /** Fetch one conversation. Returns {ok, result} or {ok:false, error}. */
+  async function attemptConversation(conv) {
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: function(href) { window.location.href = href; },
@@ -424,8 +503,7 @@ async function runBatchExport(tab, options) {
     });
     var ready = readyResult?.[0]?.result;
     if (!ready || !ready.ready) {
-      errors.push((conv.title || conv.id) + ': ' + ((ready && ready.error) || 'did not load'));
-      continue;
+      return { ok: false, error: (ready && ready.error) || 'did not load' };
     }
 
     await chrome.scripting.executeScript({
@@ -435,18 +513,80 @@ async function runBatchExport(tab, options) {
 
     scanningTabId = tab.id;
     startProgressPolling(tab.id);
+    var results;
+    try {
+      results = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: async function() { return getConversationMarkdown(); },
+      });
+    } finally {
+      stopProgressPolling();
+    }
 
-    var results = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: async function() { return getConversationMarkdown(); },
-    });
-    stopProgressPolling();
+    var scanned = results?.[0]?.result;
+    if (!scanned || !scanned.ok) {
+      return { ok: false, error: (scanned && scanned.error) || 'scan failed' };
+    }
+    return { ok: true, result: scanned };
+  }
 
-    var result = results?.[0]?.result;
-    if (!result || !result.ok) {
-      errors.push((conv.title || conv.id) + ': ' + ((result && result.error) || 'scan failed'));
+  for (var index = 0; index < pending.length; index++) {
+    if (controls.isCancelled()) break;
+    // Pause is honoured BETWEEN conversations and inside the retry wait below,
+    // so a long run can be held without losing the conversations already done.
+    if (!(await waitWhilePaused(controls))) break;
+    var conv = pending[index];
+    var progressTitle = conv.title || conv.slug || conv.id;
+    if (onProgress) onProgress(index, pending.length, progressTitle);
+
+    var attempt = 0;
+    var outcome = null;
+    var lastError = '';
+    while (attempt < maxAttempts) {
+      attempt += 1;
+      try {
+        outcome = await attemptConversation(conv);
+      } catch (err) {
+        outcome = { ok: false, error: (err && err.message) || String(err) };
+      }
+      if (outcome.ok) break;
+
+      lastError = outcome.error;
+      var kind = classifyBatchFailure(lastError);
+      if (kind === 'conversation') break;          // a real per-conversation problem: do not retry
+      if (controls.isCancelled()) break;
+
+      if (kind === 'offline' || kind === 'unreachable') {
+        // The network, not this conversation. HOLD rather than spending the
+        // remaining list: a 40-conversation export must not fail 39 times
+        // because the connection dropped for a minute.
+        if (held >= maxHoldRounds) {
+          lastError = 'network unavailable after ' + held + ' waits: ' + lastError;
+          break;
+        }
+        held += 1;
+        if (onProgress) onProgress(index, pending.length, progressTitle + ' — waiting for the network (' + held + ')');
+        attempt -= 1;                               // a hold is not an attempt against this conversation
+        await sleep(backoffDelayMs(Math.min(held, 4)));
+        if (!(await waitWhilePaused(controls))) break;
+        continue;
+      }
+
+      // transient: retry with backoff inside this conversation's budget
+      if (attempt < maxAttempts) {
+        retried += 1;
+        if (onProgress) onProgress(index, pending.length, progressTitle + ' — retry ' + attempt + '/' + (maxAttempts - 1));
+        await sleep(backoffDelayMs(attempt));
+        if (!(await waitWhilePaused(controls))) break;
+      }
+    }
+
+    if (controls.isCancelled()) break;
+    if (!outcome || !outcome.ok) {
+      errors.push((conv.title || conv.id) + ': ' + (lastError || 'failed'));
       continue;
     }
+    var result = outcome.result;
 
     if (downloadImages) {
       await saveConversationExport(tab.id, result, {
@@ -485,11 +625,26 @@ async function runBatchExport(tab, options) {
     ok: true,
     total: conversations.length,
     exported: exported,
+    // Reported explicitly: a conversation skipped because it was already on
+    // disk is not a failure, but silence about it reads as success.
     skipped: skipped,
-    cancelled: batchCancelled,
+    retried: retried,
+    networkWaits: held,
+    cancelled: controls.isCancelled(),
     errors: errors,
     zipName: zipName,
   };
+}
+
+/** Hold the run without losing it. A long export over a network the extension
+ *  does not control needs a hold that is not a cancel: cancelling keeps what
+ *  landed but ends the run, while pausing resumes exactly where it stopped. */
+if (btnPause) {
+  btnPause.addEventListener('click', () => {
+    batchPaused = !batchPaused;
+    btnPause.textContent = batchPaused ? 'Resume' : 'Pause';
+    if (batchPaused) showStatus('', 'Paused — press Resume to continue.');
+  });
 }
 
 btnCancel.addEventListener('click', async () => {
@@ -514,6 +669,11 @@ btn.addEventListener('click', async () => {
   btn.textContent = batchMode ? 'Preparing batch export…' : 'Scanning conversation…';
   btnCancel.classList.add('visible');
   btnCancel.disabled = false;
+  if (btnPause) {
+    batchPaused = false;
+    btnPause.textContent = 'Pause';
+    btnPause.classList.add('visible');
+  }
   btnCancel.textContent = batchMode ? 'Stop export' : 'Stop scanning';
   status.className = '';
   status.textContent = '';
@@ -673,6 +833,11 @@ if (typeof module !== 'undefined' && module.exports) {
     conversationFolderPath: conversationFolderPath,
     downloadOne: downloadOne,
     filterPendingConversations: filterPendingConversations,
+    completionKeyForPath: completionKeyForPath,
+    completionKeyForConversation: completionKeyForConversation,
+    classifyBatchFailure: classifyBatchFailure,
+    backoffDelayMs: backoffDelayMs,
+    waitWhilePaused: waitWhilePaused,
     formatBatchProgress: formatBatchProgress,
     formatExportTimestamp: formatExportTimestamp,
     exportPath: exportPath,

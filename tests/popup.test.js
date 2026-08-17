@@ -87,11 +87,27 @@ function createPopupHarness(runScan, options = {}) {
       remove(name) { this._names.delete(name); },
     },
   };
+  // The pause control needs a real element: the popup attaches a listener to
+  // it, and the harness default (`return status`) has no addEventListener.
+  const pauseButton = {
+    textContent: 'Pause',
+    disabled: false,
+    _handlers: {},
+    addEventListener(event, handler) { this._handlers[event] = handler; },
+    click() { if (this._handlers.click) return this._handlers.click(); },
+    classList: {
+      _names: new Set(),
+      contains(name) { return this._names.has(name); },
+      add(name) { this._names.add(name); },
+      remove(name) { this._names.delete(name); },
+    },
+  };
   const context = {
     document: {
       getElementById: (id) => {
         if (id === 'btn-copy') return button;
         if (id === 'btn-cancel') return cancelButton;
+        if (id === 'btn-pause') return pauseButton;
         if (id === 'chk-images') return checkbox;
         if (id === 'chk-timestamp') return timestampCheckbox;
         if (id === 'chk-batch') return batchCheckbox;

@@ -76,3 +76,79 @@ test('mdDownloadPath nests each conversation under the project folder', () => {
     /alpha--20260817-1200\.md$/,
   );
 });
+
+// ---------------------------------------------------------------------------
+// Wave 2e — long-run resilience. A full-project export is a long job over a
+// network the extension does not control, so these behaviours are requirements
+// rather than niceties: survive a blip, distinguish a dead network from a bad
+// conversation, hold and resume, and never re-download what already landed.
+// ---------------------------------------------------------------------------
+
+test('resume matches the ABSOLUTE paths chrome.downloads.search really returns', () => {
+  const popup = loadPopupExports();
+
+  // This is the whole point of the test: Chrome reports a full filesystem path,
+  // while the batch builds a relative one. A fixture that feeds relative paths
+  // back models a Chrome that does not exist, and that fixture is exactly why
+  // this defect shipped green.
+  const absolute = '/Downloads/chatgpt-export/proj/First-chat/First-chat.md';
+  const conversations = [{ slug: 'First-chat' }, { slug: 'Second-chat' }];
+
+  const pending = popup.filterPendingConversations(conversations, new Set([absolute]), 'proj');
+  assert.equal(pending.length, 1, 'an already-downloaded conversation must be skipped');
+  assert.equal(pending[0].slug, 'Second-chat');
+});
+
+test('resume survives a timestamped filename and Windows separators', () => {
+  const popup = loadPopupExports();
+
+  // With the date-time stamp enabled the name carries the CURRENT run's stamp,
+  // so a file from a previous run can never match by name. Identity is the
+  // folder plus the stem, stamp stripped.
+  const run1 = popup.completionKeyForPath('/Downloads/chatgpt-export/proj/Chat/Chat--20260817-1000.md');
+  const run2 = popup.completionKeyForPath('C:\\Downloads\\chatgpt-export\\proj\\Chat\\Chat--20260817-1400.md');
+  const expected = popup.completionKeyForConversation('Chat', 'proj');
+
+  assert.equal(run1, run2, 'two runs of the same conversation must share one key');
+  assert.equal(run1, expected, 'the key must match what the batch will look up');
+});
+
+test('classifies a dead network apart from a bad conversation', () => {
+  const popup = loadPopupExports();
+
+  // A dropped network is not a property of the conversation being exported. If
+  // it were treated as one, a 40-conversation export would fail 39 more times.
+  assert.equal(popup.classifyBatchFailure('Failed to fetch'), 'offline');
+  assert.equal(popup.classifyBatchFailure('net::ERR_INTERNET_DISCONNECTED'), 'offline');
+  assert.equal(popup.classifyBatchFailure('503 Service Unavailable'), 'unreachable');
+  assert.equal(popup.classifyBatchFailure('did not load'), 'transient');
+  assert.equal(popup.classifyBatchFailure('unexpected parser state'), 'conversation');
+});
+
+test('backs off exponentially with a finite ceiling', () => {
+  const popup = loadPopupExports();
+  assert.equal(popup.backoffDelayMs(1), 1000);
+  assert.equal(popup.backoffDelayMs(2), 2000);
+  assert.equal(popup.backoffDelayMs(3), 4000);
+  // Capped: an unbounded backoff is a hang wearing a retry costume.
+  assert.equal(popup.backoffDelayMs(9), 8000);
+});
+
+test('a paused run holds instead of proceeding, and a cancel releases it', async () => {
+  const popup = loadPopupExports();
+
+  let paused = true;
+  let cancelled = false;
+  let polls = 0;
+  const controls = {
+    isPaused: () => { polls += 1; if (polls > 2) paused = false; return paused; },
+    isCancelled: () => cancelled,
+  };
+  assert.equal(await popup.waitWhilePaused(controls), true, 'resuming must report the run may continue');
+  assert.ok(polls > 1, 'the hold must actually wait rather than fall through');
+
+  // Cancelling while held must release the wait and report "do not continue".
+  paused = true;
+  cancelled = true;
+  assert.equal(await popup.waitWhilePaused(controls), false);
+});

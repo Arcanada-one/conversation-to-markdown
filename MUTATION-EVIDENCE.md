@@ -316,3 +316,58 @@ The shim, not the extractor, was broken; re-running with the attribute present
 returned the turn with its image intact. This is the exact failure mode this
 section exists to prevent: a fixture that diverges from the real markup can
 manufacture a defect as easily as it can hide one.
+
+## Wave 2e — long-run resilience
+
+Operator requirement, 2026-08-17: a full-project export is a long job over a
+network the extension does not control, so it must survive network failures and
+site unavailability, be pausable, resumable and cancellable, and on a restart
+check what is already downloaded instead of fetching it twice.
+
+### The defect the green suite did not catch
+
+Resume was implemented but could never work. `chrome.downloads.search` reports a
+full path under the user's Downloads folder; the batch built a relative one; the
+`Set` lookup therefore always missed. Driving the real `popup.js` against a mock
+that returns an absolute path — which is what Chrome does — produced
+`pending = 2` where it must be `1`, i.e. a restarted export re-downloaded
+everything. The 82 tests passing at the time fed RELATIVE paths back, so the
+fixture modelled a Chrome that does not exist. Same class as Wave 2d.
+
+A second, independent break: with the date-time stamp enabled the filename
+carries the CURRENT run's stamp, so a file from a previous run could never match
+by name either.
+
+### Mutations — all five kill a test
+
+| # | Edit | Test that went red | EXIT |
+| --- | --- | --- | --- |
+| A | In `completionKeyForPath`, stop stripping the leading path (`var anchor = -1`). | `resume matches the ABSOLUTE paths chrome.downloads.search really returns` (+1 more) | **1** |
+| B | In `completionKeyForPath`, keep the `--<stamp>` suffix. | `resume survives a timestamped filename and Windows separators` | **1** |
+| C | In `classifyBatchFailure`, never return `offline`. | `classifies a dead network apart from a bad conversation` | **1** |
+| D | In `backoffDelayMs`, remove the `Math.min(..., 8000)` cap. | `backs off exponentially with a finite ceiling` | **1** |
+| E | In `waitWhilePaused`, make the hold loop `while (false)`. | `a paused run holds instead of proceeding, and a cancel releases it` | **1** |
+
+### End-to-end runs, not only unit tests
+
+The real `runBatchExport` was driven through four scenarios against a fake
+`chrome` API, asserting on what reached `chrome.downloads`:
+
+| Scenario | Result |
+| --- | --- |
+| Clean, 3 conversations | `exported=3`, one attempt each, 3 files written |
+| Transient failure on conversation 2 | `exported=3`, `retried=1`, attempts `{a:1, b:2, c:1}` — the conversation that failed once was recovered instead of lost |
+| Network down on conversation 3 | `exported=2`, `networkWaits=2`, one reported error naming the network; the other two conversations unaffected |
+| Cancel after the first conversation | `ok=true`, `cancelled=true`, `exported=1` — partial work kept and reported |
+| Resume with one conversation already on disk (absolute path) | `total=3`, `exported=2`, `skipped=1`; progress showed `1/2 Two`, `2/2 Three` |
+| Pause held for three polls, then released | run continued and finished all 3 |
+
+### A probe error worth recording
+
+Two intermediate probes reported `runBatchExport` never returning, and both
+diagnoses were WRONG. `searchCompletedDownloadPaths` wraps
+`chrome.downloads.search` in a callback promise, and the mock was written as
+`async () => []` — it returned a promise and never invoked the callback, so the
+await never settled. The mock was broken, not the code. This is the third time
+in this task that a fixture manufactured a defect; the lesson is the same as
+Wave 2d's.

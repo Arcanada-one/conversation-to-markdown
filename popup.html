@@ -75,6 +75,20 @@
 
     #btn-cancel:hover { color: #e05252; border-color: #e0525266; }
     #btn-cancel.visible { display: block; }
+    #btn-pause {
+      display: none;
+      width: 100%;
+      margin-top: 6px;
+      padding: 6px;
+      font-size: 12px;
+      background: none;
+      border: 1px solid #ffffff33;
+      border-radius: 6px;
+      color: #cfcfcf;
+      cursor: pointer;
+    }
+    #btn-pause:hover { color: #ffffff; border-color: #ffffff66; }
+    #btn-pause.visible { display: block; }
 
     #status {
       margin-top: 14px;
@@ -146,6 +160,7 @@
   </div>
 
   <button id="btn-copy">Copy as Markdown</button>
+  <button id="btn-pause">Pause</button>
   <button id="btn-cancel">Stop scanning</button>
 
   <label class="toggle">

@@ -5,6 +5,39 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] — 2026-08-17
+
+### Added
+
+- **Pause and resume a batch run.** A full-project export is a long job; the
+  popup now carries a **Pause** control that holds the run between
+  conversations and inside a retry wait, and continues exactly where it stopped.
+  Cancelling still keeps everything already written — pausing is not cancelling.
+- **Transient failures are retried with backoff** (1s, 2s, 4s, capped at 8s)
+  before a conversation is written off, with a finite attempt budget reported in
+  the summary.
+- **A dropped network holds the run instead of consuming it.** Offline and
+  site-unreachable conditions are told apart from a genuine per-conversation
+  error, so a 40-conversation export no longer fails 39 more times because the
+  connection went away for a minute. The wait budget is finite and reported.
+- **The summary now reports `retried` and `networkWaits`** alongside exported,
+  skipped and failed. A conversation skipped because it was already on disk is
+  not a failure, but silence about it reads as success.
+
+### Fixed
+
+- **Resume actually resumes.** `chrome.downloads.search` reports a full path
+  under the user's Downloads folder while the batch built a relative one, so the
+  "already downloaded?" lookup could never match and a restarted export
+  re-downloaded everything. Completion is now keyed on the conversation folder
+  and stem, with any date-time stamp stripped, so a run started after a
+  timestamped export still recognises what landed. Path separators of either
+  platform are handled.
+
+### Verification
+
+See `MUTATION-EVIDENCE.md` § Wave 2e.
+
 ## [1.4.0] — 2026-08-17
 
 ### Added

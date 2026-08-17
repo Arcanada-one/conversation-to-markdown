@@ -5,6 +5,54 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] — 2026-08-17
+
+Release-readiness pass. Two independent adversarial audits of 1.5.0 — one on DOM
+and resume correctness, one on Web Store compliance — found five defects that the
+87-test suite passed clean. Every one of them was a **silent** failure: the popup
+reported success while files were missing, truncated or unreadable.
+
+### Fixed
+
+- **A conversation is no longer skipped because another one shares its title.**
+  Resume identified conversations by their title-derived slug, so duplicate
+  titles — ordinary inside a Project, and "Untitled" especially — collapsed onto
+  one key. Interrupting a run after the first landed made every later namesake be
+  skipped **forever** as "already exported". Resume now keys on the conversation
+  id, which ChatGPT guarantees unique, and the id is recorded in the batch
+  filename so a resumed run can recover it. Files written by earlier versions are
+  still recognised, so upgrading does not re-download an archive.
+- **A write Chrome refused is no longer counted as a saved conversation.** The
+  download result was discarded, so a run whose every write was rejected reported
+  the whole project as exported — zero files on disk, "40 saved" on screen.
+  Failed writes are now reported per conversation.
+- **A conversation titled `..` no longer breaks the entire export.** The slug
+  becomes a directory name, and Chrome rejects any download path containing a
+  `..` back-reference, so one such title made every write in the run fail. A
+  dot-only title now falls back to a generated name.
+- **A truncated export is no longer banked as complete.** When a scan stalled, the
+  partial file was recorded as done, so re-running — the one action that could
+  repair it — skipped it as "already exported". Partial exports are now reported
+  and left pending.
+- **Cyrillic filenames survive extraction from the zip.** Names were written as
+  UTF-8 bytes but the header flag declaring so was never set, so extractors fell
+  back to code page 437 and Russian titles unzipped as mojibake.
+
+### Changed
+
+- **`activeTab` permission removed.** It was never load-bearing: `scripting` is
+  authorised by the declared host permissions. It was also misleading — an
+  `activeTab` grant is revoked on navigation, and a batch export navigates the
+  tab deliberately. Fewer permissions, identical behaviour.
+- **The store description and privacy statement now describe what the extension
+  actually does** — batch export across a Project, artifact downloads, the zip,
+  and the fact that resume reads download history to find what already landed.
+
+### Verification
+
+See `MUTATION-EVIDENCE.md` § Wave 3. Each fix was mutated away and the test
+written for it went red, with the exit code read from the test run itself.
+
 ## [1.5.0] — 2026-08-17
 
 ### Added

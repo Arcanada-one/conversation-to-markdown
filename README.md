@@ -15,6 +15,11 @@ Long conversations are difficult to archive when the page keeps only part of the
 - Captures user and assistant turns across a virtualized conversation, including very long threads.
 - Names the export after the conversation title shown in the sidebar, and adds that title as the document's `#` heading.
 - Optionally downloads every image to `chatgpt-export/<title>/` and rewrites the Markdown to point at the local copies.
+- **Exports every conversation in a ChatGPT Project in one run**, each into its own folder, optionally bundled into a single `.zip`.
+- **Downloads all attachments, not just images** — PDF, Word, spreadsheets, archives. What can be saved is decided by the host serving the file, never by its extension.
+- **Survives a long run:** transient failures retry with a capped backoff, a dropped network or an unreachable site pauses the run instead of consuming the rest of the list, and the run can be paused, resumed, or cancelled. Cancelling keeps everything already written.
+- **Resumes without re-downloading.** A restarted export recognises what already landed and skips it, identifying each conversation by its ChatGPT id — so two conversations sharing a title, including several called "Untitled", never mask one another.
+- **Re-exports without overwriting**, when you ask for it: a date-time stamp in the filename keeps the previous version alongside the new one.
 - Preserves paragraphs, headings, lists, blockquotes, links, code, tables, and visible generated images.
 - Removes query parameters from exported page links; image URLs keep the parameters their host requires to serve the file.
 - Combines multiple message segments from one turn instead of keeping only the first paragraph.
@@ -84,8 +89,9 @@ The extension asks only for permissions used by the export flow:
 
 - `clipboardWrite` writes the finished Markdown to your clipboard.
 - `scripting` runs the extraction entrypoint in that tab when requested.
-- `downloads` saves the Markdown file and images to your Downloads folder — used only when you tick the save checkbox.
-- Host access covers `https://chatgpt.com/*`, `https://chat.openai.com/*`, and `https://files.oaiusercontent.com/*`. The third host serves conversation images and is contacted only while downloading them.
+- `downloads` saves the Markdown file and attachments to your Downloads folder — used only when you tick the save checkbox. It also lets a resumed batch export ask the browser which files it already downloaded under `chatgpt-export/`, which is how resume avoids fetching the same conversation twice; the extension keeps no copy of that answer and sends it nowhere.
+- Host access covers `https://chatgpt.com/*`, `https://chat.openai.com/*`, and `https://files.oaiusercontent.com/*`. The third host serves conversation files and is contacted only while downloading them.
+- There is no `activeTab` permission and no background service worker. `scripting` is authorised by the host permissions above, and the popup refuses to run on any other site.
 - The content script loads at `document_idle` on the two conversation hosts so it can observe the DOM; extraction begins only after you press the copy button.
 
 See [PRIVACY.md](PRIVACY.md) for the complete data-handling statement.
@@ -98,7 +104,10 @@ See [PRIVACY.md](PRIVACY.md) for the complete data-handling statement.
 - Unsafe executable link schemes are intentionally omitted.
 - Temporary or authenticated page links may stop working after URL query parameters are removed.
 - Image URLs are time-limited. Download them while the conversation is open; links left in the Markdown expire.
-- Chrome appends `(1)`, `(2)`, … when a filename already exists, so re-exporting the same conversation creates a new copy rather than overwriting the old one.
+- Chrome appends `(1)`, `(2)`, … when a filename already exists, so re-exporting the same conversation creates a new copy rather than overwriting the old one. A Chrome extension cannot append to an existing file; the date-time stamp option exists because of that limit, not as a preference.
+- **A batch export needs the popup to stay open.** There is no background worker by design, so closing the popup ends the run. What already landed is kept, and restarting resumes from there.
+- **A batch export navigates the tab** through each conversation in turn, so the tab is in use for the duration of the run.
+- The Project conversation list is read from the page's sidebar, so only conversations the sidebar shows can be exported.
 
 ## Development
 

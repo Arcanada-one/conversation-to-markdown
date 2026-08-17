@@ -188,9 +188,23 @@ function conversationFolderPath(convSlug, projectSlug) {
   return convSlug ? root + '/' + convSlug : root;
 }
 
-/** Full download path for a conversation's markdown file. */
-function mdDownloadPath(convSlug, projectSlug, useTimestamp, stamp) {
-  var mdName = buildMdFilename(convSlug, useTimestamp, null, stamp);
+/** Build the .md filename for a conversation inside a BATCH export.
+ *
+ *  The conversation id is appended because titles collide — duplicates and
+ *  "Untitled" are ordinary inside a Project — and a resumed run has nothing but
+ *  the download paths to identify what already landed. A single export keeps the
+ *  clean, title-only name from `buildMdFilename`; only the batch pays the id. */
+function batchMdFilename(convSlug, convId, useTimestamp, stamp) {
+  var base = convSlug || convId || 'conversation';
+  var parts = base;
+  if (useTimestamp) parts += '--' + (stamp || formatExportTimestamp());
+  if (convId) parts += '--' + convId;
+  return parts + '.md';
+}
+
+/** Full download path for a conversation's markdown file in a batch. */
+function mdDownloadPath(convSlug, projectSlug, useTimestamp, stamp, convId) {
+  var mdName = batchMdFilename(convSlug, convId, useTimestamp, stamp);
   return conversationFolderPath(convSlug, projectSlug) + '/' + mdName;
 }
 
@@ -208,7 +222,18 @@ function mdDownloadPath(convSlug, projectSlug, useTimestamp, stamp) {
  *     stamp, so a file from a previous run could never match by name.
  *
  *  So identity is the conversation FOLDER plus the stem, with any `--<stamp>`
- *  suffix and any leading directories above `chatgpt-export/` removed. */
+ *  suffix and any leading directories above `chatgpt-export/` removed.
+ *
+ *  CASE IS SPLIT DELIBERATELY. The directories are compared case-INSENSITIVELY
+ *  because on macOS and Windows `Budget/` and `budget/` are the SAME directory,
+ *  so folding them is what the filesystem actually does. The STEM keeps its
+ *  original case, because `slugifyTitle` does not lower-case and two distinct
+ *  ChatGPT conversations may differ only by case. Folding the stem too made them
+ *  share one key, so interrupting a run after `Budget` exported but before
+ *  `budget` did — the exact situation resume exists for — skipped `budget`
+ *  forever and reported it as "already downloaded". Re-downloading costs
+ *  bandwidth; a false skip silently loses a conversation, so the two directions
+ *  are not equally bad. */
 function completionKeyForPath(downloadPath) {
   var normalized = String(downloadPath || '').replace(/\\/g, '/');
   var anchor = normalized.indexOf('chatgpt-export/');
@@ -216,28 +241,71 @@ function completionKeyForPath(downloadPath) {
   var segments = normalized.split('/').filter(Boolean);
   if (!segments.length) return '';
   var file = segments.pop();
-  var stem = file.replace(/\.md$/i, '').replace(/--\d{8}-\d{4}$/, '');
-  return segments.concat(stem).join('/').toLowerCase();
+  // Strip in the order the batch appends: `<slug>[--<stamp>][--<id>].md`. The id
+  // goes last, so it must come off first or the stamp pattern no longer anchors.
+  var stem = file
+    .replace(/\.md$/i, '')
+    .replace(/--[A-Za-z0-9-]{8,}$/, '')
+    .replace(/--\d{8}-\d{4}$/, '');
+  var folder = segments.join('/').toLowerCase();
+  return folder ? folder + '/' + stem : stem;
+}
+
+/** Extract the conversation id a downloaded file was named for, if any.
+ *
+ *  The id is the only identity ChatGPT guarantees unique. The batch appends it to
+ *  the filename precisely so a resumed run can recover it from the path alone —
+ *  there is no extension storage to consult, by design. */
+function conversationIdFromPath(downloadPath) {
+  var normalized = String(downloadPath || '').replace(/\\/g, '/');
+  var file = normalized.split('/').filter(Boolean).pop() || '';
+  var match = file.replace(/\.md$/i, '').match(/--([A-Za-z0-9-]{8,})$/);
+  if (!match) return '';
+  // A date-time stamp also matches "8+ chars after a double dash"; it is not an id.
+  return /^\d{8}-\d{4}$/.test(match[1]) ? '' : match[1];
+}
+
+/** Skip conversations whose markdown already landed in a prior partial run.
+ *
+ *  Identity is the conversation ID, never the title. Titles are derived into
+ *  slugs, and slugs collide: duplicate titles are ordinary inside a Project,
+ *  "Untitled" is common, and titles differing only by case fold onto one key.
+ *  Every such collision used to make the first export skip the others FOREVER
+ *  while reporting success — a silent loss that re-running could not repair.
+ *  Conversations with no id fall back to the slug key, which is the old
+ *  behaviour and still better than exporting nothing. */
+function filterPendingConversations(conversations, completedPaths, projectSlug) {
+  var ids = new Set();
+  var legacySlugKeys = new Set();
+  if (completedPaths && typeof completedPaths.forEach === 'function') {
+    completedPaths.forEach(function(item) {
+      var id = conversationIdFromPath(item);
+      if (id) {
+        ids.add(id);
+        return;   // an id-bearing file identifies itself; it must not also seed
+                  // the title-keyed set, or two same-titled conversations would
+                  // collide there and one would be skipped without landing.
+      }
+      var key = completionKeyForPath(item);
+      if (key) legacySlugKeys.add(key);
+    });
+  }
+  return conversations.filter(function(conv) {
+    if (conv.id && ids.has(conv.id)) return false;
+    // Fall back to the title-derived key so files written by an EARLIER version —
+    // which carried no id — are still recognised; otherwise upgrading the
+    // extension would re-download an entire archive. This fallback is what makes
+    // a title collision skip a conversation, so it applies only when the id was
+    // not found among the id-bearing files: `legacySlugKeys` excludes any path
+    // that carries an id of its own.
+    var slug = conv.slug || conv.id;
+    return !legacySlugKeys.has(completionKeyForConversation(slug, projectSlug));
+  });
 }
 
 /** Build the completion key a conversation would have once exported. */
 function completionKeyForConversation(convSlug, projectSlug) {
   return completionKeyForPath(conversationFolderPath(convSlug, projectSlug) + '/' + (convSlug || 'conversation') + '.md');
-}
-
-/** Skip conversations whose markdown already landed in a prior partial run. */
-function filterPendingConversations(conversations, completedPaths, projectSlug) {
-  var keys = new Set();
-  if (completedPaths && typeof completedPaths.forEach === 'function') {
-    completedPaths.forEach(function(item) {
-      var key = completionKeyForPath(item);
-      if (key) keys.add(key);
-    });
-  }
-  return conversations.filter(function(conv) {
-    var slug = conv.slug || conv.id;
-    return !keys.has(completionKeyForConversation(slug, projectSlug));
-  });
 }
 
 /** Classify a per-conversation failure so the run can react instead of
@@ -303,6 +371,24 @@ function bytesToBase64DataUrl(bytes, mimeType) {
   return 'data:' + (mimeType || 'application/octet-stream') + ';base64,' + btoa(binary);
 }
 
+/** A URL for bytes that chrome.downloads can accept at ANY size.
+ *
+ *  A `data:` URL cannot carry a project archive: Chrome caps URL length at a
+ *  couple of megabytes, so the one workload the zip exists for is the one that
+ *  would fail — and base64 inflates the payload by a third on the way. A blob
+ *  URL is a handle rather than a payload, so size stops mattering. The popup is a
+ *  real document, so `URL.createObjectURL` is available here; the `data:` helper
+ *  stays for the small in-page artifacts where it is already proven. */
+function bytesToDownloadUrl(bytes, mimeType) {
+  if (typeof Blob === 'function' && typeof URL !== 'undefined' && URL.createObjectURL) {
+    return {
+      url: URL.createObjectURL(new Blob([bytes], { type: mimeType || 'application/octet-stream' })),
+      revoke: function(url) { try { URL.revokeObjectURL(url); } catch (_e) {} },
+    };
+  }
+  return { url: bytesToBase64DataUrl(bytes, mimeType), revoke: function() {} };
+}
+
 function textToUtf8Bytes(text) {
   if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(text);
   var out = new Uint8Array(text.length);
@@ -315,6 +401,40 @@ function addZipEntry(zipEntries, projectSlug, convSlug, filename, content) {
   zipEntries.push({
     name: prefix + filename,
     data: typeof content === 'string' ? textToUtf8Bytes(content) : content,
+  });
+}
+
+/** Wait until Chrome has finished writing a download, so a blob URL backing it
+ *  is not revoked out from under a write still in progress.
+ *
+ *  `chrome.downloads.download` reports acceptance, not completion: its callback
+ *  fires with a download id while the bytes are still being written. Revoking the
+ *  URL at that point truncates exactly the large archive a blob URL exists to
+ *  carry. Resolves anyway on timeout — a stuck download must not wedge the run,
+ *  and leaking one URL for the popup's lifetime is the cheaper failure. */
+function waitForDownloadComplete(downloadId, timeoutMs) {
+  return new Promise(function(resolve) {
+    if (downloadId === undefined || downloadId === null ||
+        typeof chrome === 'undefined' || !chrome.downloads || !chrome.downloads.onChanged) {
+      resolve(false);
+      return;
+    }
+    var settled = false;
+    var finish = function(done) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { chrome.downloads.onChanged.removeListener(listener); } catch (_e) {}
+      resolve(done);
+    };
+    var listener = function(delta) {
+      if (!delta || delta.id !== downloadId || !delta.state) return;
+      if (delta.state.current === 'complete' || delta.state.current === 'interrupted') {
+        finish(delta.state.current === 'complete');
+      }
+    };
+    var timer = setTimeout(function() { finish(false); }, timeoutMs || 120000);
+    chrome.downloads.onChanged.addListener(listener);
   });
 }
 
@@ -339,6 +459,9 @@ function downloadOne(url, filename, targetPath, timeoutMs, conflictAction) {
         url: url,
         filename: filename,
         ok: ok,
+        // Returned so a caller holding a revocable blob URL can wait for the
+        // write to finish before releasing it.
+        downloadId: ok ? downloadId : null,
         error: ok ? null : (chrome.runtime.lastError && chrome.runtime.lastError.message || 'download rejected'),
       });
     });
@@ -379,7 +502,12 @@ async function saveConversationExport(tabId, result, options) {
   var zipEntries = options.zipEntries;
   var slug = result.slug || null;
   var convSlug = slug || 'conversation';
-  var mdName = buildMdFilename(slug, useTimestamp, null, batchStamp);
+  // A batch supplies the conversation id so the file carries its own identity;
+  // a single export keeps the clean, title-only name.
+  var conversationId = options.conversationId || null;
+  var mdName = conversationId
+    ? batchMdFilename(slug, conversationId, useTimestamp, batchStamp)
+    : buildMdFilename(slug, useTimestamp, null, batchStamp);
   var folderPath = projectSlug
     ? conversationFolderPath(convSlug, projectSlug)
     : exportPath(slug, '').replace(/\/$/, '');
@@ -431,7 +559,11 @@ async function saveConversationExport(tabId, result, options) {
     }
   }
 
-  await downloadOne(
+  // The markdown IS the export. Chrome can refuse the write (an invalid filename,
+  // a full disk, a user-cancelled prompt), so the outcome is returned rather than
+  // discarded: a caller that counts a refused write as a saved conversation
+  // reports success for an empty folder.
+  var mdWrite = await downloadOne(
     'data:text/markdown;charset=utf-8,' + encodeURIComponent(mdFinal),
     mdName,
     folderPath + '/' + mdName
@@ -445,6 +577,8 @@ async function saveConversationExport(tabId, result, options) {
     dlTotal: dlTotal,
     dlErrors: dlErrors,
     mdName: mdName,
+    mdOk: mdWrite.ok,
+    mdError: mdWrite.error || null,
   };
 }
 
@@ -476,6 +610,7 @@ async function runBatchExport(tab, options) {
 
   var retried = 0;
   var held = 0;
+  var partial = 0;
   var maxAttempts = options.maxAttempts || 3;
   var maxHoldRounds = options.maxHoldRounds || 20;
   var controls = {
@@ -588,37 +723,80 @@ async function runBatchExport(tab, options) {
     }
     var result = outcome.result;
 
+    var writeOk = false;
+    var writeError = null;
     if (downloadImages) {
-      await saveConversationExport(tab.id, result, {
+      var saved = await saveConversationExport(tab.id, result, {
         downloadImages: true,
         useTimestamp: useTimestamp,
         batchStamp: batchStamp,
         projectSlug: projectSlug,
         zipEntries: zipEntries,
+        conversationId: conv.id,
       });
+      writeOk = saved.mdOk;
+      writeError = saved.mdError;
     } else {
       var slug = result.slug || conv.slug || conv.id;
-      var mdName = buildMdFilename(slug, useTimestamp, null, batchStamp);
+      var mdName = batchMdFilename(slug, conv.id, useTimestamp, batchStamp);
       var folder = conversationFolderPath(slug, projectSlug);
-      await downloadOne(
+      var write = await downloadOne(
         'data:text/markdown;charset=utf-8,' + encodeURIComponent(result.md),
         mdName,
         folder + '/' + mdName
       );
-      if (zipEntries) addZipEntry(zipEntries, projectSlug, slug, mdName, result.md);
+      writeOk = write.ok;
+      writeError = write.error;
+      if (writeOk && zipEntries) addZipEntry(zipEntries, projectSlug, slug, mdName, result.md);
+    }
+
+    // A refused write is a failure, not an export. Counting it made a run whose
+    // every write Chrome rejected report the whole project as saved.
+    if (!writeOk) {
+      errors.push((conv.title || conv.id) + ': not saved (' + (writeError || 'download rejected') + ')');
+      continue;
     }
 
     exported += 1;
     var exportSlug = result.slug || conv.slug || conv.id;
-    completedPaths.add(mdDownloadPath(exportSlug, projectSlug, useTimestamp, batchStamp));
+    if (result.partial) {
+      // A stall-truncated export must NOT be banked as done. Banking it made the
+      // next run skip the conversation as "already exported", so the one action
+      // that could repair a truncated file was the one action refused — while the
+      // popup reported success. Counted and reported instead.
+      partial += 1;
+      errors.push((conv.title || conv.id) + ': saved incompletely (scan did not reach the end) — re-run to finish it');
+    } else {
+      completedPaths.add(mdDownloadPath(exportSlug, projectSlug, useTimestamp, batchStamp, conv.id));
+    }
   }
 
   var zipName = null;
   if (zipEntries && zipEntries.length > 0 && typeof buildStoreZip === 'function') {
+    // The zip is a convenience on top of files that are ALREADY on disk. If it
+    // fails — too many entries for the format, a refused write — the run must
+    // still report the conversations it exported, so the failure is recorded as
+    // an error rather than thrown away or allowed to reject the whole export.
     var stamp = batchStamp || formatExportTimestamp();
-    zipName = (projectSlug || 'project') + '-export--' + stamp + '.zip';
-    var zipBytes = buildStoreZip(zipEntries);
-    await downloadOne(bytesToBase64DataUrl(zipBytes, 'application/zip'), zipName, batchRootPath(projectSlug) + '/' + zipName);
+    var candidateName = (projectSlug || 'project') + '-export--' + stamp + '.zip';
+    var handle = null;
+    try {
+      var zipBytes = buildStoreZip(zipEntries);
+      handle = bytesToDownloadUrl(zipBytes, 'application/zip');
+      var zipWrite = await downloadOne(handle.url, candidateName, batchRootPath(projectSlug) + '/' + candidateName);
+      if (zipWrite.ok) {
+        // Chrome accepted the download; the bytes are still being written. Wait
+        // before the `finally` below revokes the blob URL backing them.
+        await waitForDownloadComplete(zipWrite.downloadId);
+        zipName = candidateName;
+      } else {
+        errors.push('archive not saved (' + (zipWrite.error || 'download rejected') + ') — the exported files are still on disk');
+      }
+    } catch (zipErr) {
+      errors.push('archive not created (' + ((zipErr && zipErr.message) || zipErr) + ') — the exported files are still on disk');
+    } finally {
+      if (handle) handle.revoke(handle.url);
+    }
   }
 
   return {
@@ -629,6 +807,10 @@ async function runBatchExport(tab, options) {
     // disk is not a failure, but silence about it reads as success.
     skipped: skipped,
     retried: retried,
+    // Conversations written but truncated. Reported so "complete" cannot mean
+    // "some files are cut short", and deliberately NOT banked as done so a
+    // re-run repairs them.
+    partial: partial,
     networkWaits: held,
     cancelled: controls.isCancelled(),
     errors: errors,
@@ -830,6 +1012,9 @@ if (typeof module !== 'undefined' && module.exports) {
     splitFilenameExtension: splitFilenameExtension,
     batchRootPath: batchRootPath,
     buildMdFilename: buildMdFilename,
+    batchMdFilename: batchMdFilename,
+    bytesToDownloadUrl: bytesToDownloadUrl,
+    conversationIdFromPath: conversationIdFromPath,
     conversationFolderPath: conversationFolderPath,
     downloadOne: downloadOne,
     filterPendingConversations: filterPendingConversations,

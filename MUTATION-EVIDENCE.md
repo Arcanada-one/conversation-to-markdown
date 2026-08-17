@@ -371,3 +371,79 @@ diagnoses were WRONG. `searchCompletedDownloadPaths` wraps
 await never settled. The mock was broken, not the code. This is the third time
 in this task that a fixture manufactured a defect; the lesson is the same as
 Wave 2d's.
+
+## Wave 3 — release readiness (v1.6.0)
+
+The 87 tests passing at 1.5.0 were not evidence of release readiness. Two
+independent adversarial audits were run against that commit — one on DOM and
+resume correctness, one on Web Store compliance — and between them they found
+five defects the suite passed clean. **Every one was silent**: the popup
+reported success while files were missing, truncated, or unreadable. On a tool
+whose whole purpose is a backup, that is the worst failure class, because the
+user may delete the source believing the copy is good.
+
+### What was NOT a defect, stated plainly
+
+Two suspicions were checked and cleared, so effort does not get spent there
+again. A sidebar selector that matches nothing is a **loud** failure — the run
+returns `ok:false` with an actionable message, verified by execution, so the
+feared "0 conversations, reported as success" path does not exist via selector
+drift. And a Chrome-uniquified `Chat (1).md` does not match the resume key,
+which is the SAFE direction: it re-exports rather than falsely skipping.
+
+### The defects
+
+| # | Defect | Why the suite missed it |
+| --- | --- | --- |
+| 1 | Resume keyed on the title-derived slug, so duplicate titles — ordinary in a Project, "Untitled" especially — collapsed onto one key. Interrupting a run after the first landed skipped every namesake FOREVER as "already exported". | No fixture had two conversations sharing a title. |
+| 2 | `downloadOne`'s result was discarded, so a run whose every write Chrome refused reported the whole project exported. Zero files, "40 saved". | No fixture had Chrome ever refuse a write. |
+| 3 | A conversation titled `..` produced a `..` path segment; Chrome rejects such a filename, so ONE such title made every write in the run fail. Combined with #2 it was silent and total. | `slugifyTitle` never saw a dot-only title; the sibling sanitizer that was tested is a different function producing leaf names, not directories. |
+| 4 | A truncated export was banked as complete, so re-running — the only action that could repair it — skipped it. | `result.partial` was computed and returned, but no batch caller read it. |
+| 5 | Zip filenames were UTF-8 bytes without the header flag declaring so, so extractors fell back to code page 437 and Cyrillic titles unzipped as mojibake — the primary workload. | Tests asserted names round-tripped as bytes, never that an extractor could read them. |
+
+### Mutations — each fix mutated away, each killing its own test
+
+| # | Edit | Test that went red | EXIT |
+| --- | --- | --- | --- |
+| F | Resume ignores the conversation id, keys on the title again. | `two conversations with the SAME title are both exported` (+2 more) | **1** |
+| G | `slugifyTitle` accepts a dot-only title. | `a dot-only title never becomes a path segment` | **1** |
+| H | Batch counts a refused write as exported. | `a rejected write is never counted as an exported conversation` | **1** |
+| I | Partial export banked as done again. | `a truncated export is reported and NOT banked as done` | **1** |
+| J | An id-bearing file also seeds the title-keyed set, so the collision returns through the backward-compatibility fallback. | `two conversations with the SAME title are both exported` | **1** |
+| K | Local zip header drops the UTF-8 flag. | `buildStoreZip declares UTF-8 names…` | **1** |
+| L | Central directory header drops the UTF-8 flag. | `buildStoreZip declares UTF-8 names…` | **1** |
+| M | Zip entry cap removed. | `buildStoreZip refuses more entries than the format can count` | **1** |
+| N | Archive delivered as a `data:` URL again. | `the archive is delivered by handle, not as a megabytes-long URL` | **1** |
+
+Every exit code is the test runner's own, never read after a pipe.
+
+### End-to-end, against the real pipeline
+
+`runBatchExport` was driven through the composed scenarios, asserting on what
+reached `chrome.downloads`:
+
+| Scenario | Result |
+| --- | --- |
+| Two conversations titled "Untitled", the first already on disk | `exported=1 skipped=1`, and the file written carries the SECOND id — the namesake is no longer lost |
+| Chrome refuses every write | `exported=0`, two reported errors — no longer "2 saved" |
+| A truncated scan | `partial=1`, reported and left pending; a later run with a genuinely complete file skips it |
+| Zip run | archive written via a blob handle |
+
+### A measurement that lied, and how it was caught
+
+After setting the UTF-8 flag, the system `unzip -l` STILL showed mojibake, which
+looked like the fix having failed. Writing a reference archive with Python's
+`zipfile` produced byte-identical flags (`0x0800`) and the same mangled listing
+from that same `unzip`. The extractor was the faulty witness, not the writer: a
+flag-honouring extractor reads `Договор/файл.md` from the new archive and
+`╨ö╨╛╨│…` from the old one. A single tool's output is not a measurement — the
+reference implementation is the control.
+
+### Still not verified, and it cannot be verified from here
+
+The browser extension was not connected in this session
+(`list_connected_browsers` returned empty), so the sidebar and attachment-chip
+selectors remain fixture-derived. A LIVE pass on a real Project page is still
+required before submission. A partial sidebar match would export a
+plausible-looking subset and report completion — that specific risk is
+unguarded, because there is no expected count to compare against.

@@ -625,6 +625,27 @@ test('slugifies titles into filesystem-safe names', () => {
   assert.doesNotMatch(parser.slugifyTitle('trailing---'), /-$/);
 });
 
+test('a dot-only title never becomes a path segment', () => {
+  // The slug becomes a DIRECTORY name, and in a batch the project slug does too.
+  // Chrome rejects any downloads.download() filename containing a `..`
+  // back-reference, so a conversation titled ".." made every single write fail —
+  // and because the download result was discarded, the popup reported the whole
+  // project as exported. Zero files on disk, "40 saved" on screen.
+  //
+  // This is a different sanitizer from artifactFilename's: that one only ever
+  // produces a leaf filename, while this one produces path segments.
+  for (const hostile of ['..', '.', '...', '....', '. .', '../..']) {
+    const slug = parser.slugifyTitle(hostile);
+    if (slug === null) continue;                    // rejecting outright is fine
+    assert.doesNotMatch(
+      '/' + slug + '/',
+      /\/\.\.?\//,
+      'slug ' + JSON.stringify(slug) + ' from title ' + JSON.stringify(hostile) +
+        ' is a relative-path segment and would be rejected by chrome.downloads'
+    );
+  }
+});
+
 test('parses numeric conversation order from data-testid', () => {
   assert.equal(typeof parser.parseTurnOrder, 'function');
   assert.equal(parser.parseTurnOrder('conversation-turn-17'), 17);

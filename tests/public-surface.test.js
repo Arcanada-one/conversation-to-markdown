@@ -46,10 +46,19 @@ test('uses a neutral public identity throughout the extension', () => {
   const manifest = JSON.parse(read('manifest.json'));
   const popup = read('popup.html');
   assert.equal(manifest.name, 'Conversation to Markdown');
-  assert.equal(manifest.version, '1.5.0');
+  assert.equal(manifest.version, '1.6.0');
   assert.match(popup, /Conversation to Markdown/);
   assert.doesNotMatch(popup, /ChatGPT\s*→\s*Markdown/);
-  assert.deepEqual([...manifest.permissions].sort(), ['activeTab', 'clipboardWrite', 'downloads', 'scripting']);
+  // An exact-set lock, not a subset check: a permission added without a
+  // deliberate edit here is a permission nobody reviewed.
+  //
+  // `activeTab` was REMOVED in 1.6.0. It was never load-bearing — `scripting` is
+  // authorised by `host_permissions`, and `tab.url` is readable from host
+  // permission alone — and it was actively misleading, because an `activeTab`
+  // grant is revoked on navigation while the batch deliberately navigates the
+  // tab. A declared-but-unused permission is also an over-broad-permission
+  // finding in Web Store review.
+  assert.deepEqual([...manifest.permissions].sort(), ['clipboardWrite', 'downloads', 'scripting']);
 });
 
 test('README states independence and non-affiliation', () => {

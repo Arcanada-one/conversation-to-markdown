@@ -4,6 +4,9 @@
  * into one archive after a batch run.
  */
 
+/** General-purpose bit 11: the filename and comment are UTF-8 encoded. */
+const UTF8_NAME_FLAG = 0x0800;
+
 const CRC32_TABLE = (function buildCrc32Table() {
   const table = new Uint32Array(256);
   for (let i = 0; i < 256; i += 1) {
@@ -52,8 +55,22 @@ function concatChunks(chunks) {
  * @param {Array<{name: string, data: Uint8Array}>} entries
  * @returns {Uint8Array}
  */
+/** The end-of-central-directory record stores the entry count in a uint16, and
+ *  offsets/sizes in uint32. Past those limits a correct archive needs ZIP64,
+ *  which this writer does not implement — `setUint16` would silently wrap and
+ *  produce a corrupt archive that reports no error. Refusing loudly is the only
+ *  honest option for a backup tool. */
+const MAX_ZIP_ENTRIES = 0xffff;
+const MAX_ZIP_BYTES = 0xffffffff;
+
 function buildStoreZip(entries, options) {
   const supplied = options || {};
+  if (entries.length > MAX_ZIP_ENTRIES) {
+    throw new Error(
+      'too many files for one archive (' + entries.length + ' > ' + MAX_ZIP_ENTRIES +
+      '); export without the zip option, or split the project'
+    );
+  }
   const stamp = dosDateTime(supplied.now ? supplied.now() : new Date());
   const localParts = [];
   const centralParts = [];
@@ -67,7 +84,10 @@ function buildStoreZip(entries, options) {
     const localView = new DataView(local.buffer);
     localView.setUint32(0, 0x04034b50, true);
     localView.setUint16(4, 20, true);
-    localView.setUint16(6, 0, true);
+    // General-purpose bit 11 (0x0800) declares the filename is UTF-8. The bytes
+    // always were, but without the flag every extractor falls back to code page
+    // 437 and a Cyrillic conversation title unzips as mojibake.
+    localView.setUint16(6, UTF8_NAME_FLAG, true);
     localView.setUint16(8, 0, true);
     localView.setUint16(10, stamp.dosTime, true);
     localView.setUint16(12, stamp.dosDate, true);
@@ -85,7 +105,9 @@ function buildStoreZip(entries, options) {
     centralView.setUint32(0, 0x02014b50, true);
     centralView.setUint16(4, 20, true);
     centralView.setUint16(6, 20, true);
-    centralView.setUint16(8, 0, true);
+    // The central directory carries its own copy of the flags; an extractor that
+    // reads only this header must see the UTF-8 declaration too.
+    centralView.setUint16(8, UTF8_NAME_FLAG, true);
     centralView.setUint16(10, 0, true);
     centralView.setUint16(12, stamp.dosTime, true);
     centralView.setUint16(14, stamp.dosDate, true);
@@ -103,6 +125,12 @@ function buildStoreZip(entries, options) {
     centralParts.push(central);
 
     offset += local.length;
+    if (offset > MAX_ZIP_BYTES) {
+      throw new Error(
+        'archive too large for one zip (over 4 GB); export without the zip option, ' +
+        'or split the project'
+      );
+    }
   }
 
   const centralDirectory = concatChunks(centralParts);

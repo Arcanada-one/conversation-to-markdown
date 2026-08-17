@@ -866,6 +866,12 @@ function slugifyTitle(title, maxLength) {
     .replace(/^-+|-+$/g, '')
     .slice(0, limit)
     .replace(/-+$/g, '');
+  // This slug becomes a DIRECTORY name — in a batch the project slug does too —
+  // so a dot-only result is a relative-path segment, not a name. Chrome rejects
+  // any downloads.download() filename containing a `..` back-reference, so a
+  // conversation titled ".." made every write in the run fail. Returning null
+  // hands the caller its own fallback name instead.
+  if (/^\.+$/.test(slug)) return null;
   return slug || null;
 }
 

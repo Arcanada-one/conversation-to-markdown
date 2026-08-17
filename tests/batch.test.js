@@ -33,7 +33,12 @@ function loadPopupExports() {
     clearTimeout,
     setInterval,
     clearInterval,
+    // Real popup globals: the popup is a document, so Blob/URL.createObjectURL
+    // exist there. Omitting them would silently exercise the data: fallback and
+    // hide the size-ceiling defect the blob path fixes.
+    Blob,
     URL,
+    Uint8Array,
     encodeURIComponent,
     buildStoreZip: null,
   };
@@ -113,6 +118,67 @@ test('resume survives a timestamped filename and Windows separators', () => {
   assert.equal(run1, expected, 'the key must match what the batch will look up');
 });
 
+// A FALSE SKIP is the one resume failure that loses data permanently: the
+// conversation is never written, the run reports "already exported", and
+// re-running never repairs it. Re-downloading something twice merely costs
+// bandwidth. The two directions are not equally bad, so these tests pin the
+// safe direction for every way two conversations can collide on a title.
+test('two conversations with the SAME title are both exported', () => {
+  const popup = loadPopupExports();
+
+  // Duplicate titles are ordinary inside a Project, and "Untitled" is the
+  // common case. The slug is derived from the title, so slug-keyed resume makes
+  // these two share one key: exporting the first skipped the second forever.
+  const conversations = [
+    { id: 'aaaaaaaa-1111', slug: 'Untitled', title: 'Untitled' },
+    { id: 'bbbbbbbb-2222', slug: 'Untitled', title: 'Untitled' },
+  ];
+  const firstLanded = new Set([
+    '/Downloads/chatgpt-export/proj/Untitled/Untitled--aaaaaaaa-1111.md',
+  ]);
+
+  const pending = popup.filterPendingConversations(conversations, firstLanded, 'proj');
+  const ids = pending.map((c) => c.id);
+
+  assert.deepEqual(ids, ['bbbbbbbb-2222'], 'the second conversation must still be pending');
+});
+
+test('conversations whose titles differ only by case are both exported', () => {
+  const popup = loadPopupExports();
+
+  // Directories must fold: on macOS and Windows `Budget/` and `budget/` are the
+  // SAME directory. The conversation identity must NOT fold, or interrupting a
+  // run after `Budget` landed skips `budget` forever.
+  const conversations = [
+    { id: 'aaaaaaaa-1111', slug: 'Budget' },
+    { id: 'bbbbbbbb-2222', slug: 'budget' },
+  ];
+  const onlyFirstLanded = new Set([
+    '/Downloads/chatgpt-export/proj/Budget/Budget--aaaaaaaa-1111.md',
+  ]);
+
+  const pending = popup.filterPendingConversations(conversations, onlyFirstLanded, 'proj');
+  assert.deepEqual(pending.map((c) => c.id), ['bbbbbbbb-2222']);
+});
+
+test('a slug-less conversation does not skip every other slug-less one', () => {
+  const popup = loadPopupExports();
+
+  // Every conversation without a usable title used to key to the same literal
+  // `conversation`, so the first one exported skipped all the rest.
+  const conversations = [
+    { id: 'aaaaaaaa-1111', slug: '' },
+    { id: 'bbbbbbbb-2222', slug: '' },
+    { id: 'cccccccc-3333', slug: '' },
+  ];
+  const firstLanded = new Set([
+    '/Downloads/chatgpt-export/proj/aaaaaaaa-1111/aaaaaaaa-1111--aaaaaaaa-1111.md',
+  ]);
+
+  const pending = popup.filterPendingConversations(conversations, firstLanded, 'proj');
+  assert.deepEqual(pending.map((c) => c.id), ['bbbbbbbb-2222', 'cccccccc-3333']);
+});
+
 test('classifies a dead network apart from a bad conversation', () => {
   const popup = loadPopupExports();
 
@@ -132,6 +198,151 @@ test('backs off exponentially with a finite ceiling', () => {
   assert.equal(popup.backoffDelayMs(3), 4000);
   // Capped: an unbounded backoff is a hang wearing a retry costume.
   assert.equal(popup.backoffDelayMs(9), 8000);
+});
+
+/** Drive the REAL runBatchExport against a fake `chrome`, so the assertions are
+ *  about what reached `chrome.downloads` rather than about a mock's own shape.
+ *  `downloadBehaviour` decides Chrome's answer per filename. */
+function runBatchAgainstFakeChrome(conversations, downloadBehaviour, options) {
+  const attempted = [];
+  const zipSource = fs.readFileSync(path.join(__dirname, '..', 'zip.js'), 'utf8');
+  const context = {
+    module: { exports: {} },
+    console,
+    document: {
+      getElementById: () => ({
+        addEventListener() {}, disabled: false, textContent: '', value: '', checked: false,
+        classList: { add() {}, remove() {} },
+      }),
+    },
+    navigator: { clipboard: { writeText: async () => {} }, onLine: true },
+    chrome: {
+      tabs: { query: async () => [{ id: 1, url: 'https://chatgpt.com/g/g-p-x/project' }] },
+      scripting: {
+        executeScript: async (o) => {
+          const src = String(o.func || '');
+          if (o.files) return [];
+          if (/location\.href/.test(src)) return [{ result: true }];
+          if (/waitForConversationReady/.test(src)) return [{ result: { ready: true } }];
+          if (/getConversationMarkdown/.test(src)) {
+            const conv = conversations[context.__cursor++ % conversations.length];
+            return [{ result: { ok: true, md: '# x\n', markdown: '# x\n', slug: conv.slug, title: conv.title, lines: 1, words: 1, partial: !!conv.partial } }];
+          }
+          if (/__c2mScan/.test(src)) return [{ result: null }];
+          return [{ result: true }];
+        },
+      },
+      downloads: {
+        download(o, cb) {
+          attempted.push(o.filename);
+          // Chrome REJECTS a filename containing a `..` back-reference; it calls
+          // the callback with undefined and sets runtime.lastError.
+          const accepted = downloadBehaviour(o.filename);
+          if (!accepted) {
+            context.chrome.runtime.lastError = { message: 'Invalid filename' };
+            cb(undefined);
+            context.chrome.runtime.lastError = null;
+            return;
+          }
+          cb(attempted.length);
+        },
+        search(_q, cb) { cb([]); },
+        onChanged: { addListener() {}, removeListener() {} },
+      },
+      runtime: { lastError: null },
+    },
+    __cursor: 0,
+    setTimeout: (fn) => setTimeout(fn, 0),
+    clearTimeout, setInterval: () => 0, clearInterval() {},
+    URL, encodeURIComponent, decodeURIComponent,
+    btoa: (v) => Buffer.from(v, 'binary').toString('base64'),
+    atob: (v) => Buffer.from(v, 'base64').toString('binary'),
+    Uint8Array, TextEncoder, DataView, Math, Date,
+    buildStoreZip: null,
+  };
+  context.window = context;
+  vm.runInNewContext(zipSource, context);
+  context.buildStoreZip = context.module.exports.buildStoreZip;
+  context.module = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'popup.js'), 'utf8'), context);
+
+  const scripting = context.chrome.scripting;
+  const original = scripting.executeScript;
+  scripting.executeScript = async (o) => {
+    const src = String(o.func || '');
+    if (/listSidebarConversations/.test(src)) return [{ result: conversations }];
+    return original(o);
+  };
+
+  return context.module.exports
+    .runBatchExport({ id: 1 }, Object.assign({
+      downloadImages: false, buildZip: false, useTimestamp: false,
+      projectSlug: 'proj', batchStamp: '20260817-1200',
+      maxAttempts: 1, maxHoldRounds: 0,
+      isPaused: () => false, isCancelled: () => false,
+    }, options || {}))
+    .then((res) => ({ res, attempted }));
+}
+
+test('a rejected write is never counted as an exported conversation', async () => {
+  // Chrome rejects any filename with a `..` back-reference. A conversation or
+  // project titled ".." produced exactly that, so EVERY write failed — and
+  // because downloadOne's result was discarded, the popup reported the whole
+  // project as saved. Zero files on disk, "2 saved" on screen. On a backup tool
+  // that is the worst possible outcome: the user is told to trust nothing.
+  const conversations = [
+    { id: 'aaaaaaaa-1111', href: '/c/aaaaaaaa-1111', title: 'One', slug: 'One' },
+    { id: 'bbbbbbbb-2222', href: '/c/bbbbbbbb-2222', title: 'Two', slug: 'Two' },
+  ];
+  const rejectEverything = () => false;
+
+  const { res, attempted } = await runBatchAgainstFakeChrome(conversations, rejectEverything);
+
+  assert.equal(attempted.length, 2, 'both writes must be attempted');
+  assert.equal(res.exported, 0, 'a rejected write must not count as exported');
+  assert.equal(res.errors.length, 2, 'each rejected write must be reported');
+});
+
+test('an accepted write is still counted, so the guard is not blanket', async () => {
+  // The positive control: without it, "exported === 0" could pass because
+  // nothing is ever counted.
+  const conversations = [
+    { id: 'aaaaaaaa-1111', href: '/c/aaaaaaaa-1111', title: 'One', slug: 'One' },
+  ];
+  const { res } = await runBatchAgainstFakeChrome(conversations, () => true);
+  assert.equal(res.exported, 1);
+  assert.equal(res.errors.length, 0);
+});
+
+test('a truncated export is reported and NOT banked as done', async () => {
+  // A stall-truncated file used to be recorded as complete, so the next run
+  // skipped it as "already exported" — the one action that could repair the file
+  // was the one action refused, while the popup said success.
+  const conversations = [
+    { id: 'aaaaaaaa-1111', href: '/c/aaaaaaaa-1111', title: 'One', slug: 'One', partial: true },
+  ];
+  const { res } = await runBatchAgainstFakeChrome(conversations, () => true);
+
+  assert.equal(res.partial, 1, 'a truncated conversation must be reported as partial');
+  assert.ok(
+    res.errors.some((e) => /incompletely|re-run/i.test(e)),
+    'the user must be told which conversation needs re-running, got: ' + JSON.stringify(res.errors)
+  );
+});
+
+test('the archive is delivered by handle, not as a megabytes-long URL', () => {
+  const popup = loadPopupExports();
+
+  // A `data:` URL cannot carry a project archive — Chrome caps URL length at a
+  // couple of megabytes and base64 inflates the payload by a third on the way, so
+  // the one workload the zip exists for is the one that would fail, silently.
+  // A blob URL is a handle, so size stops mattering.
+  const megabyte = new Uint8Array(1024 * 1024);
+  const handle = popup.bytesToDownloadUrl(megabyte, 'application/zip');
+
+  assert.ok(handle.url.length < 1000, 'the URL must be a handle, not the payload: got ' + handle.url.length + ' chars');
+  assert.match(handle.url, /^blob:/);
+  assert.equal(typeof handle.revoke, 'function', 'the caller must be able to release it');
 });
 
 test('a paused run holds instead of proceeding, and a cancel releases it', async () => {

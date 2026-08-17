@@ -1,5 +1,5 @@
 /**
- * ChatGPT → Markdown v1.1.7
+ * ChatGPT → Markdown v1.3.0
  * Content script: parses the live ChatGPT conversation and returns clean Markdown.
  *
  * Iterates [data-turn-id] sections (not just [data-message-author-role]) so that
@@ -41,6 +41,57 @@ function resolveImageUrl(rawUrl) {
   }
 }
 
+/** Visible placeholder when a non-text artifact cannot be exported verbatim. */
+function artifactPlaceholder(kind, detail) {
+  const label = detail ? ' (' + detail + ')' : '';
+  return '\n\n*[' + kind + ' artifact — not exported' + label + ']*\n\n';
+}
+
+function isKatexMathml(node) {
+  const cls = node.className || '';
+  return typeof cls === 'string' && /\bkatex-mathml\b/.test(cls);
+}
+
+function isKatexRoot(node) {
+  const cls = node.className || '';
+  return typeof cls === 'string' && /\bkatex\b/.test(cls) && !/\bkatex-(?:mathml|html)\b/.test(cls);
+}
+
+/** Fixture-derived: live ChatGPT attachment chips use data-testid="file-chip". */
+function isAttachmentChip(node) {
+  return node.getAttribute && node.getAttribute('data-testid') === 'file-chip';
+}
+
+function hrefFromAttachmentChip(node) {
+  if (!node) return null;
+  if (node.tagName && node.tagName.toLowerCase() === 'a') {
+    return node.getAttribute('href') || null;
+  }
+  if (typeof node.querySelector === 'function') {
+    const link = node.querySelector('a[href]');
+    return link ? link.getAttribute('href') : null;
+  }
+  return null;
+}
+
+function labelFromAttachmentChip(node) {
+  const text = (node.textContent || '').trim();
+  if (text) return text;
+  const href = hrefFromAttachmentChip(node);
+  if (!href) return 'attachment';
+  try {
+    const parts = new URL(href, 'https://chatgpt.com/').pathname.split('/');
+    return parts[parts.length - 1] || 'attachment';
+  } catch (_error) {
+    return 'attachment';
+  }
+}
+
+function markdownLink(label, href) {
+  const safeLabel = (label || href).trim();
+  return safeLabel ? '[' + safeLabel + '](' + href + ')' : href;
+}
+
 function nodeToMarkdown(node, depth) {
   if (depth === undefined) depth = 0;
 
@@ -54,6 +105,23 @@ function nodeToMarkdown(node, depth) {
   const children = function() {
     return Array.from(node.childNodes).map(function(n) { return nodeToMarkdown(n, depth); }).join('');
   };
+
+  if (isKatexMathml(node)) return '';
+  if (isKatexRoot(node)) {
+    const htmlEl = node.querySelector('.katex-html');
+    if (htmlEl) return nodeToMarkdown(htmlEl, depth);
+    return children();
+  }
+  if (isAttachmentChip(node)) {
+    const href = hrefFromAttachmentChip(node);
+    if (!href) return labelFromAttachmentChip(node);
+    if (href.startsWith('sandbox:')) {
+      return '> **Attachment (Code Interpreter):** `' + href + '`\n\n';
+    }
+    const absHref = resolveImageUrl(href);
+    if (!absHref) return labelFromAttachmentChip(node);
+    return markdownLink(labelFromAttachmentChip(node), absHref) + '\n\n';
+  }
 
   switch (tag) {
     case 'p':
@@ -108,6 +176,10 @@ function nodeToMarkdown(node, depth) {
       const href = node.getAttribute('href') || '';
       const text = children().trim();
       if (!href) return text;
+      if (href.startsWith('sandbox:')) {
+        const label = text || href.replace(/^sandbox:/, '');
+        return '> **Code Interpreter file:** `' + href + '`' + (label && label !== href ? ' (' + label + ')' : '') + '\n\n';
+      }
       const absHref = resolveHttpUrl(href);
       if (!absHref) return text;
       return text ? '[' + text + '](' + absHref + ')' : absHref;
@@ -140,7 +212,14 @@ function nodeToMarkdown(node, depth) {
       return '| ' + header + ' |\n| ' + sep + ' |\n' +
         (body ? body.split('\n').map(function(r) { return '| ' + r + ' |'; }).join('\n') + '\n' : '') + '\n';
     }
+    case 'canvas':
+      return artifactPlaceholder('canvas');
+    case 'audio':
+      return artifactPlaceholder('audio');
+    case 'video':
+      return artifactPlaceholder('video');
     case 'svg':
+      return artifactPlaceholder('svg');
     case 'button':
       return '';
     default:
@@ -179,6 +258,30 @@ function extractImages(section) {
 
     const alt = (img.getAttribute('alt') || '').trim();
     results.push('![' + alt + '](' + absSrc + ')');
+  }
+
+  return results;
+}
+
+/** Extract file attachments from a turn section outside the prose container.
+ *  Selector is fixture-derived (data-testid="file-chip"); needs a live check. */
+function extractAttachments(section) {
+  const seenHrefs = new Set();
+  const results = [];
+  if (!section.querySelectorAll) return results;
+
+  const chips = section.querySelectorAll('[data-testid="file-chip"]');
+  for (const chip of chips) {
+    if (typeof chip.closest === 'function' &&
+        (chip.closest('.markdown') || chip.closest('[class*="prose"]'))) {
+      continue;
+    }
+    const href = hrefFromAttachmentChip(chip);
+    if (!href || href.startsWith('sandbox:')) continue;
+    const absHref = resolveImageUrl(href);
+    if (!absHref || seenHrefs.has(absHref)) continue;
+    seenHrefs.add(absHref);
+    results.push(markdownLink(labelFromAttachmentChip(chip), absHref));
   }
 
   return results;
@@ -251,15 +354,17 @@ function extractTurn(section, discoveryIndex) {
     const text = bubble ? bubble.textContent.trim() : '';
     // Capture user-uploaded images that textContent would miss
     const userImages = extractImages(section);
-    if (!text && !userImages.length) return null;
+    const userAttachments = extractAttachments(section);
+    if (!text && !userImages.length && !userAttachments.length) return null;
     const parts = [];
     if (text) parts.push(text);
+    if (userAttachments.length) parts.push(userAttachments.join('\n\n'));
     if (userImages.length) parts.push(userImages.join('\n\n'));
     return createTurn(turnId, section, discoveryIndex, role, parts.join('\n\n'));
   }
 
   if (role === 'assistant') {
-    const pieces = extractImages(section);
+    const pieces = extractAttachments(section).concat(extractImages(section));
     const fragments = [];
     const messages = section.querySelectorAll('[data-message-author-role="assistant"]');
     for (const message of messages) {
@@ -745,9 +850,9 @@ async function getConversationMarkdown() {
   }
 }
 
-/** Fetch image data URLs from remote URLs using fetch().
- *  Extension host_permissions for image CDNs bypass CORS.
- *  Returns {url, dataUrl} for successfully fetched images; null on error. */
+/** Fetch remote artifact bytes as data URLs using fetch().
+ *  Extension host_permissions for declared hosts bypass CORS.
+ *  Returns {url, dataUrl} for successfully fetched artifacts; null on error. */
 async function fetchImageDataUrls(urls) {
   const results = [];
   for (const url of urls) {
@@ -772,6 +877,7 @@ async function fetchImageDataUrls(urls) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     buildConversationMarkdown: buildConversationMarkdown,
+    extractAttachments: extractAttachments,
     extractConversationTitle: extractConversationTitle,
     extractImages: extractImages,
     fetchImageDataUrls: fetchImageDataUrls,

@@ -44,6 +44,18 @@ function element(tag, children, attributes) {
       return attrs[name] ?? null;
     },
     querySelector(selector) {
+      if (selector === 'a[href]') {
+        const visit = (candidate) => {
+          if (candidate.nodeType !== 1) return null;
+          if (candidate.tagName === 'A' && candidate.getAttribute('href')) return candidate;
+          for (const child of candidate.childNodes || []) {
+            const found = visit(child);
+            if (found) return found;
+          }
+          return null;
+        };
+        return visit(this);
+      }
       return this.querySelectorAll(selector)[0] || null;
     },
     querySelectorAll(selector) {
@@ -1074,6 +1086,163 @@ test('an assistant turn without the author-role wrapper is still captured', asyn
     assert.ok(turn, 'the turn must not be dropped for want of an attribute');
     assert.equal(turn.role, 'assistant');
     assert.match(turn.markdown, /дай секунду/);
+  } finally {
+    global.Node = previousNode;
+  }
+});
+
+test('emits a markdown link for a file attachment chip', () => {
+  const previousNode = global.Node;
+  const previousLocation = global.location;
+  global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
+  global.location = { href: 'https://chatgpt.com/' };
+  const chip = element('a', [textNode('report.pdf')], {
+    href: 'https://files.oaiusercontent.com/file-synth-abc/report.pdf',
+    'data-testid': 'file-chip',
+  });
+  try {
+    const markdown = parser.nodeToMarkdown(chip).trim();
+    assert.match(markdown, /\[report\.pdf\]\(https:\/\/files\.oaiusercontent\.com\/file-synth-abc\/report\.pdf\)/);
+  } finally {
+    global.Node = previousNode;
+    global.location = previousLocation;
+  }
+});
+
+test('emits a markdown link for a div-wrapped attachment chip', () => {
+  const previousNode = global.Node;
+  const previousLocation = global.location;
+  global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
+  global.location = { href: 'https://chatgpt.com/' };
+  const chip = element('div', [
+    element('a', [textNode('bundle.zip')], {
+      href: 'https://files.oaiusercontent.com/file-synth-rst/bundle.zip',
+    }),
+  ], { 'data-testid': 'file-chip' });
+  try {
+    const markdown = parser.nodeToMarkdown(chip).trim();
+    assert.match(markdown, /\[bundle\.zip\]\(https:\/\/files\.oaiusercontent\.com\/file-synth-rst\/bundle\.zip\)/);
+  } finally {
+    global.Node = previousNode;
+    global.location = previousLocation;
+  }
+});
+
+test('extracts file attachment chips outside the prose container', () => {
+  const chip = {
+    getAttribute(name) {
+      return name === 'data-testid' ? 'file-chip' : null;
+    },
+    closest: () => null,
+    querySelector() {
+      return {
+        getAttribute(name) {
+          return name === 'href'
+            ? 'https://files.oaiusercontent.com/file-synth-def/data.csv'
+            : null;
+        },
+      };
+    },
+    textContent: 'data.csv',
+  };
+  const section = {
+    querySelectorAll(selector) {
+      if (selector === '[data-testid="file-chip"]') return [chip];
+      return [];
+    },
+  };
+
+  assert.deepEqual(parser.extractAttachments(section), [
+    '[data.csv](https://files.oaiusercontent.com/file-synth-def/data.csv)',
+  ]);
+});
+
+test('includes user-uploaded attachments in the turn markdown', () => {
+  const chip = {
+    getAttribute(name) {
+      return name === 'data-testid' ? 'file-chip' : null;
+    },
+    closest: () => null,
+    querySelector() {
+      return {
+        getAttribute(name) {
+          return name === 'href'
+            ? 'https://files.oaiusercontent.com/file-synth-ghi/source.py'
+            : null;
+        },
+      };
+    },
+    textContent: 'source.py',
+  };
+  const bubble = { textContent: 'Please review this file.' };
+  const message = {
+    querySelector(selector) {
+      return selector === '.whitespace-pre-wrap' ? bubble : null;
+    },
+  };
+  const section = {
+    getAttribute(name) {
+      return {
+        'data-turn-id': 'user-attach',
+        'data-turn': 'user',
+        'data-testid': 'conversation-turn-1',
+      }[name] ?? null;
+    },
+    querySelector(selector) {
+      return selector === '[data-message-author-role="user"]' ? message : null;
+    },
+    querySelectorAll(selector) {
+      if (selector === '[data-testid="file-chip"]') return [chip];
+      return [];
+    },
+  };
+
+  const turn = parser.extractTurn(section, 0);
+  assert.match(turn.markdown, /Please review this file\./);
+  assert.match(turn.markdown, /\[source\.py\]\(https:\/\/files\.oaiusercontent\.com\/file-synth-ghi\/source\.py\)/);
+});
+
+test('preserves sandbox Code Interpreter links visibly in markdown', () => {
+  const previousNode = global.Node;
+  const previousLocation = global.location;
+  global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
+  global.location = { href: 'https://chatgpt.com/' };
+  const link = element('a', [textNode('output.csv')], { href: 'sandbox:/mnt/data/output.csv' });
+  try {
+    const markdown = parser.nodeToMarkdown(link);
+    assert.match(markdown, /Code Interpreter file/);
+    assert.match(markdown, /sandbox:\/mnt\/data\/output\.csv/);
+    assert.doesNotMatch(markdown, /\[output\.csv\]\(https?:/);
+  } finally {
+    global.Node = previousNode;
+    global.location = previousLocation;
+  }
+});
+
+test('emits visible placeholders for silent-loss media elements', () => {
+  const previousNode = global.Node;
+  global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
+  const cases = ['canvas', 'audio', 'video', 'svg'];
+  try {
+    for (const tag of cases) {
+      const markdown = parser.nodeToMarkdown(element(tag, []));
+      assert.match(markdown, new RegExp('\\*\\[' + tag + ' artifact'), tag + ' must not be silently dropped');
+    }
+  } finally {
+    global.Node = previousNode;
+  }
+});
+
+test('renders KaTeX once by skipping the hidden MathML layer', () => {
+  const previousNode = global.Node;
+  global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
+  const katex = element('span', [
+    element('span', [textNode('E=mc^2')], { class: 'katex-mathml' }),
+    element('span', [textNode('E=mc^2')], { class: 'katex-html' }),
+  ], { class: 'katex' });
+  try {
+    const markdown = parser.nodeToMarkdown(katex);
+    assert.equal(markdown.trim(), 'E=mc^2');
   } finally {
     global.Node = previousNode;
   }

@@ -5,6 +5,29 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-08-17
+
+### Added
+
+- **File attachment export.** Attachment chips (`data-testid="file-chip"`,
+  fixture-derived selector) emit Markdown links and download through the same
+  content-script fetch path as images. `parseArtifactRefs` enumerates both image
+  and file links from the saved Markdown.
+- **Visible placeholders** for `canvas`, `audio`, `video`, and inline `svg`
+  artifacts that previously produced silent empty output.
+- **Sandbox Code Interpreter links** are preserved in the Markdown as visible
+  blockquotes — the real download URL cannot be derived without a live page.
+
+### Fixed
+
+- **KaTeX double emission.** The hidden `.katex-mathml` layer is skipped so
+  formulas export once, from `.katex-html`.
+
+### Verification
+
+Each behaviour is covered by a test verified through mutation — delete the fix,
+the test must fail. See `MUTATION-EVIDENCE.md` § Wave 2a.
+
 ## [1.2.0] — 2026-08-17
 
 ### Added
@@ -129,6 +152,7 @@ with generated images.
 Versions 1.1.3 and 1.1.4 predate this public repository and have no commits
 here; they were store-only builds between 1.1.2 and 1.1.6.
 
+[1.3.0]: https://github.com/Arcanada-one/conversation-to-markdown/releases/tag/v1.3.0
 [1.2.0]: https://github.com/Arcanada-one/conversation-to-markdown/releases/tag/v1.2.0
 [1.1.8]: https://github.com/Arcanada-one/conversation-to-markdown/releases/tag/v1.1.8
 [1.1.7]: https://github.com/Arcanada-one/conversation-to-markdown/releases/tag/v1.1.7

@@ -5,6 +5,37 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const popup = loadPopupExports();
+
+function loadPopupExports() {
+  const context = {
+    module: { exports: {} },
+    document: {
+      getElementById: () => ({
+        addEventListener() {},
+        disabled: false,
+        textContent: '',
+        classList: { add() {}, remove() {} },
+      }),
+    },
+    chrome: {
+      tabs: { query: async () => [] },
+      scripting: { executeScript: async () => [] },
+      downloads: { download() {} },
+      runtime: { lastError: null },
+    },
+    navigator: { clipboard: { writeText: async () => {} } },
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    URL,
+    encodeURIComponent,
+  };
+  const source = fs.readFileSync(path.join(__dirname, '..', 'popup.js'), 'utf8');
+  vm.runInNewContext(source, context);
+  return context.module.exports;
+}
 
 function createPopupHarness(runScan, options = {}) {
   let clickHandler;
@@ -270,4 +301,41 @@ test('pressing stop sets the page cancellation flag', async () => {
 
   resolveScan([{ result: { ok: true, md: '# partial', lines: 1, words: 2 } }]);
   await click;
+});
+
+test('parseFileRefs collects downloadable attachment links but not arbitrary URLs', () => {
+  const md = 'See [notes](https://example.com/page) and [data.csv](https://files.oaiusercontent.com/file-synth-jkl/data.csv).';
+  const refs = popup.parseFileRefs(md);
+  assert.equal(refs.length, 1);
+  assert.equal(refs[0].url, 'https://files.oaiusercontent.com/file-synth-jkl/data.csv');
+  assert.equal(refs[0].label, 'data.csv');
+  assert.equal(refs[0].kind, 'file');
+  assert.equal(popup.isDownloadableFileUrl('https://example.com/file.pdf'), false);
+});
+
+test('downloads non-image attachment files alongside images', async () => {
+  const md = '# Export\n\n'
+    + '![chart](https://files.oaiusercontent.com/file-synth-mno/chart.png)\n'
+    + '[report.pdf](https://files.oaiusercontent.com/file-synth-pqr/report.pdf)';
+  const harness = createPopupHarness(async () => [{
+    result: { ok: true, md, title: 'Export', slug: 'Export', lines: 4, words: 4 },
+  }], {
+    downloadImages: true,
+    extracted: [
+      { url: 'https://files.oaiusercontent.com/file-synth-mno/chart.png', dataUrl: 'data:image/png;base64,AAA' },
+      { url: 'https://files.oaiusercontent.com/file-synth-pqr/report.pdf', dataUrl: 'data:application/pdf;base64,BBB' },
+    ],
+  });
+
+  await harness.click();
+
+  const paths = harness.downloads().map((d) => d.filename);
+  assert.deepEqual(paths, [
+    'chatgpt-export/Export/Export-image_001.png',
+    'chatgpt-export/Export/Export-file_002.pdf',
+    'chatgpt-export/Export/Export.md',
+  ]);
+  assert.match(harness.clipboardValue(), /!\[chart\]\(\.\/Export-image_001\.png\)/);
+  assert.match(harness.clipboardValue(), /\[report\.pdf\]\(\.\/Export-file_002\.pdf\)/);
+  assert.match(harness.status.textContent, /Files: 2\/2 downloaded/);
 });

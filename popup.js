@@ -13,7 +13,7 @@ function showStatus(type, message) {
   status.textContent = message;
 }
 
-/** Parse ![](url) references from Markdown, return {url, alt} pairs. */
+/** Parse ![](url) references from Markdown, return {url, label, kind} pairs. */
 function parseImageRefs(md) {
   const seen = new Set();
   const refs = [];
@@ -22,10 +22,42 @@ function parseImageRefs(md) {
   while ((m = re.exec(md)) !== null) {
     if (!seen.has(m[2])) {
       seen.add(m[2]);
-      refs.push({ url: m[2], alt: m[1] });
+      refs.push({ url: m[2], label: m[1], kind: 'image' });
     }
   }
   return refs;
+}
+
+/** Parse [label](url) file links for downloadable artifacts (not images). */
+function parseFileRefs(md) {
+  const seen = new Set();
+  const refs = [];
+  const re = /(?<!!)\[([^\]]*)\]\((https?:\/\/[^)]+)\)/g;
+  let m;
+  while ((m = re.exec(md)) !== null) {
+    if (!seen.has(m[2]) && isDownloadableFileUrl(m[2])) {
+      seen.add(m[2]);
+      refs.push({ url: m[2], label: m[1], kind: 'file' });
+    }
+  }
+  return refs;
+}
+
+function parseArtifactRefs(md) {
+  return parseImageRefs(md).concat(parseFileRefs(md));
+}
+
+function isDownloadableFileUrl(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname === 'files.oaiusercontent.com') return true;
+    if (parsed.hostname === 'chatgpt.com' || parsed.hostname === 'chat.openai.com') {
+      return parsed.pathname.includes('/files/') || parsed.pathname.includes('/estuary/');
+    }
+    return false;
+  } catch (_e) {
+    return false;
+  }
 }
 
 /** Build the chatgpt-export/ sub-path for one exported conversation.
@@ -42,19 +74,28 @@ function exportPath(slug, filename) {
  *  two conversations both starting at image_001 would otherwise collide in the
  *  flat legacy folder, and Chrome would suffix them "image_001 (1).png". */
 function imageFilename(url, alt, index, slug) {
-  // Try to infer extension from the alt text first (e.g. "photo.jpg")
-  var ext = 'png';
-  var altMatch = alt && alt.match(/\.(png|jpe?g|gif|webp|svg|bmp)(\?|$)/i);
-  if (altMatch) {
-    ext = altMatch[1].toLowerCase().replace('jpeg', 'jpg');
+  return artifactFilename(url, alt, index, slug, 'image');
+}
+
+/** Derive a filename from an artifact URL or label text. */
+function artifactFilename(url, label, index, slug, kind) {
+  var ext = kind === 'image' ? 'png' : 'bin';
+  var labelMatch = label && label.match(/\.([A-Za-z0-9]{1,8})(?:\?|$)/);
+  if (labelMatch) {
+    ext = labelMatch[1].toLowerCase();
   } else {
     try {
-      var pathMatch = new URL(url).pathname.match(/\.(png|jpe?g|gif|webp|svg|bmp)(\?|$)/i);
-      if (pathMatch) ext = pathMatch[1].toLowerCase().replace('jpeg', 'jpg');
+      var pathMatch = new URL(url).pathname.match(/\.([A-Za-z0-9]{1,8})(?:\?|$)/i);
+      if (pathMatch) ext = pathMatch[1].toLowerCase();
     } catch (_e) {}
   }
+  if (kind === 'image') {
+    ext = ext.replace(/^jpe?g$/i, 'jpg');
+    if (!/^(png|jpg|gif|webp|svg|bmp)$/i.test(ext)) ext = 'png';
+  }
   var prefix = slug ? slug + '-' : '';
-  return prefix + 'image_' + String(index + 1).padStart(3, '0') + '.' + ext;
+  var stem = kind === 'image' ? 'image' : 'file';
+  return prefix + stem + '_' + String(index + 1).padStart(3, '0') + '.' + ext;
 }
 
 /** Format a date as YYYYMMDD-HHMM for timestamped re-exports. */
@@ -191,18 +232,16 @@ btn.addEventListener('click', async () => {
     const partialSuffix = result.partial ? ' (partial export)' : '';
 
     if (downloadImages && typeof chrome.downloads !== 'undefined') {
-      // Fetch images via content script (has host_permissions for CDN CORS bypass).
-      // Falls back to canvas extraction if old content.js is still cached.
-      var refs = parseImageRefs(md);
+      // Fetch artifacts via content script (has host_permissions for CDN CORS bypass).
+      var refs = parseArtifactRefs(md);
       var extracted = [];
       if (refs.length > 0) {
-        btn.textContent = 'Downloading ' + refs.length + ' images…';
+        btn.textContent = 'Downloading ' + refs.length + ' file' + (refs.length === 1 ? '' : 's') + '…';
         var urls = refs.map(function(r) { return r.url; });
         var extractResult = await chrome.scripting.executeScript({
           target: { tabId: tab.id },
           func: async function(urls) {
             if (typeof fetchImageDataUrls === 'function') return await fetchImageDataUrls(urls);
-            // Fallback for old content.js cache — canvas extraction (usually fails on CORS)
             if (typeof extractImageDataUrls === 'function') return await extractImageDataUrls(urls);
             return urls.map(function() { return null; });
           },
@@ -219,7 +258,8 @@ btn.addEventListener('click', async () => {
       for (var i = 0; i < extracted.length; i++) {
         var ex = extracted[i];
         if (ex && ex.dataUrl) {
-          var fname = imageFilename(ex.url, refs[i] ? refs[i].alt : '', i, slug);
+          var ref = refs[i] || {};
+          var fname = artifactFilename(ex.url, ref.label || '', i, slug, ref.kind || 'image');
           var r = await downloadOne(ex.dataUrl, fname, exportPath(slug, fname));
           if (r.ok) {
             dlOk++;
@@ -230,7 +270,7 @@ btn.addEventListener('click', async () => {
         }
       }
 
-      // Save .md with local paths for successfully extracted images
+      // Save .md with local paths for successfully extracted artifacts
       var mdFinal = dlOk > 0 ? mdChanged : md;
       await downloadOne(
         'data:text/markdown;charset=utf-8,' + encodeURIComponent(mdFinal),
@@ -241,13 +281,13 @@ btn.addEventListener('click', async () => {
       if (dlOk > 0) {
         showStatus('success',
           '✓ Copied!' + partialSuffix + ' ' + result.lines + ' lines · ' + result.words + ' words\n' +
-          'Images: ' + dlOk + '/' + refs.length + ' downloaded + ' + mdName
+          'Files: ' + dlOk + '/' + refs.length + ' downloaded + ' + mdName
         );
       } else if (refs.length > 0) {
         var hint = dlErrors.length > 0 ? ' (' + dlErrors[0] + ')' : '';
         showStatus('success',
           '✓ Copied!' + partialSuffix + ' ' + result.lines + ' lines · ' + result.words + ' words\n' +
-          'Images: 0/' + refs.length + ' fetched' + hint + ' — original URLs kept in .md'
+          'Files: 0/' + refs.length + ' fetched' + hint + ' — original URLs kept in .md'
         );
       } else {
         showStatus('success',
@@ -281,9 +321,14 @@ btn.addEventListener('click', async () => {
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    artifactFilename: artifactFilename,
     buildMdFilename: buildMdFilename,
     formatExportTimestamp: formatExportTimestamp,
     exportPath: exportPath,
     downloadOne: downloadOne,
+    isDownloadableFileUrl: isDownloadableFileUrl,
+    parseArtifactRefs: parseArtifactRefs,
+    parseFileRefs: parseFileRefs,
+    parseImageRefs: parseImageRefs,
   };
 }

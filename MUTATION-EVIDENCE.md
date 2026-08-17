@@ -78,3 +78,67 @@ Baseline before mutations: **57 pass, 0 fail, EXIT=0**.
 | --- | --- |
 | **Await markdown `downloadOne` before reporting success** (`popup.js` ~line 235) | Mutant: remove `await` before the final `downloadOne` for the `.md` file. Full suite stayed **57 pass, EXIT=0**. No test exercises ordering between download completion and popup status; omitted rather than fabricated. |
 | **`getConversationMarkdown` calls `prefixPartialNotice` when `scanMeta.partial`** | No dedicated integration test hits that line in isolation; covered indirectly via **D** (`prefixPartialNotice` itself) and stall/cancel tests that call the helper explicitly. |
+
+## Wave 2a
+
+Baseline before mutations: **66 pass, 0 fail, EXIT=0**.
+
+### A. File attachment chip in `nodeToMarkdown`
+
+| Field | Value |
+| --- | --- |
+| **Edit** | Remove the `if (isAttachmentChip(node)) { … }` block from `nodeToMarkdown`. |
+| **Test that went red** | none — full suite stayed **66 pass, EXIT=0** |
+| **EXIT** | **0** |
+
+Chip fixtures that wrap an inner `<a href>` still export via `case 'a'`. Turn-level attachment capture is isolated in **F** below.
+
+### B. Sandbox Code Interpreter links
+
+| Field | Value |
+| --- | --- |
+| **Edit** | Delete the `href.startsWith('sandbox:')` branch inside `case 'a'`. |
+| **Test that went red** | `preserves sandbox Code Interpreter links visibly in markdown` |
+| **EXIT** | **1** |
+
+### C. Media placeholders (`canvas`, `audio`, `video`, `svg`)
+
+| Field | Value |
+| --- | --- |
+| **Edit** | Replace `artifactPlaceholder(...)` returns for `canvas`, `audio`, `video`, and `svg` with `return ''`. |
+| **Test that went red** | `emits visible placeholders for silent-loss media elements` |
+| **EXIT** | **1** |
+
+### D. KaTeX double emission
+
+| Field | Value |
+| --- | --- |
+| **Edit** | Remove the `isKatexMathml` / `isKatexRoot` guards at the top of `nodeToMarkdown`. |
+| **Test that went red** | `renders KaTeX once by skipping the hidden MathML layer` |
+| **EXIT** | **1** |
+
+### E. Non-image download enumeration
+
+| Field | Value |
+| --- | --- |
+| **Edit** | In `parseArtifactRefs`, return `parseImageRefs(md)` only — drop the `parseFileRefs` concat. |
+| **Test that went red** | `downloads non-image attachment files alongside images` |
+| **EXIT** | **1** |
+
+`parseFileRefs` itself is exercised directly in `parseFileRefs collects downloadable attachment links but not arbitrary URLs`; that test stays green because the function is unchanged — only the popup download path stops calling it.
+
+### F. Turn-level attachment extraction
+
+| Field | Value |
+| --- | --- |
+| **Edit** | Replace `extractAttachments` with `function extractAttachments(section) { return []; }`. |
+| **Tests that went red** | `extracts file attachment chips outside the prose container`; `includes user-uploaded attachments in the turn markdown` |
+| **EXIT** | **1** |
+
+### Fixture-derived selectors (not live-verified)
+
+| Selector / assumption | Used for |
+| --- | --- |
+| `[data-testid="file-chip"]` | Attachment chip discovery in `extractAttachments` and `isAttachmentChip` |
+| Inner `a[href]` inside the chip | Resolving download URL and label |
+| `.katex` / `.katex-mathml` / `.katex-html` | KaTeX deduplication (standard KaTeX DOM, not re-checked on live ChatGPT) |

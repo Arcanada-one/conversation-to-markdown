@@ -2450,3 +2450,76 @@ test('coverage gaps are measured between read positions, not guessed', () => {
   // Sub-pixel seams from a zoomed or high-DPI viewport are not missing turns.
   assert.equal(parser.largestCoverageGap([[0, 100], [100.5, 100]], 800).width, 0);
 });
+
+test('conversation metadata is read for a skip decision without scrolling', async () => {
+  // Measured on a real 1146-message thread: walking it to find out whether it
+  // grew took 282 seconds and did not finish. The same question is answered by
+  // one request to the endpoint the page itself uses, which returns the
+  // conversation's update_time, the id of its newest message and its message
+  // count. This is what makes "skip unchanged conversations" cheap.
+  assert.equal(typeof parser.fetchConversationMetadata, 'function');
+
+  const calls = [];
+  const fakeFetch = async (url) => {
+    calls.push(url);
+    if (url === '/api/auth/session') {
+      return { ok: true, json: async () => ({ accessToken: 'token-abc' }) };
+    }
+    return {
+      ok: true,
+      json: async () => ({
+        title: 'Кадры решают всё',
+        update_time: 1787047506.810519,
+        create_time: 1786725126.086031,
+        current_node: 'node-newest',
+        mapping: {
+          a: { message: { id: 'a' } },
+          b: { message: { id: 'b' } },
+          c: { message: null },
+        },
+      }),
+    };
+  };
+
+  const meta = await parser.fetchConversationMetadata('conv-1', { fetchImpl: fakeFetch });
+  assert.equal(meta.updateTime, 1787047506.810519);
+  assert.equal(meta.currentNode, 'node-newest');
+  // Nodes WITHOUT a message body are not messages. Counting raw mapping keys
+  // would compare a number against a differently-derived stored one, and the
+  // measured thread showed the two differ (1147 nodes, 1146 messages).
+  assert.equal(meta.messageCount, 2);
+  assert.ok(
+    calls.some((url) => url.indexOf('conv-1') !== -1),
+    'the conversation id must reach the request',
+  );
+  // The mapping itself must not be carried out of here: it was 4 661 057 bytes
+  // for the measured thread and has no place in a skip decision.
+  assert.equal(meta.mapping, undefined);
+});
+
+test('unreadable metadata returns null rather than a shape that reads as unchanged', async () => {
+  // The distinction the whole skip decision rests on. A conversation whose
+  // metadata could not be read is NOT an unchanged conversation, and returning
+  // zeros or an empty object here would make it look like one.
+  const noToken = await parser.fetchConversationMetadata('conv-1', {
+    fetchImpl: async () => ({ ok: true, json: async () => ({}) }),
+  });
+  assert.equal(noToken, null, 'no session token means no answer');
+
+  const httpError = await parser.fetchConversationMetadata('conv-1', {
+    fetchImpl: async (url) => (url === '/api/auth/session'
+      ? { ok: true, json: async () => ({ accessToken: 't' }) }
+      : { ok: false, status: 404 }),
+  });
+  assert.equal(httpError, null, 'an HTTP error means no answer');
+
+  const threw = await parser.fetchConversationMetadata('conv-1', {
+    fetchImpl: async () => { throw new Error('offline'); },
+  });
+  assert.equal(threw, null, 'a network failure means no answer');
+
+  const noId = await parser.fetchConversationMetadata('', {
+    fetchImpl: async () => ({ ok: true, json: async () => ({ accessToken: 't' }) }),
+  });
+  assert.equal(noId, null, 'no conversation id means no answer');
+});

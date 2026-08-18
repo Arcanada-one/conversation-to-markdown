@@ -26,7 +26,27 @@ This lookup happens **only** when the save checkbox is ticked. A plain **Copy as
 
 If you tick the batch option on a ChatGPT Project page, the extension reads the conversation list from the page's sidebar and exports each conversation in turn. Because that list is virtualized, it first scrolls the sidebar to the end so every row renders, then restores your scroll position; the rows' on-screen positions are measured to confirm the whole list was seen. Those measurements stay in the page and are discarded when the run ends. It does this by **navigating the tab you are looking at** through those conversations one at a time, and returns control to you when the run ends. This is a change from single-conversation export, where only the page already open is read. The run can be paused, resumed and cancelled; cancelling keeps whatever already landed.
 
-**Resume reads your download history.** To avoid downloading the same conversation twice, the extension asks the browser which files it has previously downloaded, filtered to paths inside the `chatgpt-export/` folder. The browser's answer can include entries from other downloads, so this is worth stating plainly: the extension inspects that list only to decide what it already saved, keeps no copy of it, and sends it nowhere. It is used for nothing else. There is no alternative that avoids the lookup — the extension deliberately stores no state of its own, so the files on your disk are the only record of what a previous run accomplished.
+**Resume reads your download history.** To avoid downloading the same conversation twice, the extension asks the browser which files it has previously downloaded, filtered to paths inside the `chatgpt-export/` folder. The browser's answer can include entries from other downloads, so this is worth stating plainly: the extension inspects that list only to decide what it already saved, keeps no copy of it, and sends it nowhere. It is used for nothing else.
+
+## The export index
+
+From version 1.2.0 the extension also keeps a small index of its own, using the `storage` permission. Earlier versions did not, and this document previously said so; that sentence is no longer true and this section replaces it.
+
+The index exists because a filename cannot answer the question resume actually needs to ask. Whether a conversation has **grown since you last saved it** is not something the name of a file on disk can express, so a re-run either skipped conversations that had new messages in them, or exported everything again from the beginning.
+
+For each conversation you have exported, the index stores five values and nothing else:
+
+- the conversation's own last-updated time, as ChatGPT reports it;
+- the identifier of its newest message;
+- how many messages it had;
+- how many bytes the saved Markdown was;
+- how many files were saved alongside it.
+
+**No conversation content is stored.** Not the Markdown, not the message text, not the title, not the attachments. The index is a list of identifiers and numbers used to decide whether a conversation needs exporting again, and that restriction is enforced by a test in the repository, not only by this document.
+
+It is stored in `chrome.storage.local`, which means it stays on this computer. The extension does not use `chrome.storage.sync`, so nothing about your conversations is copied to your Google account — also enforced by a test. The index never leaves your browser, is sent to no server, and the developer has no access to it.
+
+You can delete it at any time by removing the extension, which discards its storage with it. Deleting it costs you nothing but speed: the files on your disk remain the authoritative record, and a run with no index falls back to reading download history as before.
 
 ## The zip archive
 

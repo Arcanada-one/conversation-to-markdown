@@ -460,7 +460,140 @@ async function waitWhilePaused(controls) {
   return !(controls && controls.isCancelled && controls.isCancelled());
 }
 
-/** Resume a batch by reading prior download paths — no extension storage API. */
+/* ---------------------------------------------------------------------------
+ * The export index.
+ *
+ * What a previous run accomplished used to be inferred from Chrome's download
+ * history, and that inference cannot answer the question that matters: a
+ * filename cannot say whether the conversation has MORE MESSAGES than when it
+ * was saved. So a re-run either skipped a conversation that had grown, or
+ * re-exported everything.
+ *
+ * The index answers it directly. Per conversation it keeps five scalars — the
+ * conversation's own `update_time`, the id of its newest message, its message
+ * count, the bytes written and the file count — and nothing else. Measured
+ * before it was designed (see the commit message): 800 conversations is 210 743
+ * bytes, 2% of the 10MB quota, written in 15ms; it survives a browser restart;
+ * and the conversation mapping it is deliberately NOT caching is 4 661 057 bytes
+ * for a single thread.
+ *
+ * Three properties are load-bearing and each has a test:
+ *   - absence of the API reads as "no index", never as a throw (without the
+ *     `storage` permission `chrome.storage` is undefined, not a failing call);
+ *   - a write is only reported as stored if it actually stored, because quota
+ *     failure arrives through `runtime.lastError` and an unchecked write looks
+ *     exactly like success;
+ *   - an unreadable answer is never grounds for skipping a conversation.
+ * ------------------------------------------------------------------------- */
+
+var INDEX_KEY = 'c2mExportIndex';
+/** Deliberately far below the 10MB quota. The index is a convenience; the files
+ *  on disk remain the source of truth, so it may be trimmed but must never grow
+ *  until Chrome refuses writes for the whole extension. */
+var INDEX_BYTE_BUDGET = 1048576;
+
+/** The storage area, or null when the permission is absent. Never throws. */
+function storageArea() {
+  if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) return null;
+  return chrome.storage.local;
+}
+
+/** Read the whole index. An unreadable or corrupt store reads as empty, which
+ *  costs a re-export and never a silent skip. */
+function readExportIndex() {
+  return new Promise(function(resolve) {
+    var area = storageArea();
+    if (!area) { resolve({}); return; }
+    try {
+      area.get([INDEX_KEY], function(items) {
+        var value = items && items[INDEX_KEY];
+        if (!value || typeof value !== 'object') { resolve({}); return; }
+        resolve(value);
+      });
+    } catch (_e) {
+      resolve({});
+    }
+  });
+}
+
+/** Record one conversation. Resolves true only when the write actually landed.
+ *
+ *  Only the decision inputs are kept: passing a mapping, markdown or title here
+ *  stores none of them. That is asserted by a test, because "store just the
+ *  scalars" is a rule that erodes the moment someone adds a convenient field.
+ */
+function recordExportedConversation(conversationId, record) {
+  return new Promise(function(resolve) {
+    var area = storageArea();
+    if (!area || !conversationId) { resolve(false); return; }
+    readExportIndex().then(function(index) {
+      var next = Object.assign({}, index);
+      var row = {
+        updateTime: typeof record.updateTime === 'number' ? record.updateTime : null,
+        currentNode: record.currentNode ? String(record.currentNode) : null,
+        messageCount: typeof record.messageCount === 'number' ? record.messageCount : null,
+        bytes: typeof record.bytes === 'number' ? record.bytes : null,
+        files: typeof record.files === 'number' ? record.files : 0,
+        at: typeof record.at === 'number' ? record.at : null,
+      };
+      next[String(conversationId)] = row;
+
+      var payload = {};
+      payload[INDEX_KEY] = next;
+      var size = 0;
+      try {
+        size = new TextEncoder().encode(JSON.stringify(payload)).length;
+      } catch (_e) {
+        size = 0;
+      }
+      if (size > INDEX_BYTE_BUDGET) { resolve(false); return; }
+
+      try {
+        area.set(payload, function() {
+          // The quota is reported HERE, not thrown. Reading it is the difference
+          // between an index that stops recording loudly and one that stops
+          // recording silently.
+          var failed = typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.lastError;
+          resolve(!failed);
+        });
+      } catch (_e) {
+        resolve(false);
+      }
+    });
+  });
+}
+
+/** Compare a conversation's live metadata against what the index remembers.
+ *
+ *  Verdicts: 'new' (never exported), 'unchanged' (skip), 'grown' (re-export),
+ *  'unknown' (metadata unreadable — export, because an unreadable answer is not
+ *  an unchanged conversation).
+ *
+ *  A message count that went DOWN also returns 'grown': a switched branch or a
+ *  deleted turn means the saved file no longer matches the conversation, and
+ *  "changed" is the useful distinction, not the direction of the change.
+ */
+function classifyAgainstIndex(index, conversationId, live) {
+  var row = index ? index[String(conversationId)] : null;
+  if (!row) return { verdict: 'new', stored: null };
+  if (!live) return { verdict: 'unknown', stored: row };
+
+  var sameNode = row.currentNode != null && live.currentNode != null
+    ? String(row.currentNode) === String(live.currentNode)
+    : row.currentNode == null && live.currentNode == null;
+  var sameTime = row.updateTime != null && live.updateTime != null
+    ? Number(row.updateTime) === Number(live.updateTime)
+    : row.updateTime == null && live.updateTime == null;
+  var sameCount = row.messageCount != null && live.messageCount != null
+    ? Number(row.messageCount) === Number(live.messageCount)
+    : true;
+
+  if (sameNode && sameTime && sameCount) return { verdict: 'unchanged', stored: row };
+  return { verdict: 'grown', stored: row };
+}
+
+/** Resume a batch by reading prior download paths — the fallback when no index
+ *  is available, and still a cross-check on the files actually present. */
 function searchCompletedDownloadPaths(projectSlug) {
   return new Promise(function(resolve) {
     if (typeof chrome === 'undefined' || !chrome.downloads || !chrome.downloads.search) {
@@ -761,6 +894,12 @@ async function runBatchExport(tab, options) {
   var skipped = conversations.length - pending.length;
   var exported = 0;
   var errors = [];
+  // Null when the storage permission is absent, which makes every index check a
+  // no-op and leaves the download-history path in charge — the pre-1.2.0
+  // behaviour, unchanged.
+  var exportIndex = await readExportIndex();
+  var indexSkipped = 0;
+  var grown = 0;
 
   var retried = 0;
   var held = 0;
@@ -805,6 +944,41 @@ async function runBatchExport(tab, options) {
       }
       poll();
     });
+  }
+
+  /** Read a conversation's metadata from the page, for the skip decision.
+   *
+   *  Runs in the tab rather than the popup because the request needs the
+   *  session the user is already signed in with, and that session belongs to the
+   *  page. Requires navigating there first, which is why this is called after
+   *  the tab has arrived — the saving is in not SCANNING an unchanged
+   *  conversation, which is where the minutes go, not in avoiding the visit.
+   *
+   *  Any failure returns null, which classifies as 'unknown' and exports. */
+  async function readConversationMetadata(tabId, conv) {
+    try {
+      var navigated = await (async function() {
+        await chrome.scripting.executeScript({
+          target: { tabId: tabId },
+          func: function(href) { window.location.href = href; },
+          args: [conv.href],
+        });
+        return await waitForTabNavigation(tabId, conv.id, 30000);
+      })();
+      if (!navigated) return null;
+      await chrome.scripting.executeScript({ target: { tabId: tabId }, files: ['content.js'] });
+      var out = await chrome.scripting.executeScript({
+        target: { tabId: tabId },
+        func: async function(conversationId) {
+          if (typeof fetchConversationMetadata !== 'function') return null;
+          return await fetchConversationMetadata(conversationId, {});
+        },
+        args: [conv.id],
+      });
+      return (out && out[0] && out[0].result) || null;
+    } catch (_e) {
+      return null;
+    }
   }
 
   async function attemptConversation(conv) {
@@ -872,6 +1046,34 @@ async function runBatchExport(tab, options) {
     var progressTitle = conv.title || conv.slug || conv.id;
     if (onProgress) onProgress(index, pending.length, progressTitle);
 
+    // Ask the cheap question first. `filterPendingConversations` can only reason
+    // about filenames, and a filename cannot say whether a conversation gained
+    // messages since it was saved — so a conversation already on disk arrives
+    // here either way. One metadata request decides it: unchanged conversations
+    // cost milliseconds instead of the minutes a full walk takes.
+    //
+    // Every uncertain answer resolves towards exporting. 'unknown' (metadata
+    // unreadable) and a missing index both export, because the cost of an
+    // unnecessary export is bandwidth while the cost of a wrong skip is a
+    // conversation that never lands and cannot be recovered by re-running.
+    var liveMeta = null;
+    var grewThisRound = false;
+    if (exportIndex) {
+      liveMeta = await readConversationMetadata(tab.id, conv);
+      var verdict = classifyAgainstIndex(exportIndex, conv.id, liveMeta).verdict;
+      if (verdict === 'unchanged') {
+        indexSkipped += 1;
+        continue;
+      }
+      if (verdict === 'grown') {
+        grewThisRound = true;
+        // The conversation changed since the last export. Chrome cannot append
+        // to a file, so the previous export is left exactly as it is and this
+        // one lands beside it under its own stamp.
+        grown += 1;
+      }
+    }
+
     var attempt = 0;
     var outcome = null;
     var lastError = '';
@@ -923,10 +1125,15 @@ async function runBatchExport(tab, options) {
 
     var writeOk = false;
     var writeError = null;
+    // A conversation that GREW is stamped whether or not the option is ticked.
+    // Chrome cannot append to a file and overwriting would destroy the earlier
+    // export, so the new copy must carry a name of its own. This is the whole
+    // reason the stamp exists; it is not a user preference in this case.
+    var stampThis = useTimestamp || grewThisRound;
     if (downloadImages) {
       var saved = await saveConversationExport(tab.id, result, {
         downloadImages: true,
-        useTimestamp: useTimestamp,
+        useTimestamp: stampThis,
         batchStamp: batchStamp,
         projectSlug: projectSlug,
         zipEntries: zipEntries,
@@ -936,7 +1143,7 @@ async function runBatchExport(tab, options) {
       writeError = saved.mdError;
     } else {
       var slug = result.slug || conv.slug || conv.id;
-      var mdName = batchMdFilename(slug, conv.id, useTimestamp, batchStamp, result.partial);
+      var mdName = batchMdFilename(slug, conv.id, stampThis, batchStamp, result.partial);
       var folder = conversationFolderPath(slug, projectSlug);
       var write = await downloadOne(
         'data:text/markdown;charset=utf-8,' + encodeURIComponent(result.md),
@@ -965,7 +1172,19 @@ async function runBatchExport(tab, options) {
       partial += 1;
       errors.push((conv.title || conv.id) + ': saved incompletely (scan did not reach the end) — re-run to finish it');
     } else {
-      completedPaths.add(mdDownloadPath(exportSlug, projectSlug, useTimestamp, batchStamp, conv.id));
+      completedPaths.add(mdDownloadPath(exportSlug, projectSlug, stampThis, batchStamp, conv.id));
+      // Record only a COMPLETE export. A partial one is deliberately not banked,
+      // for the same reason it is not added to completedPaths: the next run must
+      // be free to finish it rather than skip it as done.
+      if (liveMeta) {
+        await recordExportedConversation(conv.id, {
+          updateTime: liveMeta.updateTime,
+          currentNode: liveMeta.currentNode,
+          messageCount: liveMeta.messageCount,
+          bytes: result.md ? result.md.length : null,
+          files: 0,
+        });
+      }
     }
   }
 
@@ -1016,6 +1235,14 @@ async function runBatchExport(tab, options) {
     // Reported explicitly: a conversation skipped because it was already on
     // disk is not a failure, but silence about it reads as success.
     skipped: skipped,
+    // Skipped because the index proved the conversation had not changed since it
+    // was exported. Counted separately from `skipped`, which is a filename
+    // match: this one is a content decision and the user is entitled to see
+    // that the run examined the conversation rather than merely recognised a name.
+    unchanged: indexSkipped,
+    // Conversations that gained messages since the last export and were written
+    // beside the earlier file under their own stamp, not over it.
+    grown: grown,
     retried: retried,
     // Conversations written but truncated. Reported so "complete" cannot mean
     // "some files are cut short", and deliberately NOT banked as done so a
@@ -1135,6 +1362,17 @@ btn.addEventListener('click', async () => {
         summary += batchResult.listComplete
           ? ', ' + batchResult.skipped + ' skipped (already exported)'
           : ', ' + batchResult.skipped + ' skipped (files already on disk)';
+      }
+      if (batchResult.unchanged > 0) {
+        summary += ', ' + batchResult.unchanged + ' unchanged';
+      }
+      if (batchResult.grown > 0) {
+        // Say that a NEW file was written rather than the old one updated: the
+        // user will find two files for one conversation and should know why
+        // before wondering whether the export duplicated itself.
+        summary += ', ' + batchResult.grown
+          + (batchResult.grown === 1 ? ' updated (saved as a new dated copy)'
+                                     : ' updated (saved as new dated copies)');
       }
       if (batchResult.partial > 0) {
         summary += ', ' + batchResult.partial + ' incomplete (re-run to repair)';
@@ -1273,5 +1511,10 @@ if (typeof module !== 'undefined' && module.exports) {
     parseImageRefs: parseImageRefs,
     runBatchExport: runBatchExport,
     searchCompletedDownloadPaths: searchCompletedDownloadPaths,
+    readExportIndex: readExportIndex,
+    recordExportedConversation: recordExportedConversation,
+    classifyAgainstIndex: classifyAgainstIndex,
+    INDEX_KEY: INDEX_KEY,
+    INDEX_BYTE_BUDGET: INDEX_BYTE_BUDGET,
   };
 }

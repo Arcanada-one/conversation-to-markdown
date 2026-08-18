@@ -597,8 +597,26 @@ function runBatchAgainstFakeChrome(conversations, downloadBehaviour, options, ch
             }
             return [{ result: { ready: true } }];
           }
+          if (/fetchConversationMetadata/.test(src)) {
+            // The metadata the page would report for this conversation. Absent
+            // from the map means unreadable, which must classify as 'unknown'.
+            const id = (o.args && o.args[0]) || '';
+            const table = chromeOpts.liveMetadata || {};
+            return [{ result: Object.prototype.hasOwnProperty.call(table, id) ? table[id] : null }];
+          }
           if (/getConversationMarkdown/.test(src)) {
-            const conv = conversations[context.__cursor++ % conversations.length];
+            // Answer for the conversation the tab is ACTUALLY on. A blind cursor
+            // hands back another conversation's slug, which made a correct
+            // export look wrong: `same--<stamp>~c-grew.md` pairs one
+            // conversation's title with another's id, a combination the real
+            // page can never produce.
+            let conv = null;
+            for (const candidate of conversations) {
+              if (candidate.href && String(context.__tabUrl || '').indexOf(candidate.href) !== -1) {
+                conv = candidate; break;
+              }
+            }
+            if (!conv) conv = conversations[context.__cursor++ % conversations.length];
             return [{ result: { ok: true, md: '# x\n', markdown: '# x\n', slug: conv.slug, title: conv.title, lines: 1, words: 1, partial: !!conv.partial } }];
           }
           if (/__c2mScan/.test(src)) return [{ result: null }];
@@ -649,6 +667,7 @@ function runBatchAgainstFakeChrome(conversations, downloadBehaviour, options, ch
         },
       },
       runtime: { lastError: null },
+      storage: chromeOpts.storage === null ? undefined : (chromeOpts.storage || undefined),
     },
     __cursor: 0,
     setTimeout: (fn, ms) => {
@@ -927,4 +946,386 @@ test('a download record for a file that is gone does not count as exported', asy
     '/D/chatgpt-export/proj/Kept/Kept~ccc.md',
     '/D/chatgpt-export/proj/Old/Old~ddd.md',
   ], 'only records that still exist and completed may count');
+});
+
+/** A fake chrome.storage.local that behaves like the real one where it matters:
+ *  quota is enforced, failures arrive via runtime.lastError rather than a throw,
+ *  and absent keys come back as an object without them. */
+function fakeStorage(initial, quotaBytes) {
+  const store = Object.assign(Object.create(null), initial || {});
+  const quota = quotaBytes || 10485760;
+  const runtime = { lastError: null };
+  const api = {
+    __store: store,
+    __runtime: runtime,
+    QUOTA_BYTES: quota,
+    get(keys, cb) {
+      runtime.lastError = null;
+      const wanted = Array.isArray(keys) ? keys : [keys];
+      const out = {};
+      for (const key of wanted) if (key in store) out[key] = store[key];
+      cb(out);
+    },
+    set(items, cb) {
+      const merged = Object.assign({}, store, items);
+      const size = new TextEncoder().encode(JSON.stringify(merged)).length;
+      if (size > quota) {
+        // The real API reports this here, not by throwing.
+        runtime.lastError = { message: 'Resource::kQuotaBytes quota exceeded' };
+        if (cb) cb();
+        return;
+      }
+      runtime.lastError = null;
+      Object.assign(store, items);
+      if (cb) cb();
+    },
+    remove(keys, cb) {
+      runtime.lastError = null;
+      const wanted = Array.isArray(keys) ? keys : [keys];
+      for (const key of wanted) delete store[key];
+      if (cb) cb();
+    },
+    getBytesInUse(_keys, cb) {
+      cb(new TextEncoder().encode(JSON.stringify(store)).length);
+    },
+  };
+  return api;
+}
+
+test('an export index survives a browser restart and reports what it knows', async () => {
+  // Measured in real Chrome before this was designed: chrome.storage.local works
+  // from the popup with no service worker, an 800-conversation index is 210 743
+  // bytes (2% of the 10MB quota), and it reads back intact after the browser is
+  // closed and reopened. This is what replaces reading Chrome's download
+  // history to guess what a previous run accomplished.
+  const storage = fakeStorage();
+  const popupWithStorage = loadPopupExportsWithChrome({
+    storage: { local: storage },
+    runtime: storage.__runtime,
+  });
+
+  assert.equal(typeof popupWithStorage.readExportIndex, 'function');
+  assert.equal(typeof popupWithStorage.recordExportedConversation, 'function');
+
+  const empty = await popupWithStorage.readExportIndex();
+  assert.deepEqual(Object.keys(empty), [], 'a first run starts with nothing recorded');
+
+  await popupWithStorage.recordExportedConversation('conv-a', {
+    updateTime: 1787047506.8,
+    currentNode: 'node-9',
+    messageCount: 1146,
+    bytes: 106964,
+    files: 5,
+  });
+
+  // A SECOND load of popup.js against the same store is the restart: no state is
+  // carried in memory between them.
+  const reloaded = loadPopupExportsWithChrome({
+    storage: { local: storage },
+    runtime: storage.__runtime,
+  });
+  const index = await reloaded.readExportIndex();
+  assert.equal(index['conv-a'].messageCount, 1146);
+  assert.equal(index['conv-a'].currentNode, 'node-9');
+  assert.equal(index['conv-a'].bytes, 106964);
+});
+
+test('a conversation that has not changed is skipped without scrolling it', async () => {
+  // The point of the index. Walking a long conversation to find out whether it
+  // grew cost 282 seconds when measured on a real 1146-message thread; comparing
+  // the metadata ChatGPT already reports costs one request.
+  const storage = fakeStorage();
+  const popupWithStorage = loadPopupExportsWithChrome({
+    storage: { local: storage },
+    runtime: storage.__runtime,
+  });
+  await popupWithStorage.recordExportedConversation('conv-a', {
+    updateTime: 100, currentNode: 'n1', messageCount: 10, bytes: 500, files: 0,
+  });
+  const index = await popupWithStorage.readExportIndex();
+
+  assert.equal(typeof popupWithStorage.classifyAgainstIndex, 'function');
+
+  // Identical metadata: nothing to do.
+  assert.equal(
+    popupWithStorage.classifyAgainstIndex(index, 'conv-a',
+      { updateTime: 100, currentNode: 'n1', messageCount: 10 }).verdict,
+    'unchanged',
+  );
+  // A newer update time means new content.
+  assert.equal(
+    popupWithStorage.classifyAgainstIndex(index, 'conv-a',
+      { updateTime: 200, currentNode: 'n2', messageCount: 12 }).verdict,
+    'grown',
+  );
+  // So does a different newest message, even when the clock did not move.
+  assert.equal(
+    popupWithStorage.classifyAgainstIndex(index, 'conv-a',
+      { updateTime: 100, currentNode: 'n2', messageCount: 10 }).verdict,
+    'grown',
+  );
+  // A conversation the index has never seen must be exported, not skipped.
+  assert.equal(
+    popupWithStorage.classifyAgainstIndex(index, 'conv-new',
+      { updateTime: 100, currentNode: 'n1', messageCount: 10 }).verdict,
+    'new',
+  );
+  // Metadata that could not be read is never grounds for skipping: an
+  // unreadable answer is not the same as an unchanged conversation.
+  assert.equal(
+    popupWithStorage.classifyAgainstIndex(index, 'conv-a', null).verdict,
+    'unknown',
+  );
+});
+
+test('a shrinking conversation is re-exported, never treated as unchanged', async () => {
+  // A conversation can lose messages: a branch is switched, a turn is deleted.
+  // The stored count then exceeds the live one, which is not "unchanged" and
+  // must not be skipped — the saved file no longer matches the conversation.
+  const storage = fakeStorage();
+  const popupWithStorage = loadPopupExportsWithChrome({
+    storage: { local: storage },
+    runtime: storage.__runtime,
+  });
+  await popupWithStorage.recordExportedConversation('conv-a', {
+    updateTime: 100, currentNode: 'n5', messageCount: 50, bytes: 900, files: 0,
+  });
+  const index = await popupWithStorage.readExportIndex();
+  const verdict = popupWithStorage.classifyAgainstIndex(index, 'conv-a',
+    { updateTime: 100, currentNode: 'n5', messageCount: 20 }).verdict;
+  assert.equal(verdict, 'grown', 'a changed message count means re-export, in either direction');
+});
+
+test('the index refuses to grow past its byte budget instead of failing silently', async () => {
+  // Quota failure arrives as runtime.lastError, so an unchecked write looks like
+  // success and the index silently stops recording. Verified against real Chrome:
+  // a 10MB value returns "Resource::kQuotaBytes quota exceeded" through exactly
+  // this channel.
+  const storage = fakeStorage({}, 4096);
+  const popupWithStorage = loadPopupExportsWithChrome({
+    storage: { local: storage },
+    runtime: storage.__runtime,
+  });
+
+  let recorded = 0;
+  for (let i = 0; i < 400; i += 1) {
+    const ok = await popupWithStorage.recordExportedConversation('conv-' + i, {
+      updateTime: i, currentNode: 'node-' + i, messageCount: i,
+      bytes: i * 100, files: 0,
+    });
+    if (ok) recorded += 1;
+  }
+
+  const index = await popupWithStorage.readExportIndex();
+  const kept = Object.keys(index).length;
+  assert.ok(kept > 0, 'the budget must not prevent the index working at all');
+  assert.ok(kept < 400, 'a 4KB budget cannot hold 400 conversations');
+  // The index must remain READABLE after the budget is reached: a corrupt or
+  // unparseable store would lose every previous run's record, not just the new one.
+  for (const key of Object.keys(index)) {
+    assert.equal(typeof index[key].messageCount, 'number');
+  }
+  assert.equal(recorded, kept, 'a write reported as stored must actually be stored');
+});
+
+test('a build without the storage permission degrades instead of throwing', async () => {
+  // Measured: without `storage` in the manifest the API is entirely ABSENT —
+  // chrome.storage is undefined rather than a call that fails. An unguarded
+  // access is a TypeError that would take the whole export down, so absence must
+  // read as "no index" and the run must continue on the download-history path.
+  const popupNoStorage = loadPopupExportsWithChrome({ storage: undefined });
+  const index = await popupNoStorage.readExportIndex();
+  assert.deepEqual(Object.keys(index), []);
+  const stored = await popupNoStorage.recordExportedConversation('conv-a', {
+    updateTime: 1, currentNode: 'n', messageCount: 1, bytes: 1, files: 0,
+  });
+  assert.equal(stored, false, 'it must report that nothing was stored, not pretend it was');
+  assert.equal(
+    popupNoStorage.classifyAgainstIndex({}, 'conv-a',
+      { updateTime: 1, currentNode: 'n', messageCount: 1 }).verdict,
+    'new',
+  );
+});
+
+test('the index stores scalars, never the conversation itself', async () => {
+  // The conversation API returns the whole message mapping — 4 661 057 bytes for
+  // the thread this was measured on, which alone would take half the 10MB quota.
+  // Caching it would turn a resume index into a conversation cache and break at
+  // three conversations. Only the fields a skip decision needs are kept.
+  const storage = fakeStorage();
+  const popupWithStorage = loadPopupExportsWithChrome({
+    storage: { local: storage },
+    runtime: storage.__runtime,
+  });
+  await popupWithStorage.recordExportedConversation('conv-a', {
+    updateTime: 100, currentNode: 'n1', messageCount: 10, bytes: 500, files: 2,
+    mapping: { huge: 'x'.repeat(10000) },
+    markdown: 'y'.repeat(10000),
+    title: 'A title that is content, not a decision input',
+  });
+  const raw = JSON.stringify(storage.__store);
+  assert.equal(raw.indexOf('x'.repeat(100)), -1, 'the message mapping must not be stored');
+  assert.equal(raw.indexOf('y'.repeat(100)), -1, 'the markdown must not be stored');
+  assert.ok(raw.length < 400, `an index row must stay small (was ${raw.length} bytes)`);
+});
+
+test('the index enforces its OWN byte budget, below the browser quota', async () => {
+  // A mutant deleting the INDEX_BYTE_BUDGET check survived the test above,
+  // because that test's fake enforced a 4KB browser quota and so the failure
+  // came from `lastError` rather than from our budget. They are different
+  // guards protecting against different things, and only one was proven.
+  //
+  // Our budget exists so the index never consumes the extension's whole quota:
+  // `downloads`-driven state, future settings and anything else share that 10MB.
+  // Here the browser quota is effectively unlimited, so the only thing that can
+  // stop the index growing is the budget itself.
+  const storage = fakeStorage({}, 1024 * 1024 * 1024);
+  const popupWithStorage = loadPopupExportsWithChrome({
+    storage: { local: storage },
+    runtime: storage.__runtime,
+  });
+
+  assert.equal(typeof popupWithStorage.INDEX_BYTE_BUDGET, 'number');
+  assert.ok(
+    popupWithStorage.INDEX_BYTE_BUDGET < 10485760,
+    'the budget must sit below the 10MB quota measured in real Chrome',
+  );
+
+  let refusals = 0;
+  let stored = 0;
+  // Long ids so the budget is reached in a test-sized number of rounds.
+  const padding = 'c'.repeat(400);
+  for (let i = 0; i < 4000; i += 1) {
+    const ok = await popupWithStorage.recordExportedConversation(padding + i, {
+      updateTime: i, currentNode: 'node-' + i, messageCount: i, bytes: i, files: 0,
+    });
+    if (ok) stored += 1; else refusals += 1;
+    if (refusals > 0 && stored > 0) break;
+  }
+
+  assert.ok(stored > 0, 'the budget must not block the index entirely');
+  assert.ok(refusals > 0, 'the budget must eventually refuse a write');
+  assert.equal(storage.__runtime.lastError, null,
+    'the refusal must come from our budget, not from the browser quota');
+
+  // Everything recorded before the budget was reached is still readable: the
+  // index degrades by refusing new rows, never by corrupting old ones.
+  const index = await popupWithStorage.readExportIndex();
+  assert.equal(Object.keys(index).length, stored);
+});
+
+test('WIRING: the batch itself skips unchanged conversations and stamps grown ones', async () => {
+  // Four mutants survived when this was written — one deleting the skip, one
+  // deleting the index write, one letting a grown conversation overwrite its
+  // predecessor, and one never reading the index at all. Every helper had tests;
+  // none of them drove `runBatchExport`, so the whole feature could be removed
+  // without a single failure. This test drives the real entry point.
+  const storage = fakeStorage();
+  const conversations = [
+    { id: 'c-same', slug: 'same', title: 'Unchanged', href: '/c/c-same' },
+    { id: 'c-grew', slug: 'grew', title: 'Grown', href: '/c/c-grew' },
+    { id: 'c-fresh', slug: 'fresh', title: 'Never seen', href: '/c/c-fresh' },
+  ];
+
+  // Seed the index as a previous run would have left it.
+  const seeder = loadPopupExportsWithChrome({
+    storage: { local: storage }, runtime: storage.__runtime,
+  });
+  await seeder.recordExportedConversation('c-same', {
+    updateTime: 100, currentNode: 'n-same', messageCount: 10, bytes: 500, files: 0,
+  });
+  await seeder.recordExportedConversation('c-grew', {
+    updateTime: 100, currentNode: 'n-old', messageCount: 10, bytes: 500, files: 0,
+  });
+
+  const { res, attempted } = await runBatchAgainstFakeChrome(
+    conversations,
+    () => true,
+    { projectSlug: 'proj', batchStamp: '20260818-1830', useTimestamp: false },
+    {
+      storage: { local: storage },
+      liveMetadata: {
+        // Identical to what was stored: nothing to do.
+        'c-same': { updateTime: 100, currentNode: 'n-same', messageCount: 10 },
+        // A new newest message: this one grew.
+        'c-grew': { updateTime: 200, currentNode: 'n-new', messageCount: 25 },
+        'c-fresh': { updateTime: 300, currentNode: 'n-f', messageCount: 5 },
+      },
+    },
+  );
+
+  assert.equal(res.ok, true);
+
+  const md = attempted.filter((name) => name.endsWith('.md'));
+  const wrote = (needle) => md.filter((name) => name.indexOf(needle) !== -1);
+
+  // The unchanged conversation was not written at all.
+  assert.deepEqual(wrote('same~'), [], 'an unchanged conversation must not be re-exported');
+  // The grown one was, and under a STAMPED name so the earlier file survives:
+  // Chrome cannot append, and overwriting would destroy the previous export.
+  const grewFiles = wrote('grew');
+  assert.equal(grewFiles.length, 1, 'md written: ' + JSON.stringify(md));
+  assert.match(grewFiles[0], /grew--20260818-1830~c-grew\.md$/);
+  // A conversation the index never saw is exported plainly — no stamp, because
+  // there is no earlier file to preserve.
+  const freshFiles = wrote('fresh');
+  assert.equal(freshFiles.length, 1);
+  assert.match(freshFiles[0], /fresh~c-fresh\.md$/);
+
+  // And the index now records what this run did, so the NEXT run can skip it.
+  const after = await seeder.readExportIndex();
+  assert.equal(after['c-grew'].currentNode, 'n-new');
+  assert.equal(after['c-grew'].messageCount, 25);
+  assert.equal(after['c-fresh'].messageCount, 5);
+  // The unchanged row is untouched, not rewritten with the same values.
+  assert.equal(after['c-same'].currentNode, 'n-same');
+});
+
+test('WIRING: metadata that cannot be read exports rather than skips', async () => {
+  // 'unknown' must behave like 'new'. A conversation whose metadata is
+  // unreadable is not an unchanged conversation, and treating it as one would
+  // skip it permanently while reporting success.
+  const storage = fakeStorage();
+  const seeder = loadPopupExportsWithChrome({
+    storage: { local: storage }, runtime: storage.__runtime,
+  });
+  await seeder.recordExportedConversation('c-a', {
+    updateTime: 100, currentNode: 'n-a', messageCount: 10, bytes: 500, files: 0,
+  });
+
+  const { res, attempted } = await runBatchAgainstFakeChrome(
+    [{ id: 'c-a', slug: 'aaa', title: 'A', href: '/c/c-a' }],
+    () => true,
+    { projectSlug: 'proj', batchStamp: '20260818-1830' },
+    // No entry for c-a: the metadata request comes back null.
+    { storage: { local: storage }, liveMetadata: {} },
+  );
+
+  assert.equal(res.ok, true);
+  assert.equal(
+    attempted.filter((n) => n.endsWith('.md')).length, 1,
+    'an unreadable answer must produce an export, not a skip',
+  );
+});
+
+test('WIRING: no storage permission leaves the batch exactly as it was', async () => {
+  // The index is an optimisation, not a dependency. A build without the
+  // permission must export every pending conversation as before, with no error
+  // and no crash from an unguarded chrome.storage access.
+  const { res, attempted } = await runBatchAgainstFakeChrome(
+    [
+      { id: 'c-a', slug: 'aaa', title: 'A', href: '/c/c-a' },
+      { id: 'c-b', slug: 'bbb', title: 'B', href: '/c/c-b' },
+    ],
+    () => true,
+    { projectSlug: 'proj', batchStamp: '20260818-1830' },
+    { storage: null },
+  );
+
+  assert.equal(res.ok, true);
+  assert.equal(res.exported, 2);
+  const md = attempted.filter((n) => n.endsWith('.md'));
+  assert.equal(md.length, 2);
+  // No stamps: without an index nothing is known to have grown.
+  for (const name of md) assert.doesNotMatch(name, /--20260818-1830/);
 });

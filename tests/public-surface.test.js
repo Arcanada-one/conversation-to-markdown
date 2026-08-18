@@ -61,7 +61,24 @@ test('uses a neutral public identity throughout the extension', () => {
   // grant is revoked on navigation while the batch deliberately navigates the
   // tab. A declared-but-unused permission is also an over-broad-permission
   // finding in Web Store review.
-  assert.deepEqual([...manifest.permissions].sort(), ['clipboardWrite', 'downloads', 'scripting']);
+  //
+  // `storage` was ADDED in 1.2.0, deliberately and with a cost. Resume used to
+  // read Chrome's download HISTORY to work out what a previous run had saved,
+  // which is a worse privacy position than keeping a small index of our own: the
+  // history answer includes unrelated downloads, and a filename cannot express
+  // that a conversation has grown since it was exported. Measured before it was
+  // designed: an index of 800 conversations is 210 743 bytes — 2% of the 10MB
+  // quota — written in 15ms and read in 6ms, and it survives a browser restart.
+  //
+  // Two consequences are load-bearing elsewhere. The API is entirely ABSENT
+  // without this permission (`chrome.storage === undefined`, not a throwing
+  // call), so every access is guarded; and PRIVACY.md previously promised the
+  // extension "deliberately stores no state of its own", which this makes false
+  // and which was rewritten in the same change rather than left to drift.
+  assert.deepEqual(
+    [...manifest.permissions].sort(),
+    ['clipboardWrite', 'downloads', 'scripting', 'storage'],
+  );
 });
 
 test('README states independence and non-affiliation', () => {
@@ -175,7 +192,6 @@ test('shipped JavaScript has no network, storage, or analytics calls', () => {
   const forbidden = [
     /\bXMLHttpRequest\b/,
     /\bWebSocket\b/,
-    /\bchrome\.storage\b/,
     /\b(?:gtag|ga|mixpanel|amplitude|analytics)\s*\(/,
   ];
 
@@ -183,6 +199,21 @@ test('shipped JavaScript has no network, storage, or analytics calls', () => {
     assert.doesNotMatch(popupJs, pattern, `popup.js matches ${pattern}`);
     assert.doesNotMatch(contentJs, pattern, `content.js matches ${pattern}`);
   }
+
+  // `chrome.storage` is permitted in popup.js from 1.2.0 — the export index —
+  // and stays banned in content.js. That split is the point, not an oversight:
+  // content.js runs inside the ChatGPT page, on the user's conversations, and
+  // nothing there needs to persist. Keeping the ban where the conversation
+  // content lives means a future edit cannot quietly start retaining it.
+  assert.doesNotMatch(contentJs, /\bchrome\.storage\b/, 'content.js must not use chrome.storage');
+  // The index lives behind named helpers rather than scattered calls, so the
+  // whole storage surface is auditable in one place.
+  assert.match(popupJs, /function readExportIndex\b/);
+  assert.match(popupJs, /function recordExportedConversation\b/);
+  // Only `local` — `sync` would copy a record of the user's conversations to
+  // their Google account, which is a different privacy promise entirely.
+  assert.doesNotMatch(popupJs, /chrome\.storage\.sync\b/, 'the index must never sync');
+  assert.doesNotMatch(popupJs, /chrome\.storage\.managed\b/);
 
   // fetch() is allowed in content.js only — used by fetchImageDataUrls
   // for image downloading via declared host_permissions.
@@ -199,4 +230,32 @@ test('CI is read-only and pins every action by full commit SHA', () => {
   const uses = [...workflow.matchAll(/^\s*uses:\s*([^\s#]+)/gm)].map((match) => match[1]);
   assert.ok(uses.length > 0, 'workflow must use at least one action');
   for (const action of uses) assert.match(action, /@[a-f0-9]{40}$/);
+});
+
+test('PRIVACY.md describes every permission the manifest declares', () => {
+  // The document said the extension "deliberately stores no state of its own"
+  // while a change was adding the `storage` permission. A privacy policy that
+  // contradicts the manifest is worse than a vague one: it is a promise the
+  // build cannot keep, and nothing failed when it stopped being true.
+  const manifest = JSON.parse(read('manifest.json'));
+  const privacy = read('PRIVACY.md');
+
+  for (const permission of manifest.permissions) {
+    assert.match(
+      privacy, new RegExp('`' + permission + '`'),
+      `PRIVACY.md must account for the ${permission} permission`,
+    );
+  }
+
+  // The retracted sentence must not come back while the permission is declared.
+  if (manifest.permissions.includes('storage')) {
+    assert.doesNotMatch(
+      privacy, /deliberately stores no state of its own/,
+      'the no-state promise cannot stand alongside the storage permission',
+    );
+    // And the two properties the index rests on are stated, not implied.
+    assert.match(privacy, /chrome\.storage\.local/);
+    assert.match(privacy, /No conversation content is stored/);
+    assert.match(privacy, /does not use `chrome\.storage\.sync`/);
+  }
 });

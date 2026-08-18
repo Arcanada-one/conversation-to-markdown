@@ -413,6 +413,54 @@ async function fetchSessionToken(fetchImpl) {
   }
 }
 
+/** Read just enough of a conversation to decide whether it needs exporting.
+ *
+ *  Walking a conversation to find out whether it grew is the expensive way to
+ *  ask: measured on a real 1146-message thread, 282 seconds and it had not
+ *  finished. The page's own endpoint answers it in one request, so a batch that
+ *  re-runs over 800 conversations can skip the unchanged ones in milliseconds
+ *  each instead of re-reading them all.
+ *
+ *  Returns null when the answer could not be read — never a zeroed shape. "I
+ *  could not tell" must not be usable as "nothing changed", because that
+ *  direction of mistake skips a conversation permanently and re-running cannot
+ *  repair it.
+ *
+ *  Only three scalars leave this function. The response also carries the whole
+ *  message mapping, which was 4 661 057 bytes for the measured thread; it is
+ *  read to count messages and then dropped. */
+async function fetchConversationMetadata(conversationId, options) {
+  const opts = options || {};
+  const doFetch = opts.fetchImpl || (typeof fetch === 'function' ? fetch : null);
+  if (!doFetch || !conversationId) return null;
+  const token = opts.token !== undefined ? opts.token : await fetchSessionToken(doFetch);
+  if (!token) return null;
+  try {
+    const response = await doFetch('/backend-api/conversation/' + encodeURIComponent(conversationId), {
+      credentials: 'include',
+      headers: { accept: 'application/json', Authorization: 'Bearer ' + token },
+    });
+    if (!response || !response.ok) return null;
+    const body = await response.json();
+    if (!body) return null;
+    // Count MESSAGES, not mapping nodes. The measured thread reported 1147 nodes
+    // and 1146 messages: branch points and system nodes carry no message body.
+    // A count compared against a differently-derived one is not a comparison.
+    let messageCount = 0;
+    const mapping = body.mapping || {};
+    for (const key of Object.keys(mapping)) {
+      if (mapping[key] && mapping[key].message) messageCount += 1;
+    }
+    return {
+      updateTime: typeof body.update_time === 'number' ? body.update_time : null,
+      currentNode: body.current_node ? String(body.current_node) : null,
+      messageCount: messageCount,
+    };
+  } catch (_e) {
+    return null;
+  }
+}
+
 /** Enumerate a conversation's artefacts from the API.
  *
  *  Returns null — not an empty list — when the API could not be read. The
@@ -2328,6 +2376,7 @@ if (typeof module !== 'undefined' && module.exports) {
     knownProjectName: knownProjectName,
     slugifyTitle: slugifyTitle,
     extractTurn: extractTurn,
+    fetchConversationMetadata: fetchConversationMetadata,
     findScrollContainer: findScrollContainer,
     getConversationMarkdown: getConversationMarkdown,
     largestCoverageGap: largestCoverageGap,

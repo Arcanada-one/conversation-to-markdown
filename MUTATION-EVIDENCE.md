@@ -1060,3 +1060,231 @@ called the untouched code a survivor. Re-run with `assert s2 != s` before trusti
 the verdict, it went red. Same lesson as reading an exit code after a pipe, wearing
 a different costume: a sweep that cannot distinguish "mutant survived" from "mutant
 never existed" reports the second as the first.
+
+## Wave 5 — what a live browser found that no fixture could (v1.8.0)
+
+Connected Playwright to a **copy** of the Publisher `chatgpt` profile with the
+extension side-loaded. The session was live, so the DOM under test was production
+ChatGPT, not a hand-made model. Three blockers surfaced immediately, and the first
+was worse than anything the fixtures had modelled.
+
+### The core defect: project conversations were invisible
+
+A Project conversation is linked as `/g/g-p-{projectId}/c/{convId}`, not `/c/{id}`.
+`nav a[href^="/c/"]` matched **zero** of them. Measured live: unfurling a project
+took project-scoped links 0 → 5 → 35 (after "Show more") while the plain `/c/`
+count stayed at 28 throughout. Two **disjoint** sets — so a batch started on a
+Project exported the global "Chats" recents instead. Not a subset of the intended
+set: a different set, reported as success.
+
+Every fixture had modelled `/c/{id}` only, because that is the shape I had
+invented. No amount of coverage verification helps when the selector is looking in
+the wrong place.
+
+### Mutants
+
+| Mutant | Change | Result |
+|---|---|---|
+| P1 | selector narrowed back to `href^="/c/"` | **survived, then killed** |
+| P2 | drop the project shape from the href regex | KILLED |
+| P3 | normalise href to `/c/{id}` (losing project context) | KILLED |
+| P4 | never click "Show more" | KILLED |
+| P5 | ignore a "Show more" still standing | KILLED |
+| P6 | keep the aria-label suffix | KILLED |
+| P7 | make the suffix regex inert | KILLED |
+| P8 | remove the project-scoped title selector | **survived, correctly** |
+
+P1 first survived because the fixture returned links for *any* selector containing
+`/c/` — including the narrow one. A fixture that ignores the difference between
+`[href^=…]` and `[href*=…]` cannot detect the very narrowing that lost every
+project conversation. Taught it CSS attribute semantics; P1 then died.
+
+P8 survives **legitimately**: two independent paths produce the right title (the
+project-scoped selector, and the document-title fallback stripping a known project
+prefix). Verified by removing BOTH — the test then fails (`pass 0, fail 1`). A
+mutant that survives because the behaviour is genuinely redundant is a result to
+explain, not to force red.
+
+### Two fixtures that measured the wrong events
+
+- The burst fixture counted **every** `querySelectorAll` as a conversation read,
+  so once the walk also scanned `nav *` for "Show more", its every-third-read
+  stall fired on the wrong calls.
+- The title fixture returned its link for `[data-active]` selectors even though
+  the row carried no such attribute, making every href variant look rescued.
+
+Both were green before the fix and green after, while testing something other than
+what their names claimed.
+
+### A sweep that lied twice more
+
+Two P8 verdicts were wrong before the third was right: the first deletion removed
+a different occurrence than intended, and a later run traced a file that had
+already been restored. Each time the sweep reported SURVIVED for a mutant that was
+never actually in place or never actually measured. The fix, again, is to assert
+the mutation applied *and* to confirm which code path the test exercised — printing
+the selectors actually tried settled it in one run.
+
+### Live-confirmed facts
+
+| Selector / behaviour | Result |
+|---|---|
+| `[data-turn-id]`, `[data-message-author-role]` | match on production |
+| `getConversationMarkdown()` end to end | ok, 109 lines / 336 words from a real chat |
+| sidebar virtualization | real: unique count went 100 → 138 while scrolling |
+| "Show more" pagination | real: one project 5 → 35 on a single click |
+| unfurled project state | NOT sticky — scrolling collapsed it and its rows left the DOM |
+| duplicate titles within one project | real: 4 pairs among 401 conversations |
+
+The duplicate-title finding is worth stating plainly: 401 conversations, 401
+distinct ids, and 4 pairs sharing a title inside a single project ("Распознавание
+текста", "New chat", "Git permission issue fix", "Переключение на ветку main").
+The `~id` marker is the only thing separating them — the pre-1.6.0 title-keyed
+resume would have silently skipped one of each.
+
+## Wave 6 — locale, and artefacts that render no chip (2026-08-18)
+
+Two classes the earlier waves could not have caught, because every fixture
+encoded the English UI and no probed conversation had documents.
+
+### How the locale class was measured
+
+The SAME account and the SAME conversations, opened twice under Playwright with
+only the browser locale changed (`locale` + `--lang`), against a COPY of the
+profile. The probes ENUMERATE what the sidebar contains rather than searching for
+a guessed Russian literal — searching for a guess proves only that the guess was
+right, the self-reference trap that produced the tautological coverage check in
+Wave 5.
+
+There is no server-side UI-language setting (`/backend-api/settings/user` holds
+no lang key; `voice_main_language: "ru"` is voice only), so the locale is the
+USER'S BROWSER. Every user is a separate measurement, and the operator's profile
+(`en-GB`) could not have revealed any of this.
+
+| control-flow string          | en-GB           | ru-RU              |
+|------------------------------|-----------------|--------------------|
+| pagination row               | `Show more`     | `Показать больше`  |
+| project row label suffix     | `, chat in project X` | `, чат в проекте X` |
+| artefact download button     | `Download file` | `Скачать файл`     |
+
+The pagination one was the worst: "no control standing" is the evidence
+`showMoreExhausted` uses, so an unmatched control makes a PARTIAL list report
+`complete: true`. The Wave-5 tail proof does not catch it — the deepest MOUNTED
+row genuinely is last; the unrevealed rows are not in the DOM at all.
+
+### Mutants
+
+| id  | mutation                                              | verdict |
+|-----|-------------------------------------------------------|---------|
+| L1  | pagination detector back to the English literal        | DIED    |
+| L2  | title prefers aria-label again (suffix leaks in)       | DIED    |
+| L3a | suffix strip drops the separator requirement           | DIED    |
+| L3b | whitespace allowed back as a separator                 | DIED    |
+| L4  | pagination accepts a non-last list item                | DIED    |
+| L5  | pagination drops the sibling-conversation requirement  | DIED    |
+| L6  | pagination accepts an element with its own href        | DIED    |
+| L7  | pagination accepts a wrapper around an anchor          | DIED    |
+| L8  | pagination accepts a conversation row itself           | DIED    |
+| L9  | suffix strip drops the startsWith guard                | DIED    |
+
+L4–L9 all SURVIVED on the first sweep. Each survivor was a real hole: the
+detector was wider than anything measured, free to click the wrong sidebar row,
+and the strip could cut a title at a coincidental prefix. Negative-control
+fixtures (a mid-list row, a row with no conversation siblings, a row that IS a
+link) closed L4–L8.
+
+L9 survived TWICE. The first replacement test could not isolate it: two guards
+overlap, and the punctuation check still rejected the mid-word slice. The second
+version separates them — visible `"Отчёт"` is 5 characters and label
+`"Итоги, черновик отчёта"`[5] is a comma, so a blind `slice(5)` is
+punctuation-led and only `startsWith` can reject it. A test that cannot fail is
+not evidence.
+
+L3 was first reported NOT-APPLIED: the sweep wrote `—` where the file holds
+a literal em-dash. Reported as an invalid measurement rather than a pass, then
+re-measured against the exact bytes. When it did apply, the test it should have
+satisfied went RED and exposed a real defect — `\s` in the separator class cut
+`"Проектирование хранилища"` out of `"Проектирование хранилища секретов"`, so a
+row that truncates a long title would be foldered under the clipped name.
+
+Test coverage runs the pagination cases under en-GB, ru-RU **and de-DE**
+("Mehr anzeigen"). German was never measured; it is there to prove the detector
+consults no language at all. A suite green only in the sampled locales would be
+the same literal-matching bug relocated into the test file.
+
+### Artefacts that render no chip
+
+The operator supplied a conversation as one that "definitely contains the
+documents". All six shipped `ATTACHMENT_CHIP_SELECTORS` found NOTHING there:
+
+    a[href*="/files/"] , a[href*="files.oaiusercontent.com"]   -> []
+    [data-testid*="file-chip"] , [data-testid*="attachment"]   -> none
+    [download]                                                 -> []
+
+Five generated PDF/DOCX files were present. Code-interpreter output renders in a
+separate artefact `<section>` with no href, no testid and no download attribute;
+the file name sits in a bare `<span>`. The panel is also OUTSIDE the message tree
+(`button.closest('[data-message-id]')` === null across 28 ancestors), so a
+per-turn DOM scan cannot associate a file with its message even in principle.
+`data-testid="file-chip"`, flagged unverified since Wave 4, is now measured: it
+does not cover generated artefacts.
+
+A DOM-only implementation would have exported ZERO documents from that
+conversation while reporting success — the same silent-partial failure shape as
+the project-conversation bug, in a different subsystem.
+
+Verified mechanism (executed, status 200 — captured by hooking `window.fetch`
+around a real click):
+
+    GET /backend-api/conversation/{id}                      -> 12 attachments
+                                                              + 29 assets, each
+                                                              with its message id
+    GET /backend-api/conversation/{id}/interpreter/download
+        ?message_id=…&sandbox_path=/mnt/data/…              -> { download_url, … }
+
+Cookies alone give 401; the Bearer token from `/api/auth/session` gives 200.
+`message_id` is MANDATORY (omitting it returns 422) and is obtainable ONLY from
+the API — which is why this path is a requirement, not an optimisation of the DOM
+one. `host_permissions` and `isDownloadableFileUrl` already admit
+`/backend-api/estuary/` URLs, so no permission was widened.
+
+A concern I raised against my own code and then measured: resolving a file
+through some OTHER message's id could hand back the wrong bytes. Twelve distinct
+message ids against one `sandbox_path` all returned the SAME file id
+(`distinctFileIds` length 1) — the path identifies the bytes, the id is required
+context. Safe, and the working id is therefore found once and reused instead of
+retried per file.
+
+| id  | mutation                                                  | verdict |
+|-----|-----------------------------------------------------------|---------|
+| A1  | unreadable API returns `[]` instead of `null`              | DIED    |
+| A2  | missing token returns `[]` instead of `null`               | DIED    |
+| A3  | download-url host check removed                            | DIED    |
+| A4  | `message_id` dropped from the download request             | DIED    |
+| A5  | panel accepts any aria-label (translated button as a file) | DIED    |
+| A6  | working message id not carried forward                     | DIED    |
+
+A1/A2 guard the distinction that matters most here: "no artefacts" and "could
+not tell" must never collapse into the same value, or a 401 reads as a clean
+conversation.
+
+### Live end-to-end, under ru-RU
+
+The shipped module was loaded into the real page and driven against the real
+conversation:
+
+    panelFiles      5      (all PDF/DOCX; "Скачать файл" correctly NOT a file)
+    apiWasReadable  true
+    apiCount        41     (29 assets + 12 attachments)
+    resolved        a signed estuary URL with cd=attachment and sig=…
+
+Where the shipped selectors found zero, this path finds five documents and 41
+artefacts.
+
+### Not yet done
+
+`resolveArtifactPanelFiles` is verified as a unit and against production, but the
+popup does not call it yet — the export pipeline still collects attachments
+per-turn from the DOM. Wiring it in is the remaining work; until then the
+generated-artefact class is FIXED IN MECHANISM, NOT IN SHIPPED BEHAVIOUR, and
+this file should not be read as saying otherwise.

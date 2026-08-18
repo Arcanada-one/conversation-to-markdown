@@ -363,6 +363,232 @@ function extractAttachments(section) {
   return extractAttachmentsDetailed(section).links;
 }
 
+/* ------------------------------------------------------------------------- *
+ * Artefacts that render NO chip at all.
+ *
+ * Measured on a production conversation the operator supplied as one that
+ * "definitely contains the documents": five generated PDF/DOCX files, and
+ * EVERY ONE of the six ATTACHMENT_CHIP_SELECTORS found nothing —
+ *
+ *   a[href*="/files/"], a[href*="files.oaiusercontent.com"] -> []
+ *   [data-testid*="file-chip"], [data-testid*="attachment"] -> {} (none)
+ *   [download] -> []
+ *
+ * Code-interpreter output is rendered in a separate artefact <section> with no
+ * href, no testid and no download attribute; the file name lives in a bare
+ * <span> and the bytes are fetched on click. The panel is also OUTSIDE the
+ * message tree (`button.closest('[data-message-id]')` === null at 28 ancestors),
+ * so a per-turn DOM scan cannot associate a file with its message even in
+ * principle. A DOM-only implementation would have exported ZERO documents from
+ * that conversation while reporting success.
+ *
+ * The conversation API carries what the DOM does not, in one request and with no
+ * translatable strings involved (verified: 200, 12 uploaded attachments with
+ * {message_id, name, file_id, mime_type, size} plus 31 generated assets):
+ *
+ *   GET /backend-api/conversation/{id}          (Bearer from /api/auth/session)
+ *   GET /backend-api/conversation/{id}/interpreter/download
+ *         ?message_id=…&sandbox_path=/mnt/data/…   -> { download_url, … }
+ *
+ * `message_id` is MANDATORY on the download call (omitting it returns 422), and
+ * it is only obtainable from the API — which is the reason this path exists
+ * rather than being an optimisation of the DOM one.
+ * ------------------------------------------------------------------------- */
+
+/** Fetch the page's own session token. Same-origin, cookie-authenticated; the
+ *  token is never stored, logged, or sent anywhere but chatgpt.com. */
+async function fetchSessionToken(fetchImpl) {
+  const doFetch = fetchImpl || (typeof fetch === 'function' ? fetch : null);
+  if (!doFetch) return null;
+  try {
+    const response = await doFetch('/api/auth/session', {
+      credentials: 'include',
+      headers: { accept: 'application/json' },
+    });
+    if (!response || !response.ok) return null;
+    const body = await response.json();
+    return (body && body.accessToken) || null;
+  } catch (_e) {
+    return null;
+  }
+}
+
+/** Enumerate a conversation's artefacts from the API.
+ *
+ *  Returns null — not an empty list — when the API could not be read. The
+ *  distinction matters: "no artefacts" and "could not tell" must never collapse
+ *  into the same value, or a failed request reads as a clean conversation. */
+async function fetchConversationArtifacts(conversationId, options) {
+  const opts = options || {};
+  const doFetch = opts.fetchImpl || (typeof fetch === 'function' ? fetch : null);
+  if (!doFetch || !conversationId) return null;
+  const token = opts.token !== undefined
+    ? opts.token
+    : await fetchSessionToken(doFetch);
+  if (!token) return null;
+
+  let payload;
+  try {
+    const response = await doFetch('/backend-api/conversation/' + conversationId, {
+      credentials: 'include',
+      headers: { accept: 'application/json', authorization: 'Bearer ' + token },
+    });
+    if (!response || !response.ok) return null;
+    payload = await response.json();
+  } catch (_e) {
+    return null;
+  }
+  if (!payload || !payload.mapping) return null;
+
+  const artifacts = [];
+  const seen = new Set();
+  for (const node of Object.values(payload.mapping)) {
+    const message = node && node.message;
+    if (!message) continue;
+    const messageId = message.id || null;
+    const metadata = message.metadata || {};
+
+    for (const attachment of metadata.attachments || []) {
+      const key = 'att:' + (attachment.id || attachment.name);
+      if (!attachment.name || seen.has(key)) continue;
+      seen.add(key);
+      artifacts.push({
+        kind: 'attachment',
+        messageId: messageId,
+        name: attachment.name,
+        fileId: attachment.id || null,
+        mimeType: attachment.mime_type || null,
+        size: typeof attachment.size === 'number' ? attachment.size : null,
+        sandboxPath: null,
+      });
+    }
+
+    const parts = (message.content || {}).parts || [];
+    for (const part of parts) {
+      if (!part || typeof part !== 'object' || !part.asset_pointer) continue;
+      const pointer = String(part.asset_pointer);
+      if (seen.has('ast:' + pointer)) continue;
+      seen.add('ast:' + pointer);
+      artifacts.push({
+        kind: 'asset',
+        messageId: messageId,
+        name: part.name || null,
+        // "sediment://file_abc" / "file-service://file_abc" -> the file id.
+        fileId: (pointer.match(/(file[-_][A-Za-z0-9]+)/) || [])[1] || null,
+        mimeType: part.mime_type || null,
+        size: typeof part.size === 'number' ? part.size : null,
+        sandboxPath: null,
+      });
+    }
+  }
+  return artifacts;
+}
+
+/** Resolve a sandbox artefact (code-interpreter output) to a fetchable URL.
+ *  Returns null on any failure — the caller must not invent a URL. */
+async function resolveSandboxDownloadUrl(conversationId, messageId, sandboxPath, options) {
+  const opts = options || {};
+  const doFetch = opts.fetchImpl || (typeof fetch === 'function' ? fetch : null);
+  if (!doFetch || !conversationId || !messageId || !sandboxPath) return null;
+  const token = opts.token !== undefined
+    ? opts.token
+    : await fetchSessionToken(doFetch);
+  if (!token) return null;
+  const url = '/backend-api/conversation/' + conversationId +
+    '/interpreter/download?message_id=' + encodeURIComponent(messageId) +
+    '&sandbox_path=' + encodeURIComponent(sandboxPath);
+  try {
+    const response = await doFetch(url, {
+      credentials: 'include',
+      headers: { accept: 'application/json', authorization: 'Bearer ' + token },
+    });
+    if (!response || !response.ok) return null;
+    const body = await response.json();
+    const resolved = body && (body.download_url || body.url);
+    if (!resolved || !isConversationFileUrl(resolved)) return null;
+    return {
+      url: resolved,
+      fileName: (body && body.file_name) || null,
+      mimeType: (body && body.mime_type) || null,
+      size: (body && typeof body.file_size_bytes === 'number')
+        ? body.file_size_bytes
+        : null,
+    };
+  } catch (_e) {
+    return null;
+  }
+}
+
+/** Resolve every artefact panel file to a download URL.
+ *
+ *  `message_id` is mandatory on the endpoint but does NOT select the file:
+ *  measured against 12 different message ids in the same conversation, all
+ *  returned the SAME file id for one sandbox_path (`distinctFileIds` length 1).
+ *  The path identifies the bytes; the id is only required context. So one
+ *  working id is found once and reused, instead of retrying per file — which
+ *  would otherwise be O(files x messages) requests against the operator's
+ *  account for no gain.
+ */
+async function resolveArtifactPanelFiles(conversationId, options) {
+  const opts = options || {};
+  const files = opts.files || listArtifactPanelFiles(opts.doc);
+  if (!files.length) return [];
+  const doFetch = opts.fetchImpl || (typeof fetch === 'function' ? fetch : null);
+  const token = opts.token !== undefined
+    ? opts.token
+    : await fetchSessionToken(doFetch);
+  if (!token) return files.map((f) => ({ file: f, resolved: null }));
+
+  const messageIds = opts.messageIds || [];
+  let workingId = opts.messageId || null;
+  const out = [];
+  for (const file of files) {
+    let resolved = null;
+    if (workingId) {
+      resolved = await resolveSandboxDownloadUrl(
+        conversationId, workingId, file.sandboxPath,
+        { fetchImpl: doFetch, token: token });
+    }
+    if (!resolved) {
+      // No id known to work yet (or it stopped working): find one, once.
+      for (const candidate of messageIds) {
+        const attempt = await resolveSandboxDownloadUrl(
+          conversationId, candidate, file.sandboxPath,
+          { fetchImpl: doFetch, token: token });
+        if (attempt) { workingId = candidate; resolved = attempt; break; }
+      }
+    }
+    out.push({ file: file, resolved: resolved });
+  }
+  return out;
+}
+
+/** Read the artefact panel's rows from the DOM: file name plus its sandbox path.
+ *  This supplies the sandbox_path the API needs for interpreter output. The panel
+ *  is identified structurally (no testid exists) and its label is the file name,
+ *  which is user data rather than a translated UI string. */
+function listArtifactPanelFiles(doc) {
+  const root = doc || (typeof document !== 'undefined' ? document : null);
+  if (!root || !root.querySelectorAll) return [];
+  let buttons;
+  try {
+    buttons = root.querySelectorAll('button[class*="open-file"], [class*="artifact-row"] button');
+  } catch (_e) {
+    return [];
+  }
+  const files = [];
+  const seen = new Set();
+  for (const button of buttons) {
+    const label = button.getAttribute ? (button.getAttribute('aria-label') || '') : '';
+    // A file name, not the sibling download button whose label is translated
+    // ("Download file" / "Скачать файл"). An extension is the discriminator.
+    if (!/\.[A-Za-z0-9]{1,8}$/.test(label) || seen.has(label)) continue;
+    seen.add(label);
+    files.push({ name: label, sandboxPath: '/mnt/data/' + label });
+  }
+  return files;
+}
+
 function orderCapturedTurns(turns) {
   const ordered = turns instanceof Map ? Array.from(turns.values()) : Array.from(turns);
   const hasCompleteNumericOrder = ordered.every(function(turn) {
@@ -829,15 +1055,49 @@ function extractConversationLegacy() {
   return parts.length ? parts.join('\n\n---\n\n') : null;
 }
 
+/** Remove the accessibility suffix ChatGPT appends to a project row's label.
+ *
+ *  The suffix is a TRANSLATED UI string, so it cannot be matched by its words.
+ *  Measured on production with the same account under two browser locales:
+ *
+ *    en-GB : "Перезапуск nginx, chat in project Aether"
+ *    ru-RU : "Перезапуск nginx, чат в проекте Aether"
+ *
+ *  A regex for "chat in project" strips the first and misses the second, baking
+ *  the project name into every folder name for a Russian-UI user. So the suffix
+ *  is removed STRUCTURALLY instead: the row's own visible text is the bare
+ *  title, and the label is that title followed by the localized description.
+ *  Verified on all 10 sampled rows under ru-RU: aria-label always startsWith
+ *  the visible text (suffix "" for global chats, ", чат в проекте X" inside a
+ *  project). No language knowledge is involved. */
+function stripSidebarLabelSuffix(label, visibleTitle) {
+  const raw = String(label).trim();
+  const visible = String(visibleTitle == null ? '' : visibleTitle).trim();
+  if (visible && raw.startsWith(visible) && raw.length > visible.length) {
+    // Only a separator-led remainder is a suffix. A conversation whose title
+    // merely begins with a shorter row text keeps its full name.
+    const remainder = raw.slice(visible.length);
+    // Punctuation, not whitespace. A row truncates a long title with an ellipsis
+    // while aria-label keeps the full one ("Проектирование хранилища" against
+    // "Проектирование хранилища секретов"), so a space-led remainder is the REST
+    // OF THE TITLE and cutting there renames the folder after a clipped title.
+    if (/^\s*[,;:—–]/.test(remainder)) return visible;
+  }
+  return raw;
+}
+
 /** Read a sidebar conversation link's visible title.
- *  Fixture-derived: aria-label and inner .truncate both carry the title. */
+ *  The visible text is preferred over aria-label because it carries the title
+ *  WITHOUT the localized ", chat in project …" / ", чат в проекте …" suffix. */
 function titleFromSidebarLink(link) {
   if (!link) return null;
-  const label = (link.getAttribute('aria-label') || '').trim();
-  if (label) return label;
   const inner = link.querySelector ? link.querySelector('.truncate') : null;
-  const text = inner ? (inner.textContent || '').trim() : (link.textContent || '').trim();
-  return text || null;
+  const visible = inner
+    ? (inner.textContent || '').trim()
+    : (link.textContent || '').trim();
+  const label = (link.getAttribute('aria-label') || '').trim();
+  if (visible) return stripSidebarLabelSuffix(label || visible, visible);
+  return label ? stripSidebarLabelSuffix(label, '') : null;
 }
 
 /** Read the conversation title from the page.
@@ -852,8 +1112,16 @@ function extractConversationTitle(doc) {
     .match(/\/c\/([A-Za-z0-9-]+)/);
 
   const candidates = [];
-  if (idMatch) candidates.push('a[href="/c/' + idMatch[1] + '"]');
+  if (idMatch) {
+    candidates.push('a[href="/c/' + idMatch[1] + '"]');
+    // A conversation inside a Project is linked as
+    // /g/g-p-{projectId}/c/{convId}, so an exact `/c/{id}` match misses it and
+    // the lookup used to fall through to document.title — which carries the
+    // project name as a prefix. Verified on production.
+    candidates.push('a[href$="/c/' + idMatch[1] + '"]');
+  }
   candidates.push('a[data-active][href^="/c/"]');
+  candidates.push('a[data-active][href*="/c/"]');
 
   for (const selector of candidates) {
     const link = root.querySelector(selector);
@@ -863,14 +1131,75 @@ function extractConversationTitle(doc) {
 
   const title = (root.title || '').trim();
   if (!title) return null;
-  const cleaned = title.replace(/\s*[|-]\s*ChatGPT\s*$/i, '').trim();
+  let cleaned = title.replace(/\s*[|-]\s*ChatGPT\s*$/i, '').trim();
+  // Last-resort source: on a project conversation the document title reads
+  // "Qoople - Перевод i18n JSON для сайта". Drop a leading "<project> - " when
+  // the project name is known, so the folder is not named after the project.
+  const projectName = knownProjectName(root);
+  if (projectName) {
+    const prefix = new RegExp('^' + escapeForRegExp(projectName) + '\\s*[-–—|]\\s*');
+    const withoutProject = cleaned.replace(prefix, '').trim();
+    if (withoutProject) cleaned = withoutProject;
+  }
   return cleaned && cleaned.toLowerCase() !== 'chatgpt' ? cleaned : null;
+}
+
+function escapeForRegExp(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** The current Project's display name, when the page is inside one.
+ *
+ *  Read from the sidebar's PROJECT SECTION rather than parsed out of the row's
+ *  localized label. The previous version matched ", chat in project (.+)$",
+ *  which returns null under a Russian UI (", чат в проекте Aether") — so the
+ *  document.title fallback then kept the "<project> - " prefix and named the
+ *  folder after the project. The project row is identified by its href, which
+ *  no locale translates. */
+function knownProjectName(doc) {
+  const root = doc || (typeof document !== 'undefined' ? document : null);
+  if (!root || !root.querySelector) return null;
+  const path = typeof location !== 'undefined' ? location.pathname : '';
+  const idMatch = path.match(/\/c\/([A-Za-z0-9-]+)/);
+  if (!idMatch) return null;
+
+  // Inside a project the route itself carries the project id.
+  const routeProject = path.match(/\/g\/(g-p-[A-Za-z0-9]+)\//);
+  const link = root.querySelector('a[href$="/c/' + idMatch[1] + '"]');
+  const href = link ? link.getAttribute('href') || '' : '';
+  const projectId = (routeProject && routeProject[1])
+    || (href.match(/\/g\/(g-p-[A-Za-z0-9]+)\//) || [])[1]
+    || null;
+  if (!projectId) return null;
+
+  // A project has NO anchor of its own: measured on production, the sidebar
+  // renders projects as div[role="button"] and `nav a[href^="/g/"]` without a
+  // /c/ part returns []. So the name is taken from the project row that
+  // CONTAINS this conversation's row — found by structure, not by language.
+  if (!link) return null;
+  // Walk out to the project group and read its header row's visible text.
+  let cur = link.parentElement;
+  for (let depth = 0; depth < 12 && cur; depth++) {
+    const header = cur.querySelector
+      ? cur.querySelector('[role="button"] .truncate, button[data-sidebar-item] .truncate')
+      : null;
+    if (header) {
+      const name = (header.textContent || '').trim();
+      // A header that is itself a conversation row is not a project name.
+      const ownsRows = cur.querySelectorAll
+        ? cur.querySelectorAll('a[href*="/c/"]').length
+        : 0;
+      if (name && ownsRows > 0) return name;
+    }
+    cur = cur.parentElement;
+  }
+  return null;
 }
 
 /**
  * Enumerate the conversation links CURRENTLY MOUNTED in the sidebar.
- * Fixture-derived selector: nav a[href^="/c/"] — needs a live check on a
- * ChatGPT Project page.
+ * Verified against production: matches both /c/{id} and the project-scoped
+ * /g/g-p-{projectId}/c/{id} shape.
  *
  * This reads one frame only. The sidebar is virtualized, so on a long list this
  * returns a SUBSET. Callers exporting a whole Project must use
@@ -882,30 +1211,170 @@ function listSidebarConversations(doc) {
   const root = doc || (typeof document !== 'undefined' ? document : null);
   if (!root || !root.querySelectorAll) return [];
 
-  const links = root.querySelectorAll('nav a[href^="/c/"]');
+  // Two href shapes, both real: a plain conversation is /c/{id}, and one that
+  // lives in a Project is /g/g-p-{projectId}/c/{id}. Matching only the first
+  // meant a batch started on a Project silently exported the global "Chats"
+  // list instead — a different set, not a subset. Verified on production.
+  const links = root.querySelectorAll('nav a[href*="/c/"]');
   const seen = new Set();
   const results = [];
   for (const link of links) {
     const href = link.getAttribute('href') || '';
-    const match = href.match(/^\/c\/([A-Za-z0-9-]+)/);
-    if (!match || seen.has(match[1])) continue;
-    seen.add(match[1]);
+    // A query string or fragment may follow the id: production serves rows like
+    // `…/c/{id}?messageId=finalAgentTurnStart`, and anchoring at the id dropped
+    // exactly one real conversation from each project that had one.
+    const match = href.match(/^(?:\/g\/(g-p-[A-Za-z0-9]+))?\/c\/([A-Za-z0-9-]+)(?:[?#].*)?$/);
+    if (!match) continue;
+    const projectId = match[1] || null;
+    const id = match[2];
+    if (seen.has(id)) continue;
+    seen.add(id);
     const title = titleFromSidebarLink(link);
     results.push({
-      id: match[1],
-      href: '/c/' + match[1],
+      id: id,
+      // Navigate to the href the page itself uses: a project conversation
+      // reached through /c/{id} loses its project context.
+      href: href,
+      projectId: projectId,
       title: title,
-      slug: slugifyTitle(title) || match[1],
+      slug: slugifyTitle(title) || id,
     });
   }
   return results;
+}
+
+/** Collapsed Project rows in the sidebar, which must be expanded before their
+ *  conversations exist in the DOM at all.
+ *
+ *  Verified on production: a Project is a `div[role="button"]` inside a
+ *  `group/project-unfurl-row` container, with NO href and NO data-testid, and it
+ *  starts collapsed. Until it is clicked, none of its conversations are present —
+ *  so a walk that only scrolls and paginates still sees zero of them, however
+ *  thoroughly it verifies its coverage of what IS mounted. */
+/** The list item that holds a project row AND, once open, its conversations. */
+function projectRowContainer(row) {
+  let current = row;
+  for (let depth = 0; depth < 5 && current; depth++) {
+    const tag = current.tagName ? current.tagName.toLowerCase() : '';
+    if (tag === 'li') return current;
+    current = current.parentElement;
+  }
+  return row ? row.parentElement || row : null;
+}
+
+function findCollapsedProjectRows(doc) {
+  const root = doc || (typeof document !== 'undefined' ? document : null);
+  if (!root || !root.querySelectorAll) return [];
+  let rows;
+  try {
+    rows = root.querySelectorAll('[class*="project-unfurl-row"]');
+  } catch (_e) {
+    return [];
+  }
+  const found = [];
+  const seen = new Set();
+  for (const row of rows) {
+    if (!row || !row.querySelector) continue;
+    // Openness must be judged on the row's CONTAINER, not the row: verified on
+    // production, an expanded project renders its conversations as SIBLINGS of
+    // the unfurl row, so the row itself always holds zero links. Testing the row
+    // made every project look permanently collapsed, and re-clicking an open one
+    // closes it — the walk toggled projects shut instead of opening them.
+    const container = projectRowContainer(row);
+    let openLinks = 0;
+    try {
+      openLinks = container ? container.querySelectorAll('a[href*="/c/"]').length : 0;
+    } catch (_e) {
+      openLinks = 0;
+    }
+    if (openLinks) continue;
+    let control = null;
+    try {
+      control = row.getAttribute && row.getAttribute('role') === 'button'
+        ? row
+        : row.querySelector('[role="button"]');
+    } catch (_e) {
+      control = null;
+    }
+    if (!control || typeof control.click !== 'function') continue;
+    const label = (row.textContent || '').trim().slice(0, 60);
+    // The same project renders more than one matching container; one click each.
+    if (!label || seen.has(label)) continue;
+    seen.add(label);
+    found.push({ control: control, label: label });
+  }
+  return found;
+}
+
+/** Find the pagination ("Show more") control in the sidebar, if one is present.
+ *
+ *  A Project's conversation list is paginated by a CLICK, not by scrolling: the
+ *  first rows render, then one more row reveals the rest (verified on
+ *  production: one project went from 5 to 35 conversations). Scrolling alone can
+ *  never reach past it, so a walk that only scrolls reports a confident subset.
+ *
+ *  The label is a TRANSLATED UI string and MUST NOT be matched by its words.
+ *  Measured on the same account under two browser locales:
+ *
+ *    en-GB : "Show more"
+ *    ru-RU : "Показать больше"
+ *
+ *  A /^show more$/i test finds the first and misses the second, so a Russian-UI
+ *  user's projects silently paginate shut — and, worse, "no control standing"
+ *  reads as "no pagination exists", which the completeness check then reports as
+ *  a COMPLETE list. The control is therefore identified STRUCTURALLY, by what
+ *  distinguishes it from every other sidebar item (measured under ru-RU):
+ *
+ *    - it is the LAST item of a nested <ul> …
+ *    - … whose other children are conversation links (siblingConvLinks > 0)
+ *    - it is not itself a link and holds no <a> (a conversation row would)
+ *    - it carries no icon (svgCount 0, unlike the other sidebar buttons)
+ *
+ *  Text is used only as a corroborating hint, never as a requirement. */
+function isPaginationControl(button) {
+  if (!button || typeof button.click !== 'function') return false;
+  try {
+    if (button.getAttribute && button.getAttribute('href')) return false;
+    if (button.querySelector && button.querySelector('a[href]')) return false;
+    const li = button.closest ? button.closest('li') : null;
+    const ul = li ? li.parentElement : null;
+    if (!li || !ul || !ul.children) return false;
+    const kids = Array.from(ul.children);
+    if (kids.indexOf(li) !== kids.length - 1) return false;
+    const siblingConvLinks = ul.querySelectorAll
+      ? ul.querySelectorAll('a[href*="/c/"]').length
+      : 0;
+    if (!siblingConvLinks) return false;
+    // The row itself must not be a conversation.
+    if (li.querySelector && li.querySelector('a[href*="/c/"]')) return false;
+    return true;
+  } catch (_e) {
+    return false;
+  }
+}
+
+function findShowMoreControl(doc) {
+  const root = doc || (typeof document !== 'undefined' ? document : null);
+  if (!root || !root.querySelectorAll) return null;
+  let buttons;
+  try {
+    buttons = root.querySelectorAll(
+      'nav button[data-sidebar-item], nav button, nav [role="button"]'
+    );
+  } catch (_e) {
+    return null;
+  }
+  for (const button of buttons) {
+    if (isPaginationControl(button)) return button;
+  }
+  return null;
 }
 
 /** Locate the scrollable sidebar element holding the conversation list. */
 function findSidebarScroller(doc) {
   const root = doc || (typeof document !== 'undefined' ? document : null);
   if (!root || !root.querySelector) return null;
-  const anchor = root.querySelector('nav a[href^="/c/"]');
+  const anchor = root.querySelector('nav a[href*="/c/"]');
   if (!anchor) return null;
   let current = anchor.parentElement;
   while (current) {
@@ -950,6 +1419,22 @@ async function collectSidebarConversations(options) {
   // Fraction of the viewport to advance per round. Below 1 on purpose: the
   // overlap is what guarantees no band of rows is stepped over unobserved.
   const scrollStepRatio = supplied.scrollStepRatio || 0.5;
+  // A bound on "Show more" expansions, so a control that reappears without ever
+  // revealing anything cannot spin the walk forever.
+  const maxShowMoreClicks = supplied.maxShowMoreClicks === undefined
+    ? 60
+    : supplied.maxShowMoreClicks;
+  // Revealing a page is a network round-trip; it needs longer than a scroll.
+  const showMoreSettleMs = supplied.showMoreSettleMs || 1200;
+  // Projects start collapsed; opening one is a click plus a fetch.
+  const expandProjects = supplied.expandProjects !== false;
+  const maxProjectExpansions = supplied.maxProjectExpansions === undefined
+    ? 40
+    : supplied.maxProjectExpansions;
+  const projectSettleMs = supplied.projectSettleMs || 1400;
+  // A final re-read pass: rows keep mounting behind the downward walk.
+  const finalSweep = supplied.finalSweep !== false;
+  const maxSweepPasses = supplied.maxSweepPasses === undefined ? 6 : supplied.maxSweepPasses;
   const sleep = supplied.sleep || function(ms) {
     return new Promise(function(resolve) { setTimeout(resolve, ms); });
   };
@@ -966,11 +1451,22 @@ async function collectSidebarConversations(options) {
   // scrollable range" — instead of an inference from the walk having gone quiet.
   // Quiescence cannot distinguish "the list ended" from "I stopped looking".
   const coveredSpans = [];
+  // Offsets the walk actually READ at. Coverage of the rows proves no band was
+  // stepped over; these prove the sweep reached both ends of the scroller.
+  let visitedTop = false;
+  let visitedBottom = false;
+  // Where the LIST begins and ends in document space, learned from the rows seen
+  // at the very top and the very bottom. The scroller's own 0..scrollHeight is the
+  // wrong reference: it includes the sidebar's header and trailing padding.
+  let listTop = Infinity;
+  let listBottom = -Infinity;
   function recordCoverage(scrollTop) {
     if (!doc || !doc.querySelectorAll) return 0;
     let links;
     try {
-      links = doc.querySelectorAll('nav a[href^="/c/"]');
+      // Same shape as the enumerator: measuring only `/c/…` rows would ignore
+      // every project conversation and read their band as an unobserved gap.
+      links = doc.querySelectorAll('nav a[href*="/c/"]');
     } catch (_e) {
       return 0;
     }
@@ -1000,21 +1496,110 @@ async function collectSidebarConversations(options) {
     return bottom - top;
   }
 
-  /** True when the observed spans leave no gap across the scrollable range. */
-  function coverageIsContiguous(scrollHeight) {
+  /** True when no band BETWEEN observed rows went unobserved.
+   *
+   *  Interior holes only. The extremes are NOT checked here: every bound this
+   *  function could use (`listTop`, `listBottom`, row pitch) is derived from rows
+   *  that mounted, so a row which never mounted moves no bound and the comparison
+   *  becomes a tautology. Measured: `reach >= listBottom - 2` could not fail for
+   *  ANY mount budget, because at the terminal offset the deepest mounted row IS
+   *  the row defining `listBottom`. The tail is proven separately, by an
+   *  obligation the collected rows cannot discharge — see `tailIsProven`. */
+  function coverageIsContiguous() {
     if (!coveredSpans.length) return false;
     const spans = coveredSpans.slice().sort(function(a, b) { return a[0] - b[0]; });
-    // A row taller than this between two observations would be missed, so the
-    // tolerance is deliberately small — one hairline, not one row.
+    // A hairline, never a mounted band: the band is exactly the distance a
+    // stepped-over row could hide in.
     const slack = 2;
     let reach = spans[0][1];
-    if (spans[0][0] > slack) return false;   // never observed the top of the list
     for (let i = 1; i < spans.length; i++) {
-      if (spans[i][0] > reach + slack) return false;  // an unobserved band
+      if (spans[i][0] > reach + slack) return false;
       reach = Math.max(reach, spans[i][1]);
     }
-    return reach >= (scrollHeight || 0) - slack;
+    return true;
   }
+
+  /** The list item containing a conversation row. */
+  function rowListItem(link) {
+    let current = link;
+    for (let depth = 0; depth < 6 && current; depth++) {
+      if (current.tagName && current.tagName.toUpperCase() === 'LI') return current;
+      current = current.parentElement;
+    }
+    return null;
+  }
+
+  /** Is the deepest row we captured genuinely the LAST one in the list?
+   *
+   *  Answered by the DOM's own structure rather than by our observations: if the
+   *  deepest captured row's list item has a following sibling, a row exists past
+   *  everything we collected and the walk has NOT finished — no matter how neatly
+   *  its coverage adds up. This is an obligation the collected rows cannot
+   *  discharge themselves, which is precisely why it works where geometry did not.
+   *
+   *  Fails CLOSED on ambiguity: if the rows carry no list-item structure, a null
+   *  sibling means "cannot tell", not "proven", and completeness is refused.
+   *  Verified on production that the structure does persist (813 `nav li` against
+   *  803 mounted links), but a framework that virtualized the items away too would
+   *  otherwise turn "cannot tell" into a silent false success. */
+  /** Does the list keep `li` structure for rows the window has NOT mounted?
+   *
+   *  Measured, not assumed: more list items than mounted conversation rows means
+   *  the framework leaves the items in place, so a missing next sibling really
+   *  does mean "end of list". Production: 813 items against 803 links. When the
+   *  counts match, the structure is windowed exactly like the links and proves
+   *  nothing — the caller must then refuse to claim completeness. */
+  function structurePersistsPastWindow() {
+    try {
+      const items = doc.querySelectorAll('nav li').length;
+      const rows = doc.querySelectorAll('nav a[href*="/c/"]').length;
+      return items > rows;
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  function tailIsProven() {
+    if (!doc || !doc.querySelectorAll) return { proven: false, reason: 'no-document' };
+    let links;
+    try {
+      links = Array.from(doc.querySelectorAll('nav a[href*="/c/"]'));
+    } catch (_e) {
+      return { proven: false, reason: 'query-failed' };
+    }
+    if (!links.length) return { proven: false, reason: 'no-rows-mounted' };
+
+    const items = links.map(rowListItem).filter(Boolean);
+    if (!items.length) {
+      // No structural anchor to reason about — refuse rather than assume.
+      return { proven: false, reason: 'tail-unprovable' };
+    }
+    const deepest = items[items.length - 1];
+    const next = deepest.nextElementSibling;
+    if (!next) {
+      // No successor. That proves the tail ONLY if the list keeps structure for
+      // rows beyond the mounted window — otherwise "no next sibling" means "the
+      // window ends here", which is exactly what an unread tail also looks like.
+      // Production keeps it (813 `nav li` against 803 mounted links), but a
+      // framework that virtualized the items away too would turn "cannot tell"
+      // into a silent success, so the ambiguous case is refused.
+      return structurePersistsPastWindow()
+        ? { proven: true, reason: 'deepest-row-is-last-sibling' }
+        : { proven: false, reason: 'tail-unprovable' };
+    }
+    let nextHasRow = false;
+    try {
+      nextHasRow = !!(next.querySelector && next.querySelector('a[href*="/c/"]'));
+    } catch (_e) {
+      nextHasRow = false;
+    }
+    // A following item that holds no conversation row is list chrome (a section
+    // heading, the "Show more" row), not an unread conversation.
+    return nextHasRow
+      ? { proven: false, reason: 'successor-exists-not-mounted' }
+      : { proven: true, reason: 'successor-is-not-a-conversation' };
+  }
+
 
   const scroller = supplied.scroller || findSidebarScroller(doc);
 
@@ -1026,11 +1611,52 @@ async function collectSidebarConversations(options) {
       byId.set(conv.id, conv);
       added += 1;
     }
-    mountedBand = recordCoverage(scroller ? (scroller.scrollTop || 0) : 0);
+    const at = scroller ? (scroller.scrollTop || 0) : 0;
+    const spanCountBefore = coveredSpans.length;
+    mountedBand = recordCoverage(at);
+    const newSpan = coveredSpans.length > spanCountBefore
+      ? coveredSpans[coveredSpans.length - 1]
+      : null;
+    if (scroller) {
+      const maxTop = Math.max(0, (scroller.scrollHeight || 0) - (scroller.clientHeight || 0));
+      if (at <= 1) {
+        visitedTop = true;
+        if (newSpan) listTop = Math.min(listTop, newSpan[0]);
+      }
+      if (at >= maxTop - 1) {
+        visitedBottom = true;
+        if (newSpan) listBottom = Math.max(listBottom, newSpan[1]);
+      }
+    }
     return added;
   }
 
   absorb();
+
+  // Expand collapsed Projects FIRST. Their conversations do not exist in the DOM
+  // until the row is clicked, so scrolling and paginating a sidebar that still
+  // has them closed verifies coverage of a list they were never part of.
+  let projectsExpanded = 0;
+  if (expandProjects) {
+    for (let attempt = 0; attempt < maxProjectExpansions; attempt++) {
+      const pending = findCollapsedProjectRows(doc);
+      if (!pending.length) break;
+      let clickedAny = false;
+      for (const row of pending) {
+        if (projectsExpanded >= maxProjectExpansions) break;
+        try {
+          row.control.click();
+          projectsExpanded += 1;
+          clickedAny = true;
+          await sleep(projectSettleMs);
+          absorb();
+        } catch (_e) {
+          /* a row that refuses to open is skipped; the walk still runs */
+        }
+      }
+      if (!clickedAny) break;
+    }
+  }
 
   if (!scroller) {
     // Nothing to scroll. Either the whole list already fits, or the container
@@ -1051,6 +1677,12 @@ async function collectSidebarConversations(options) {
   // True when the completeness verdict rests on measured coverage rather than on
   // quiescence. Surfaced so a caller can tell a proof from a best guess.
   let coverageVerified = false;
+  let showMoreClicks = 0;
+  let barrenShowMoreClicks = 0;
+  // False when a "Show more" control was still standing at the end of the walk:
+  // rows exist that were never listed.
+  let showMoreExhausted = true;
+  let tailReason = null;
 
   while (rounds < maxRounds) {
     rounds += 1;
@@ -1080,7 +1712,41 @@ async function collectSidebarConversations(options) {
     }
     await sleep(settleMs);
 
-    const added = absorb();
+    let added = absorb();
+
+    // A "Show more" row means the list is paginated by a click. Scrolling can
+    // never reach past it, so a walk that only scrolls stops at a confident
+    // subset. Expand it here and count what it reveals as progress.
+    // Drain every pending control in this round, not one per round: a long
+    // project needs many pages, and the walk otherwise reaches the bottom and
+    // stops while pages it never asked for are still hidden. Measured on
+    // production: one-per-round found 158 of Aether's 235 conversations.
+    // Reset per round: the counter is a guard against one wedged control, not a
+    // budget for the whole walk. Left cumulative, two barren clicks anywhere
+    // silenced every later "Show more" — which is how a run with five projects
+    // expanded only the first one's pages.
+    barrenShowMoreClicks = 0;
+    while (showMoreClicks < maxShowMoreClicks) {
+      const control = findShowMoreControl(doc);
+      if (!control || typeof control.click !== 'function') break;
+      let clickFailed = false;
+      try {
+        control.click();
+        showMoreClicks += 1;
+      } catch (_e) {
+        clickFailed = true;
+      }
+      if (clickFailed) break;
+      await sleep(showMoreSettleMs);
+      const revealed = absorb();
+      added += revealed;
+      // A control that keeps reappearing while revealing nothing would spin
+      // until the budget ran out. Two barren clicks in a row end the drain; the
+      // `maxShowMoreClicks` ceiling remains the outer backstop.
+      barrenShowMoreClicks = revealed ? 0 : barrenShowMoreClicks + 1;
+      if (barrenShowMoreClicks >= 2) break;
+    }
+
     const nowTop = scroller.scrollTop || 0;
     const nowMaxTop = Math.max(0, (scroller.scrollHeight || 0) - (scroller.clientHeight || 0));
     const atBottom = nowTop >= nowMaxTop - 1;
@@ -1105,16 +1771,64 @@ async function collectSidebarConversations(options) {
       // subset. Without geometry there is nothing to verify against, so the
       // quiescent verdict stands — the honest limit of what can be known.
       reachedBottom = true;
+      // An unexpanded "Show more" still standing means rows exist that were
+      // never listed. Reaching the bottom is not reaching the end.
+      if (findShowMoreControl(doc)) {
+        showMoreExhausted = false;
+        complete = false;
+        break;
+      }
       // With geometry, completeness is VERIFIED: the observed spans must leave
       // no gap across the scrollable range. Without geometry there is nothing to
       // verify against and the verdict falls back to quiescence — which cannot
       // tell "the list ended" from "the loader had not answered yet". That
       // fallback is the known limit of this walk, not a proof.
       coverageVerified = coveredSpans.length > 0;
-      complete = coverageVerified
-        ? coverageIsContiguous(scroller.scrollHeight || 0)
-        : true;
+      // Three independent conditions, none derived from the others: no interior
+      // hole, both ends actually visited, and the tail proven by DOM structure.
+      const tail = tailIsProven();
+      tailReason = tail.reason;
+      complete = (coverageVerified ? coverageIsContiguous() : true) &&
+        visitedTop && visitedBottom && tail.proven;
       break;
+    }
+  }
+
+  // One final sweep from the top before concluding. Rows keep mounting behind the
+  // walk as the virtualizer settles, and measured on production 28 conversations
+  // existed in the DOM that the downward pass never saw. This is a re-read of
+  // what is already there, not another expansion pass.
+  if (finalSweep && !blocked) {
+    // Sweep until a pass adds nothing. A fixed number of passes cannot be right:
+    // measured on production the sidebar was still mounting rows after the walk
+    // finished (691 in the DOM against 455 listed), so the stopping condition has
+    // to be "a full pass found nothing new", not a count chosen in advance.
+    for (let pass = 0; pass < maxSweepPasses; pass++) {
+      const before = byId.size;
+      let position = 0;
+      const limit = Math.max(0, (scroller.scrollHeight || 0) - (scroller.clientHeight || 0));
+      const sweepStep = Math.max(1, Math.floor((scroller.clientHeight || 1) * scrollStepRatio));
+      let guard = 0;
+      while (position <= limit && guard < maxRounds) {
+        guard += 1;
+        try {
+          scroller.scrollTop = position;
+        } catch (_e) {
+          break;
+        }
+        await sleep(settleMs);
+        absorb();
+        position += sweepStep;
+      }
+      if (byId.size === before) break;
+    }
+    // Coverage was re-measured across the whole range, so re-decide on it.
+    if (coveredSpans.length) {
+      coverageVerified = true;
+      const sweptTail = tailIsProven();
+      tailReason = sweptTail.reason;
+      complete = coverageIsContiguous() && showMoreExhausted &&
+        visitedTop && visitedBottom && sweptTail.proven;
     }
   }
 
@@ -1130,6 +1844,13 @@ async function collectSidebarConversations(options) {
     reason = 'reached-end';
   } else if (blocked) {
     reason = 'scroll-blocked';
+  } else if (!showMoreExhausted) {
+    reason = 'show-more-pending';
+  } else if (tailReason === 'successor-exists-not-mounted' ||
+             tailReason === 'tail-unprovable') {
+    // A row exists past everything captured, or the list carries no structure to
+    // prove otherwise. Either way the tail is unread, not merely unmeasured.
+    reason = tailReason;
   } else if (reachedBottom) {
     // Went quiet at the bottom, but the observed spans had a hole in them: some
     // rows were never mounted where the walk looked.
@@ -1143,6 +1864,9 @@ async function collectSidebarConversations(options) {
     complete: complete,
     reason: reason,
     coverageVerified: coverageVerified,
+    showMoreClicks: showMoreClicks,
+    projectsExpanded: projectsExpanded,
+    tailReason: tailReason,
   };
 }
 
@@ -1295,6 +2019,16 @@ if (typeof module !== 'undefined' && module.exports) {
     listSidebarConversations: listSidebarConversations,
     collectSidebarConversations: collectSidebarConversations,
     findSidebarScroller: findSidebarScroller,
+    findShowMoreControl: findShowMoreControl,
+    fetchSessionToken: fetchSessionToken,
+    fetchConversationArtifacts: fetchConversationArtifacts,
+    resolveSandboxDownloadUrl: resolveSandboxDownloadUrl,
+    listArtifactPanelFiles: listArtifactPanelFiles,
+    resolveArtifactPanelFiles: resolveArtifactPanelFiles,
+    findCollapsedProjectRows: findCollapsedProjectRows,
+    projectRowContainer: projectRowContainer,
+    stripSidebarLabelSuffix: stripSidebarLabelSuffix,
+    knownProjectName: knownProjectName,
     slugifyTitle: slugifyTitle,
     extractTurn: extractTurn,
     findScrollContainer: findScrollContainer,

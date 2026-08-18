@@ -1511,9 +1511,9 @@ test('renders KaTeX once by skipping the hidden MathML layer', () => {
 
 test('lists every sidebar conversation link once', () => {
   assert.equal(typeof parser.listSidebarConversations, 'function');
-  const makeLink = (id, title) => ({
+  const makeLink = (href, title) => ({
     getAttribute(name) {
-      if (name === 'href') return '/c/' + id;
+      if (name === 'href') return href;
       if (name === 'aria-label') return title;
       return null;
     },
@@ -1521,21 +1521,132 @@ test('lists every sidebar conversation link once', () => {
     textContent: title,
   });
   const doc = {
+    // Any conversation-link selector, not one pinned literal: the shipped
+    // selector had to widen once already and a restated string breaks the moment
+    // the code is corrected.
     querySelectorAll(selector) {
-      if (selector === 'nav a[href^="/c/"]') {
-        return [
-          makeLink('aaa111', 'Alpha chat'),
-          makeLink('bbb222', 'Beta chat'),
-          makeLink('aaa111', 'Alpha duplicate'),
-        ];
-      }
-      return [];
+      if (typeof selector !== 'string' || selector.indexOf('/c/') === -1) return [];
+      return [
+        makeLink('/c/aaa111', 'Alpha chat'),
+        makeLink('/c/bbb222', 'Beta chat'),
+        makeLink('/c/aaa111', 'Alpha duplicate'),
+      ];
     },
   };
   const listed = parser.listSidebarConversations(doc);
   assert.deepEqual(listed.map((item) => item.id), ['aaa111', 'bbb222']);
   assert.equal(listed[0].title, 'Alpha chat');
   assert.equal(listed[0].slug, 'Alpha-chat');
+  assert.equal(listed[0].projectId, null, 'a plain conversation has no project');
+});
+
+test('a project conversation title comes from the sidebar, not the document title', () => {
+  // Reproduces the production defect exactly. On a project conversation both
+  // original selectors miss — `a[href="/c/{id}"]` because the href is
+  // project-scoped, and `a[data-active][href^="/c/"]` likewise — so the lookup
+  // fell through to document.title, which reads "Qoople - Перевод i18n JSON для
+  // сайта". The project name then became part of every filename and folder.
+  const convId = '69847c8d-e3b0-838f-a0a5-a3b1aff85e96';
+  const projectId = 'g-p-6954db053ec481919faff2151c140cb6';
+  const projectHref = '/g/' + projectId + '/c/' + convId;
+
+  const sidebarLink = {
+    getAttribute(name) {
+      if (name === 'href') return projectHref;
+      if (name === 'aria-label') return 'Перевод i18n JSON для сайта, chat in project Qoople';
+      return null;
+    },
+    querySelector: () => null,
+    textContent: 'Перевод i18n JSON для сайта',
+  };
+
+  const doc = {
+    title: 'Qoople - Перевод i18n JSON для сайта',
+    querySelector(selector) {
+      const text = String(selector || '');
+      // The row is NOT marked data-active in this DOM, so a selector requiring
+      // that attribute must miss — otherwise every href variant looks rescued and
+      // the test cannot tell which selector is load-bearing.
+      if (text.indexOf('[data-active]') !== -1) return null;
+      const parsed = /\[href(\^|\$|=)?="?([^"\]]+)"?\]/.exec(text);
+      if (!parsed) return null;
+      const operator = parsed[1] === '=' || parsed[1] === undefined ? '=' : parsed[1];
+      const needle = parsed[2];
+      if (operator === '=') return projectHref === needle ? sidebarLink : null;
+      if (operator === '^') return projectHref.startsWith(needle) ? sidebarLink : null;
+      return projectHref.endsWith(needle) ? sidebarLink : null;
+    },
+    querySelectorAll: () => [],
+  };
+
+  const previousLocation = global.location;
+  global.location = { pathname: projectHref };
+  try {
+    const title = parser.extractConversationTitle(doc);
+    assert.equal(title, 'Перевод i18n JSON для сайта');
+    // Specifically NOT the document-title fallback, which carries the project.
+    assert.doesNotMatch(title, /Qoople/, 'the project name must not enter the title');
+  } finally {
+    global.location = previousLocation;
+  }
+});
+
+test('lists conversations that live inside a Project', () => {
+  // Verified on production: a Project conversation is linked as
+  // /g/g-p-{projectId}/c/{convId}. Matching only /c/{id} found ZERO of them, so
+  // a batch started on a Project exported the global recents instead — a
+  // different set, reported as success.
+  // Modelled on the measured row: the visible `.truncate` holds the BARE title
+  // while aria-label appends a localized description. The old fixture gave the
+  // row no `.truncate` at all and set textContent to the full label, so it could
+  // only ever exercise the English-regex path that broke under a Russian UI.
+  const makeLink = (href, visibleTitle, ariaLabel) => ({
+    getAttribute(name) {
+      if (name === 'href') return href;
+      if (name === 'aria-label') return ariaLabel;
+      return null;
+    },
+    querySelector(sel) {
+      return sel === '.truncate' ? { textContent: visibleTitle } : null;
+    },
+    textContent: visibleTitle,
+  });
+  const projectId = 'g-p-6954db053ec481919faff2151c140cb6';
+  const links = [
+    // The ru-RU suffix, measured on production. An English-literal strip leaves
+    // it in place and bakes the project name into the folder name.
+    makeLink('/g/' + projectId + '/c/69847c8d-e3b0',
+      'Перевод i18n JSON для сайта',
+      'Перевод i18n JSON для сайта, чат в проекте Qoople'),
+    makeLink('/c/plain001', 'A global chat', 'A global chat'),
+  ];
+  const doc = {
+    // Honours CSS attribute semantics: `[href^="/c/"]` is a PREFIX match and
+    // `[href*="/c/"]` a substring one. A fixture that ignores the difference
+    // returns project links to the narrow selector too, and so cannot detect the
+    // very narrowing that lost every project conversation in production.
+    querySelectorAll(selector) {
+      const parsed = /\[href(\^|\*)="([^"]+)"\]/.exec(String(selector || ''));
+      if (!parsed) return [];
+      const [, operator, needle] = parsed;
+      return links.filter((link) => {
+        const href = link.getAttribute('href') || '';
+        return operator === '^' ? href.startsWith(needle) : href.indexOf(needle) !== -1;
+      });
+    },
+  };
+
+  const listed = parser.listSidebarConversations(doc);
+  assert.deepEqual(listed.map((c) => c.id), ['69847c8d-e3b0', 'plain001']);
+  assert.equal(listed[0].projectId, projectId);
+  // The href must be the one the PAGE uses: reaching a project conversation
+  // through a bare /c/{id} loses its project context.
+  assert.equal(listed[0].href, '/g/' + projectId + '/c/69847c8d-e3b0');
+  // The accessibility suffix is not part of the title, and would otherwise be
+  // baked into the filename and folder name.
+  assert.equal(listed[0].title, 'Перевод i18n JSON для сайта');
+  assert.equal(listed[0].slug, 'Перевод-i18n-JSON-для-сайта');
+  assert.equal(listed[1].projectId, null);
 });
 
 test('waitForConversationReady resolves when message content mounts', async () => {
@@ -1579,4 +1690,238 @@ test('waitForConversationReady times out when navigation never arrives', async (
     global.document = previousDocument;
     global.location = previousLocation;
   }
+});
+
+test('a title is not truncated at a coincidental prefix', () => {
+  // The suffix is removed structurally (aria-label startsWith visible text), so
+  // the separator is what distinguishes "title + description" from "the visible
+  // text is merely an abbreviation of the label". A sidebar row truncates long
+  // titles with an ellipsis while aria-label carries the full one:
+  //
+  //   visible : "Проектирование хранилища"
+  //   label   : "Проектирование хранилища секретов"
+  //
+  // Without the separator requirement the title silently becomes the truncated
+  // visible text and the folder is named after a clipped title. A mutation that
+  // dropped that requirement survived every other test.
+  const clipped = {
+    getAttribute(name) {
+      if (name === 'href') return '/c/abc123';
+      if (name === 'aria-label') return 'Проектирование хранилища секретов';
+      return null;
+    },
+    querySelector(sel) {
+      return sel === '.truncate' ? { textContent: 'Проектирование хранилища' } : null;
+    },
+    textContent: 'Проектирование хранилища',
+  };
+  assert.equal(
+    parser.titleFromSidebarLink(clipped),
+    'Проектирование хранилища секретов',
+    'a word-boundary-less remainder is part of the title, not a suffix'
+  );
+
+  // The measured project suffix still strips: the remainder starts with ", ".
+  const inProject = {
+    getAttribute(name) {
+      if (name === 'href') return '/g/g-p-abc/c/def456';
+      if (name === 'aria-label') return 'Перезапуск nginx, чат в проекте Aether';
+      return null;
+    },
+    querySelector(sel) {
+      return sel === '.truncate' ? { textContent: 'Перезапуск nginx' } : null;
+    },
+    textContent: 'Перезапуск nginx',
+  };
+  assert.equal(parser.titleFromSidebarLink(inProject), 'Перезапуск nginx');
+});
+
+test('a label that does not begin with the visible text is left alone', () => {
+  // The structural strip is only valid when aria-label is "visible + suffix".
+  // Two guards enforce that: the label must START WITH the visible text, and the
+  // remainder must begin with punctuation. They overlap for most inputs, which is
+  // why a mutation removing the startsWith guard first survived — the punctuation
+  // check still rejected the mid-word slice.
+  //
+  // This input separates them. visible "Отчёт" is 5 characters and label[5] is a
+  // comma, so a blind slice(5) yields ", черновик отчёта" — punctuation-led, and
+  // therefore accepted by the second guard alone. Only startsWith can reject it.
+  // Without that guard the title becomes "Отчёт", a string the row never showed.
+  const unrelatedLabel = {
+    getAttribute(name) {
+      if (name === 'href') return '/c/xyz789';
+      if (name === 'aria-label') return 'Итоги, черновик отчёта';
+      return null;
+    },
+    querySelector(sel) {
+      return sel === '.truncate' ? { textContent: 'Отчёт' } : null;
+    },
+    textContent: 'Отчёт',
+  };
+  assert.equal(
+    parser.titleFromSidebarLink(unrelatedLabel),
+    'Итоги, черновик отчёта',
+    'a label not prefixed by the visible text must not be cut by length'
+  );
+});
+
+/* ------------------------------------------------------------------------- *
+ * Artefacts that render no chip.
+ *
+ * Measured on production: a conversation with five generated PDF/DOCX files
+ * returned ZERO matches for all six ATTACHMENT_CHIP_SELECTORS, no <a href>, no
+ * [download], and no data-testid. The API path exists because the DOM cannot
+ * express the file->message link at all, not as an optimisation.
+ * ------------------------------------------------------------------------- */
+
+/** A fetch stub that answers only the URLs it is given, so an unexpected
+ *  request fails loudly instead of silently returning empty data. */
+function stubFetch(routes) {
+  const calls = [];
+  const impl = async (url, init) => {
+    calls.push({ url: String(url), init: init || null });
+    for (const [pattern, responder] of routes) {
+      if (String(url).indexOf(pattern) !== -1) return responder(String(url), init);
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+  impl.calls = calls;
+  return impl;
+}
+const jsonOk = (body) => () => ({ ok: true, status: 200, json: async () => body });
+
+test('artefacts are enumerated from the conversation API, with message ids', async () => {
+  // Shape copied from the live 200 response: uploaded files live in
+  // metadata.attachments, generated ones in content.parts[].asset_pointer.
+  const fetchImpl = stubFetch([
+    ['/api/auth/session', jsonOk({ accessToken: 'tok-123' })],
+    ['/backend-api/conversation/conv-1', jsonOk({
+      mapping: {
+        n1: { message: { id: 'msg-a', metadata: { attachments: [
+          { id: 'file_up1', name: 'brief.pdf', mime_type: 'application/pdf', size: 4096 },
+        ] }, content: { parts: ['hello'] } } },
+        n2: { message: { id: 'msg-b', metadata: {}, content: { parts: [
+          { asset_pointer: 'sediment://file_gen9', mime_type: 'image/png' },
+        ] } } },
+      },
+    })],
+  ]);
+
+  const found = await parser.fetchConversationArtifacts('conv-1', { fetchImpl });
+  assert.equal(found.length, 2);
+  const upload = found.find((a) => a.kind === 'attachment');
+  assert.equal(upload.name, 'brief.pdf');
+  assert.equal(upload.messageId, 'msg-a');
+  assert.equal(upload.fileId, 'file_up1');
+  const asset = found.find((a) => a.kind === 'asset');
+  assert.equal(asset.messageId, 'msg-b');
+  assert.equal(asset.fileId, 'file_gen9', 'the file id is parsed out of the asset pointer');
+});
+
+test('an unreadable API returns null, never an empty artefact list', async () => {
+  // "No artefacts" and "could not tell" must not collapse into the same value:
+  // a 401 that reads as an empty list turns a failed export into a clean one.
+  const unauthorized = stubFetch([
+    ['/api/auth/session', jsonOk({ accessToken: 'tok-123' })],
+    ['/backend-api/conversation/conv-1', () => ({ ok: false, status: 401, json: async () => ({}) })],
+  ]);
+  assert.equal(await parser.fetchConversationArtifacts('conv-1', { fetchImpl: unauthorized }), null);
+
+  // No token at all (signed out, or the session shape changed).
+  const noToken = stubFetch([['/api/auth/session', jsonOk({})]]);
+  assert.equal(await parser.fetchConversationArtifacts('conv-1', { fetchImpl: noToken }), null);
+
+  // A conversation with genuinely no files is an EMPTY LIST, which is different.
+  const empty = stubFetch([
+    ['/api/auth/session', jsonOk({ accessToken: 'tok-123' })],
+    ['/backend-api/conversation/conv-1', jsonOk({ mapping: {
+      n1: { message: { id: 'msg-a', metadata: {}, content: { parts: ['just text'] } } },
+    } })],
+  ]);
+  assert.deepEqual(await parser.fetchConversationArtifacts('conv-1', { fetchImpl: empty }), []);
+});
+
+test('a sandbox artefact resolves to a host-checked download url', async () => {
+  const fetchImpl = stubFetch([
+    ['/interpreter/download', jsonOk({
+      download_url: 'https://chatgpt.com/backend-api/estuary/content?id=file_x&fn=report.pdf',
+      file_name: 'report.pdf', mime_type: 'application/pdf', file_size_bytes: 900,
+    })],
+  ]);
+  const got = await parser.resolveSandboxDownloadUrl(
+    'conv-1', 'msg-a', '/mnt/data/report.pdf', { fetchImpl, token: 'tok' });
+  assert.equal(got.fileName, 'report.pdf');
+  assert.equal(got.size, 900);
+  assert.ok(fetchImpl.calls[0].url.indexOf('message_id=msg-a') !== -1,
+    'message_id is mandatory: omitting it returns 422 on production');
+  assert.ok(fetchImpl.calls[0].url.indexOf(encodeURIComponent('/mnt/data/report.pdf')) !== -1);
+
+  // A url on a host that merely CONTAINS the real one must be refused, because
+  // the popup fetches whatever comes back.
+  const hostile = stubFetch([
+    ['/interpreter/download', jsonOk({
+      download_url: 'https://chatgpt.com.attacker.net/backend-api/estuary/content?id=file_x',
+      file_name: 'report.pdf',
+    })],
+  ]);
+  assert.equal(await parser.resolveSandboxDownloadUrl(
+    'conv-1', 'msg-a', '/mnt/data/report.pdf', { fetchImpl: hostile, token: 'tok' }), null);
+});
+
+test('the artefact panel yields file names, not the translated download button', () => {
+  // Measured under ru-RU: each artifact row holds an open-file button whose
+  // aria-label is the FILE NAME, plus a sibling button labelled "Скачать файл"
+  // ("Download file" in English). Matching the button by its label would break
+  // in every other locale; the file name is user data and carries an extension.
+  const buttons = [
+    { getAttribute: (n) => (n === 'aria-label' ? 'Talomnia_RU_v0.5.pdf' : null) },
+    { getAttribute: (n) => (n === 'aria-label' ? 'Скачать файл' : null) },
+    { getAttribute: (n) => (n === 'aria-label' ? 'Talomnia_EN_v0.5.docx' : null) },
+    { getAttribute: (n) => (n === 'aria-label' ? 'Download file' : null) },
+    { getAttribute: (n) => (n === 'aria-label' ? 'Кадры решают всё' : null) },
+  ];
+  const doc = {
+    querySelectorAll(sel) {
+      return /open-file|artifact-row/.test(sel) ? buttons : [];
+    },
+  };
+  const files = parser.listArtifactPanelFiles(doc);
+  assert.deepEqual(files.map((f) => f.name),
+    ['Talomnia_RU_v0.5.pdf', 'Talomnia_EN_v0.5.docx']);
+  assert.equal(files[0].sandboxPath, '/mnt/data/Talomnia_RU_v0.5.pdf');
+});
+
+test('one working message id is reused across every panel file', async () => {
+  // Measured: 12 different message ids all resolved the SAME sandbox_path to the
+  // same file id, so the id is required context and not a selector. Retrying the
+  // candidate list per file would multiply requests against the user's account.
+  let downloadCalls = 0;
+  const fetchImpl = stubFetch([
+    ['/interpreter/download', (url) => {
+      downloadCalls += 1;
+      // Only the second candidate id is accepted, to prove the search happens
+      // once and its result is carried forward.
+      if (url.indexOf('message_id=good') === -1) {
+        return { ok: false, status: 422, json: async () => ({}) };
+      }
+      return { ok: true, status: 200, json: async () => ({
+        download_url: 'https://chatgpt.com/backend-api/estuary/content?id=file_q',
+        file_name: 'x.pdf',
+      }) };
+    }],
+  ]);
+
+  const files = [
+    { name: 'a.pdf', sandboxPath: '/mnt/data/a.pdf' },
+    { name: 'b.pdf', sandboxPath: '/mnt/data/b.pdf' },
+    { name: 'c.pdf', sandboxPath: '/mnt/data/c.pdf' },
+  ];
+  const out = await parser.resolveArtifactPanelFiles('conv-1', {
+    files, fetchImpl, token: 'tok', messageIds: ['bad', 'good'],
+  });
+
+  assert.equal(out.length, 3);
+  assert.ok(out.every((r) => r.resolved !== null), 'every file must resolve');
+  // File 1: 'bad' then 'good' = 2 calls. Files 2 and 3: 'good' directly = 1 each.
+  assert.equal(downloadCalls, 4, 'the working id must not be re-discovered per file');
 });

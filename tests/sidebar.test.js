@@ -32,9 +32,11 @@ function createVirtualSidebar(options) {
     parentElement: null,
   };
 
+  function first() {
+    return Math.floor(scroller.scrollTop / rowHeight);
+  }
   function mountedIds() {
-    const first = Math.floor(scroller.scrollTop / rowHeight);
-    return allIds.slice(first, first + windowSize);
+    return allIds.slice(first(), first() + windowSize);
   }
 
   function linkFor(id) {
@@ -52,15 +54,18 @@ function createVirtualSidebar(options) {
 
   const doc = {
     querySelectorAll(selector) {
-      assert.equal(selector, 'nav a[href^="/c/"]');
-      return mountedIds().map(linkFor);
+      // Matches any conversation-link selector the shipped code chooses, rather
+      // than pinning one literal. The href shape changed once already (project
+      // conversations are /g/g-p-…/c/…), and a fixture that restates the
+      // selector fails the moment the code is corrected.
+      if (selector === 'nav li') return lastBuiltListItems;
+      if (!isConversationLinkSelector(selector)) return [];
+      return linkListWithItems(mountedIds().map(linkFor), first() + windowSize < total);
     },
     querySelector(selector) {
-      if (selector === 'nav a[href^="/c/"]') {
-        const ids = mountedIds();
-        return ids.length ? linkFor(ids[0]) : null;
-      }
-      return null;
+      if (!isConversationLinkSelector(selector)) return null;
+      const ids = mountedIds();
+      return ids.length ? linkFor(ids[0]) : null;
     },
   };
 
@@ -69,6 +74,59 @@ function createVirtualSidebar(options) {
 }
 
 const immediate = () => Promise.resolve();
+
+/** True for any selector the shipped code may use to find conversation links.
+ *  Deliberately permissive: the fixture's job is to model a sidebar, not to pin
+ *  the exact selector string, which has already changed once. */
+/** Wrap conversation-link stubs in the `li` structure the real sidebar uses.
+ *  Verified on production: `nav li` persists beyond the mounted links (813 items
+ *  against 803 links), which is what lets the walk prove it reached the tail. The
+ *  fixtures must carry that structure or they model a DOM that cannot exist. */
+/** The list items built by the most recent `linkListWithItems` call, so a fixture
+ *  can answer `nav li` the way the real sidebar does. Production keeps MORE items
+ *  than mounted links (813 against 803), which is what makes a missing next
+ *  sibling mean "end of list" rather than "end of window". */
+let lastBuiltListItems = [];
+
+function linkListWithItems(links, hasSuccessor) {
+  const items = links.map((link) => {
+    const li = {
+      tagName: 'LI',
+      querySelector(selector) {
+        return isConversationLinkSelector(selector) ? link : null;
+      },
+      nextElementSibling: null,
+    };
+    link.parentElement = li;
+    return li;
+  });
+  for (let i = 0; i < items.length - 1; i++) items[i].nextElementSibling = items[i + 1];
+  // A successor exists only when rows remain AFTER the deepest mounted one — the
+  // caller passes `hasSuccessor` for that, because "the list is longer than this
+  // window" is true at every offset including the last, where the window really
+  // does end the list.
+  if (hasSuccessor && items.length) {
+    items[items.length - 1].nextElementSibling = {
+      tagName: 'LI',
+      querySelector(selector) {
+        // A pending row exists here but has not mounted; it still answers the
+        // structural question "is there anything after what I captured?".
+        return isConversationLinkSelector(selector) ? { pending: true } : null;
+      },
+      nextElementSibling: null,
+    };
+  }
+  // One extra item beyond the rows, mirroring the real sidebar's chrome items, so
+  // structure demonstrably outlives the mounted window.
+  lastBuiltListItems = items.concat([
+    { tagName: 'LI', querySelector() { return null; }, nextElementSibling: null },
+  ]);
+  return links;
+}
+
+function isConversationLinkSelector(selector) {
+  return typeof selector === 'string' && selector.indexOf('/c/') !== -1;
+}
 
 test('a virtualized sidebar is read to the END, not just the mounted window', async () => {
   // 60 conversations, only 8 ever mounted at once. A single unscrolled read
@@ -179,7 +237,8 @@ function createLateAppendingSidebar(appendAfter) {
     parentElement: null,
   };
   const doc = {
-    querySelectorAll() {
+    querySelectorAll(selector) {
+      if (selector === 'nav li') return lastBuiltListItems;
       const maxTop = Math.max(0, ids.length * rowHeight - windowSize * rowHeight);
       if (scroller.scrollTop >= maxTop - 1 && !appended) {
         bottomPolls += 1;
@@ -189,12 +248,13 @@ function createLateAppendingSidebar(appendAfter) {
         }
       }
       const first = Math.floor(scroller.scrollTop / rowHeight);
-      return ids.slice(first, first + windowSize).map((id) => ({
+      const window = ids.slice(first, first + windowSize).map((id) => ({
         getAttribute(name) { return name === 'href' ? '/c/' + id : null; },
         querySelector() { return null; },
         textContent: id,
         parentElement: scroller,
       }));
+      return linkListWithItems(window, first + windowSize < ids.length);
     },
     querySelector() { return null; },
   };
@@ -268,7 +328,9 @@ function createMeasuredSidebar(total, mountCap, rowHeight, clientHeight) {
     parentElement: null,
   };
   const doc = {
-    querySelectorAll() {
+    querySelectorAll(selector) {
+      if (selector === 'nav li') return lastBuiltListItems;
+      if (selector !== undefined && !isConversationLinkSelector(selector)) return [];
       const firstVisible = Math.floor(scroller.scrollTop / rowHeight);
       const lastVisible = Math.min(
         total - 1,
@@ -289,7 +351,9 @@ function createMeasuredSidebar(total, mountCap, rowHeight, clientHeight) {
           },
         });
       }
-      return out;
+      // `last` is the deepest row rendered; when the list runs past it, structure
+      // remains and the walk can tell it has not reached the tail.
+      return linkListWithItems(out, last < total - 1);
     },
     querySelector() { return null; },
   };
@@ -336,7 +400,13 @@ test('rows stepped over leave a coverage gap, and the walk refuses to claim comp
       false,
       'mountCap=' + mountCap + ': ' + missed.length + ' rows missed, so complete must be false'
     );
-    assert.equal(walked.reason, 'coverage-gap');
+    // Either honest refusal is acceptable: an interior hole is a coverage gap,
+    // and a row past the deepest capture is an undischarged tail obligation. What
+    // must never happen is `complete: true` with rows missing.
+    assert.ok(
+      walked.reason === 'coverage-gap' || walked.reason === 'successor-exists-not-mounted',
+      'unexpected reason: ' + walked.reason
+    );
   }
 
   // Without this the test would pass vacuously if the scenario ever stopped
@@ -370,9 +440,11 @@ test('a scroller that throws on write stops with scroll-blocked, not a false suc
   assert.ok(walked.conversations.length > 0, 'the rows already mounted are still returned');
 });
 
-test('a list whose top was never observed is not complete', async () => {
-  // Starting mid-list (the user had scrolled) and walking only downward leaves
-  // the rows above unobserved. Reaching the bottom is not reaching everything.
+test('a walk starting mid-list still covers the rows above it', async () => {
+  // The user had scrolled before pressing the button. The downward pass alone
+  // never looks up, so without the final sweep the head of the list is missed
+  // entirely — measured on production as 28 conversations that existed in the
+  // DOM but were never listed.
   const fixture = createMeasuredSidebar(60, 10, 60, 600);
   fixture.scroller.scrollTop = 1800;   // half way down
 
@@ -383,11 +455,209 @@ test('a list whose top was never observed is not complete', async () => {
     maxRounds: 2000,
   });
 
-  const sawFirstRow = walked.conversations.some((c) => c.id === fixture.ids[0]);
-  assert.equal(sawFirstRow, false, 'this walk never looked above its starting point');
-  assert.equal(walked.complete, false, 'an unobserved head of the list must block completeness');
-  assert.equal(walked.reason, 'coverage-gap');
+  assert.ok(
+    walked.conversations.some((c) => c.id === fixture.ids[0]),
+    'the final sweep must reach the first row'
+  );
+  assert.equal(walked.conversations.length, 60, 'every row must be listed');
+  assert.equal(walked.complete, true);
 });
+
+test('without the final sweep, a mid-list start is reported as incomplete', async () => {
+  // The guarantee still holds when the sweep is disabled: a partial walk says so
+  // rather than presenting the rows below the starting point as the whole list.
+  const fixture = createMeasuredSidebar(60, 10, 60, 600);
+  fixture.scroller.scrollTop = 1800;
+
+  const walked = await parser.collectSidebarConversations({
+    doc: fixture.doc,
+    scroller: fixture.scroller,
+    sleep: immediate,
+    maxRounds: 2000,
+    finalSweep: false,
+  });
+
+  assert.equal(
+    walked.conversations.some((c) => c.id === fixture.ids[0]),
+    false,
+    'this walk never looked above its starting point'
+  );
+  assert.equal(walked.complete, false, 'an unobserved head must block completeness');
+  assert.ok(
+    walked.reason === 'coverage-gap' || walked.reason === 'successor-exists-not-mounted',
+    'unexpected reason: ' + walked.reason
+  );
+});
+
+/**
+ * A sidebar paginated by a "Show more" CLICK, as a real Project list is.
+ * `pages` is an array of id-batches: the first is rendered, each click reveals
+ * the next. Verified against production — one project went 5 → 35 on one click.
+ */
+/** A paginated sidebar, modelled on the STRUCTURE measured on production
+ *  rather than on the control's English label.
+ *
+ *  Measured under ru-RU: the control is a <button data-sidebar-item> that is the
+ *  last <li> of a nested <ul> whose other children are conversation links; it
+ *  holds no <a> and no <svg>. `label` is a parameter precisely so the test can
+ *  prove the detector is language-blind — the previous fixture hard-coded
+ *  'Show more', so it could only ever confirm the English case that shipped.
+ */
+function createShowMoreSidebar(pages, label) {
+  const rowHeight = 10;
+  const windowSize = 40;         // tall enough that scrolling alone is not the limit
+  let revealed = pages[0].slice();
+  let page = 1;
+
+  const scroller = {
+    scrollTop: 0,
+    clientHeight: windowSize * rowHeight,
+    get scrollHeight() { return Math.max(revealed.length, windowSize) * rowHeight; },
+    parentElement: null,
+  };
+
+  // The nested <ul> holding this project's rows plus the pagination row last.
+  const ul = { children: [], querySelectorAll: null };
+
+  const showMoreLi = {
+    tagName: 'LI',
+    children: [],
+    parentElement: ul,
+    querySelector(sel) {
+      // The pagination row is NOT a conversation row.
+      return isConversationLinkSelector(sel) ? null : null;
+    },
+  };
+
+  const showMoreButton = {
+    children: [],
+    textContent: label,
+    tagName: 'BUTTON',
+    getAttribute(name) {
+      if (name === 'data-sidebar-item') return 'true';
+      if (name === 'href') return null;
+      return null;
+    },
+    querySelector(sel) {
+      if (sel === 'a[href]') return null;
+      return null;
+    },
+    querySelectorAll(sel) { return sel === 'svg' ? [] : []; },
+    closest(sel) { return sel === 'li' ? showMoreLi : null; },
+    parentElement: showMoreLi,
+    click() {
+      if (page < pages.length) {
+        revealed = revealed.concat(pages[page]);
+        page += 1;
+      }
+    },
+  };
+
+  function rowsNow() {
+    return revealed.map((id) => ({
+      getAttribute(name) { return name === 'href' ? '/c/' + id : null; },
+      querySelector() { return null; },
+      textContent: id,
+      parentElement: scroller,
+    }));
+  }
+
+  // Keep the <ul> consistent with what is revealed: conversation <li>s, then the
+  // pagination <li> last for as long as pages remain.
+  function refreshUl() {
+    const convLis = revealed.map(() => ({ tagName: 'LI', parentElement: ul }));
+    ul.children = page < pages.length ? convLis.concat([showMoreLi]) : convLis;
+    ul.querySelectorAll = (sel) =>
+      isConversationLinkSelector(sel) ? rowsNow() : [];
+  }
+  refreshUl();
+
+  const doc = {
+    querySelectorAll(selector) {
+      refreshUl();
+      if (selector === 'nav li') return lastBuiltListItems;
+      if (isConversationLinkSelector(selector)) {
+        // Every revealed row is mounted here, so the deepest one really is last.
+        return linkListWithItems(rowsNow(), false);
+      }
+      // The control's own selector set — it disappears once every page has been
+      // revealed, exactly as the real one does.
+      if (/button|role="button"/.test(selector)) {
+        return page < pages.length ? [showMoreButton] : [];
+      }
+      return [];
+    },
+    querySelector(selector) {
+      if (!isConversationLinkSelector(selector)) return null;
+      const first = revealed[0];
+      if (!first) return null;
+      return {
+        getAttribute(name) { return name === 'href' ? '/c/' + first : null; },
+        querySelector() { return null; },
+        textContent: first,
+        parentElement: scroller,
+      };
+    },
+  };
+
+  return { doc, scroller, total: pages.reduce((n, p) => n + p.length, 0) };
+}
+
+// The pagination label is a translated UI string. Both values below were
+// MEASURED on production with the same account, only the browser locale
+// changed; the third is a language the extension was never tested in, included
+// because "add the next literal" is not a fix.
+const PAGINATION_LABELS = [
+  { locale: 'en-GB', label: 'Show more' },
+  { locale: 'ru-RU', label: 'Показать больше' },
+  { locale: 'de-DE', label: 'Mehr anzeigen' },
+];
+
+for (const { locale, label } of PAGINATION_LABELS) {
+  test(`a paginated list is expanded by clicking, not just scrolled [${locale}]`, async () => {
+    // Production behaviour: a Project's conversations paginate by a click. No
+    // amount of scrolling reaches past the control, so a scroll-only walk stops
+    // at a confident subset — the first page — and calls it the whole project.
+    const fixture = createShowMoreSidebar([
+      ['p1a', 'p1b', 'p1c', 'p1d', 'p1e'],
+      ['p2a', 'p2b', 'p2c', 'p2d', 'p2e'],
+      ['p3a', 'p3b'],
+    ], label);
+
+    const walked = await parser.collectSidebarConversations({
+      doc: fixture.doc,
+      scroller: fixture.scroller,
+      sleep: immediate,
+    });
+
+    assert.equal(walked.conversations.length, fixture.total, 'every revealed page must be listed');
+    assert.ok(walked.showMoreClicks >= 2, 'the control had to be clicked to reach them');
+    assert.equal(walked.complete, true);
+  });
+
+  test(`pagination still standing blocks the completeness claim [${locale}]`, async () => {
+    // The control is present and clickable, but the budget forbids using it. Rows
+    // exist that were never listed, so the walk must not report completeness.
+    // This is the failure a language-matched detector produces on EVERY foreign
+    // locale: the control is invisible to it, so "none standing" is misread as
+    // "no pagination exists" and a partial list ships as complete.
+    const fixture = createShowMoreSidebar([
+      ['q1a', 'q1b', 'q1c'],
+      ['q2a', 'q2b', 'q2c'],
+    ], label);
+
+    const walked = await parser.collectSidebarConversations({
+      doc: fixture.doc,
+      scroller: fixture.scroller,
+      sleep: immediate,
+      maxShowMoreClicks: 0,
+    });
+
+    assert.equal(walked.conversations.length, 3, 'only the first page was reachable');
+    assert.equal(walked.complete, false, 'an unexpanded page must not read as complete');
+    assert.equal(walked.reason, 'show-more-pending');
+  });
+}
 
 test('a list still growing taller is not declared finished', async () => {
   // The rows exist but have not mounted yet, so a read returns nothing new while
@@ -437,26 +707,34 @@ test('a list arriving in bursts is not cut short by one quiet round', async () =
   const allIds = [];
   for (let i = 0; i < total; i++) allIds.push('burst' + String(i).padStart(3, '0'));
 
+  // The loader releases rows in bursts: `released` grows only every third read,
+  // so a round can genuinely add nothing and still be followed by more. Modelled
+  // as a shorter LIST rather than an empty DOM or rows from another offset —
+  // an empty return starved the tail check, and a shifted offset faked a
+  // successor. Both were fixture bugs that made this test measure the wrong thing.
   let reads = 0;
+  let released = windowSize;
   const scroller = {
     scrollTop: 0,
     clientHeight: windowSize * rowHeight,
-    scrollHeight: total * rowHeight,
+    get scrollHeight() { return Math.max(released, windowSize) * rowHeight; },
     parentElement: null,
   };
   const doc = {
-    querySelectorAll() {
+    querySelectorAll(selector) {
+      if (selector === 'nav li') return lastBuiltListItems;
+      if (!isConversationLinkSelector(selector)) return [];
       reads += 1;
-      // Every third read returns nothing new (a stalled burst), yet the list
-      // continues afterwards.
-      if (reads % 3 === 0) return [];
+      if (reads % 3 !== 0) released = Math.min(total, released + windowSize);
       const first = Math.floor(scroller.scrollTop / rowHeight);
-      return allIds.slice(first, first + windowSize).map((id) => ({
+      const visible = allIds.slice(0, released);
+      const rows = visible.slice(first, first + windowSize).map((id) => ({
         getAttribute(name) { return name === 'href' ? '/c/' + id : null; },
         querySelector() { return null; },
         textContent: id,
         parentElement: scroller,
       }));
+      return linkListWithItems(rows, first + windowSize < visible.length);
     },
     querySelector() { return null; },
   };
@@ -467,4 +745,245 @@ test('a list arriving in bursts is not cut short by one quiet round', async () =
 
   assert.equal(walked.conversations.length, total, 'a stalled burst must not end the walk');
   assert.equal(walked.complete, true);
+});
+
+/**
+ * The invariant, tested in BOTH structural worlds.
+ *
+ * `liVirtualized: false` — production today: `nav li` outlives the mounted window
+ * (813 items against 803 links), so a missing next sibling proves the tail.
+ * `liVirtualized: true` — the framework windows the items too. A missing sibling
+ * then means "end of window", which is indistinguishable from an unread tail, and
+ * the walk must REFUSE to claim completeness rather than assume it.
+ */
+function createStructuredSidebar(total, mountCap, rowHeight, clientHeight, liVirtualized) {
+  const ids = [];
+  for (let i = 0; i < total; i++) ids.push('s' + String(i).padStart(3, '0'));
+  const scroller = {
+    scrollTop: 0,
+    clientHeight: clientHeight,
+    scrollHeight: total * rowHeight,
+    parentElement: null,
+  };
+  let currentItems = [];
+  const doc = {
+    querySelectorAll(selector) {
+      if (selector === 'nav li') return currentItems;
+      if (typeof selector !== 'string' || selector.indexOf('/c/') === -1) return [];
+      const firstVisible = Math.floor(scroller.scrollTop / rowHeight);
+      const lastVisible = Math.min(
+        total - 1,
+        Math.ceil((scroller.scrollTop + clientHeight) / rowHeight) - 1
+      );
+      const last = Math.min(lastVisible, firstVisible + mountCap - 1);
+      const links = [];
+      for (let i = firstVisible; i <= last; i++) {
+        const id = ids[i];
+        const relTop = i * rowHeight - scroller.scrollTop;
+        links.push({
+          getAttribute(name) { return name === 'href' ? '/c/' + id : null; },
+          querySelector() { return null; },
+          textContent: id,
+          parentElement: scroller,
+          getBoundingClientRect() {
+            return { top: relTop, bottom: relTop + rowHeight, height: rowHeight };
+          },
+        });
+      }
+      const items = links.map((link) => {
+        const li = {
+          tagName: 'LI',
+          querySelector(sel) {
+            return typeof sel === 'string' && sel.indexOf('/c/') !== -1 ? link : null;
+          },
+          nextElementSibling: null,
+        };
+        link.parentElement = li;
+        return li;
+      });
+      for (let i = 0; i < items.length - 1; i++) items[i].nextElementSibling = items[i + 1];
+      if (!liVirtualized && last < total - 1 && items.length) {
+        items[items.length - 1].nextElementSibling = {
+          tagName: 'LI',
+          querySelector(sel) {
+            return typeof sel === 'string' && sel.indexOf('/c/') !== -1 ? { pending: true } : null;
+          },
+          nextElementSibling: null,
+        };
+      }
+      currentItems = liVirtualized
+        ? items.slice()
+        : items.concat([{ tagName: 'LI', querySelector() { return null; }, nextElementSibling: null }]);
+      return links;
+    },
+    querySelector() { return null; },
+  };
+  return { doc, scroller, ids };
+}
+
+test('THE INVARIANT: a row missed is never reported as a complete list', async () => {
+  // The one guarantee the whole walk exists to provide. Missing rows is
+  // survivable — the caller warns and the user re-runs. Missing rows while
+  // claiming completeness is not: the user cannot detect a conversation that was
+  // never listed, so a silent subset is unfalsifiable for them.
+  let scenariosWithLoss = 0;
+
+  // Both code paths: the in-loop verdict AND the post-sweep one. Testing only the
+  // default path left the in-loop decision unguarded — a mutant that dropped the
+  // tail requirement there survived, and with `finalSweep: false` it reported
+  // `complete: true` with 6 rows missing.
+  for (const finalSweep of [true, false]) {
+  for (const liVirtualized of [false, true]) {
+    for (const mountCap of [10, 8, 4, 1]) {
+      const fixture = createStructuredSidebar(60, mountCap, 60, 600, liVirtualized);
+      const walked = await parser.collectSidebarConversations({
+        doc: fixture.doc,
+        scroller: fixture.scroller,
+        sleep: immediate,
+        maxRounds: 3000,
+        finalSweep: finalSweep,
+      });
+
+      const missed = fixture.ids.filter(
+        (id) => !walked.conversations.some((c) => c.id === id)
+      ).length;
+      const label = 'finalSweep=' + finalSweep +
+        ' liVirtualized=' + liVirtualized + ' mountCap=' + mountCap;
+
+      if (missed > 0) {
+        scenariosWithLoss += 1;
+        assert.equal(
+          walked.complete, false,
+          label + ': ' + missed + ' rows missed, so complete must be false'
+        );
+      }
+      // A complete read in the ambiguous world may be refused (fail-closed is the
+      // safe direction), but it must NEVER be claimed when rows are missing.
+      if (missed === 0 && !liVirtualized && finalSweep) {
+        assert.equal(walked.complete, true, label + ': a full read must be reported complete');
+      }
+    }
+  }
+  }
+
+  assert.ok(scenariosWithLoss > 0, 'no loss scenario reproduced — this test proves nothing');
+});
+
+test('an unprovable tail is refused, not assumed', async () => {
+  // Windowed list items: "no next sibling" means "end of window", which an unread
+  // tail looks exactly like. The walk must say it cannot tell.
+  const fixture = createStructuredSidebar(60, 4, 60, 600, true);
+  const walked = await parser.collectSidebarConversations({
+    doc: fixture.doc,
+    scroller: fixture.scroller,
+    sleep: immediate,
+    maxRounds: 3000,
+  });
+
+  assert.equal(walked.complete, false);
+  assert.equal(walked.reason, 'tail-unprovable');
+});
+
+/* ------------------------------------------------------------------------- *
+ * The pagination control is identified by STRUCTURE, so the structure it
+ * requires must actually be load-bearing. A mutation sweep showed that
+ * dropping either requirement (last-in-list, has conversation siblings) left
+ * every test green — the detector was wider than anything measured, free to
+ * click the wrong sidebar row. These fixtures are the negative controls.
+ * ------------------------------------------------------------------------- */
+
+/** Build one sidebar button in a list, with full control over the structure. */
+function paginationCandidate({ label, isLast, convSiblings, ownHref, holdsAnchor, isConvRow }) {
+  const ul = { children: [], querySelectorAll: null };
+  const li = {
+    tagName: 'LI',
+    parentElement: ul,
+    querySelector(sel) {
+      if (isConversationLinkSelector(sel)) return isConvRow ? { href: '/c/x' } : null;
+      return null;
+    },
+  };
+  const button = {
+    children: [],
+    textContent: label,
+    tagName: 'BUTTON',
+    getAttribute(name) {
+      if (name === 'data-sidebar-item') return 'true';
+      if (name === 'href') return ownHref || null;
+      return null;
+    },
+    querySelector(sel) {
+      if (sel === 'a[href]') return holdsAnchor ? { href: '/c/y' } : null;
+      return null;
+    },
+    closest(sel) { return sel === 'li' ? li : null; },
+    parentElement: li,
+    click() {},
+  };
+  const others = [];
+  for (let i = 0; i < 3; i++) others.push({ tagName: 'LI', parentElement: ul });
+  ul.children = isLast ? others.concat([li]) : [li].concat(others);
+  ul.querySelectorAll = (sel) =>
+    isConversationLinkSelector(sel)
+      ? Array.from({ length: convSiblings }, () => ({
+          getAttribute: (n) => (n === 'href' ? '/c/sib' : null),
+        }))
+      : [];
+  const doc = {
+    querySelectorAll(sel) {
+      if (/button|role="button"/.test(sel)) return [button];
+      return [];
+    },
+    querySelector() { return null; },
+  };
+  return { doc, button };
+}
+
+test('pagination control must be the LAST item of its list', () => {
+  // A row in the middle of the list is a conversation or a header, not the
+  // "reveal the rest" affordance. Measured on production: idxInUl 5 of ulSize 6.
+  const good = paginationCandidate({
+    label: 'Показать больше', isLast: true, convSiblings: 5,
+  });
+  assert.equal(parser.findShowMoreControl(good.doc), good.button,
+    'the last item with conversation siblings IS the control');
+
+  const midList = paginationCandidate({
+    label: 'Показать больше', isLast: false, convSiblings: 5,
+  });
+  assert.equal(parser.findShowMoreControl(midList.doc), null,
+    'a mid-list row must not be clicked as pagination');
+});
+
+test('pagination control must sit among conversation rows', () => {
+  // Measured on production: the control's <ul> also holds the project's
+  // conversation links (siblingConvLinks 5). A list with none is some other
+  // menu — clicking it navigates away instead of revealing rows.
+  const noSiblings = paginationCandidate({
+    label: 'Показать больше', isLast: true, convSiblings: 0,
+  });
+  assert.equal(parser.findShowMoreControl(noSiblings.doc), null,
+    'a last item with no conversation siblings is not pagination');
+});
+
+test('a conversation row is never mistaken for pagination', () => {
+  // Both other discriminators: the control holds no <a> and has no href of its
+  // own, while a conversation row is a link.
+  const asLink = paginationCandidate({
+    label: 'Показать больше', isLast: true, convSiblings: 5, ownHref: '/c/zzz',
+  });
+  assert.equal(parser.findShowMoreControl(asLink.doc), null,
+    'an element with its own href is a link, not the control');
+
+  const wrapsLink = paginationCandidate({
+    label: 'Показать больше', isLast: true, convSiblings: 5, holdsAnchor: true,
+  });
+  assert.equal(parser.findShowMoreControl(wrapsLink.doc), null,
+    'an element wrapping an anchor is a row, not the control');
+
+  const convRow = paginationCandidate({
+    label: 'Кадры решают всё', isLast: true, convSiblings: 5, isConvRow: true,
+  });
+  assert.equal(parser.findShowMoreControl(convRow.doc), null,
+    'a list item that IS a conversation row is not the control');
 });

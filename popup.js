@@ -475,7 +475,22 @@ function searchCompletedDownloadPaths(projectSlug) {
       var paths = new Set();
       if (items) {
         for (var i = 0; i < items.length; i++) {
-          if (items[i].filename) paths.add(items[i].filename);
+          var item = items[i];
+          if (!item || !item.filename) continue;
+          // A history ROW is not a file. Chrome keeps the record after the user
+          // deletes, moves or renames the download, and keeps rows for transfers
+          // that were interrupted. Trusting those makes resume skip a
+          // conversation that is not on disk — a false skip is the one failure
+          // re-running cannot repair, so both fields are checked when present.
+          if (item.exists === false) continue;
+          if (item.state && item.state !== 'complete') continue;
+          paths.add(item.filename);
+          // Remember the size so a LATER run can tell a conversation that grew
+          // from one that did not; the filename alone cannot express that.
+          if (typeof item.fileSize === 'number' && item.fileSize > 0) {
+            paths.__sizes = paths.__sizes || Object.create(null);
+            paths.__sizes[item.filename] = item.fileSize;
+          }
         }
       }
       resolve(paths);

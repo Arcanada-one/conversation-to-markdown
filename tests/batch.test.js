@@ -11,6 +11,39 @@ const path = require('node:path');
 const vm = require('node:vm');
 const popup = loadPopupExports();
 
+/** Load popup.js with a caller-supplied `chrome`, so a test can drive the parts
+ *  that talk to Chrome's own APIs rather than assert that a function exists. */
+function loadPopupExportsWithChrome(chromeStub) {
+  const zipSource = fs.readFileSync(path.join(__dirname, '..', 'zip.js'), 'utf8');
+  const context = {
+    module: { exports: {} },
+    document: {
+      getElementById: () => ({
+        addEventListener() {}, disabled: false, textContent: '',
+        classList: { add() {}, remove() {} },
+      }),
+    },
+    chrome: Object.assign({
+      tabs: { query: async () => [] },
+      scripting: { executeScript: async () => [] },
+      downloads: { download() {}, search(_q, cb) { cb([]); } },
+      runtime: { lastError: null },
+    }, chromeStub || {}),
+    navigator: { clipboard: { writeText: async () => {} } },
+    TextEncoder,
+    btoa: (v) => Buffer.from(v, 'binary').toString('base64'),
+    atob: (v) => Buffer.from(v, 'base64').toString('binary'),
+    setTimeout, clearTimeout, setInterval, clearInterval,
+    Blob, URL, Uint8Array, encodeURIComponent,
+    buildStoreZip: null,
+  };
+  vm.runInNewContext(zipSource, context);
+  context.buildStoreZip = context.module.exports.buildStoreZip;
+  context.module = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'popup.js'), 'utf8'), context);
+  return context.module.exports;
+}
+
 function loadPopupExports() {
   const zipSource = fs.readFileSync(path.join(__dirname, '..', 'zip.js'), 'utf8');
   const context = {
@@ -869,4 +902,29 @@ test('a navigation that never completes is reported, not silently skipped', asyn
   assert.equal(res.exported, 0, 'nothing was exported');
   assert.ok(!attempted.some((f) => /\.md$/.test(f)), 'no markdown may be written');
   assert.ok((res.errors || []).length > 0, 'the failure must be reported');
+});
+
+test('a download record for a file that is gone does not count as exported', async () => {
+  // chrome.downloads.search returns download HISTORY, not the contents of disk.
+  // A record survives the user deleting, moving or renaming the file, and exists
+  // for interrupted transfers. Trusting those makes resume skip a conversation
+  // that is not on disk — and a false skip is the failure re-running cannot
+  // repair, because the run reports it as "already exported".
+  const rows = [
+    { filename: '/D/chatgpt-export/proj/Gone/Gone~aaa.md', exists: false, state: 'complete' },
+    { filename: '/D/chatgpt-export/proj/Broke/Broke~bbb.md', exists: true, state: 'interrupted' },
+    { filename: '/D/chatgpt-export/proj/Kept/Kept~ccc.md', exists: true, state: 'complete' },
+    // Older Chrome builds may omit the fields entirely; absence must not exclude.
+    { filename: '/D/chatgpt-export/proj/Old/Old~ddd.md' },
+  ];
+  const popup = loadPopupExportsWithChrome({
+    downloads: { search: (_q, cb) => cb(rows) },
+  });
+  const paths = await popup.searchCompletedDownloadPaths('proj');
+  const kept = Array.from(paths).sort();
+
+  assert.deepEqual(kept, [
+    '/D/chatgpt-export/proj/Kept/Kept~ccc.md',
+    '/D/chatgpt-export/proj/Old/Old~ddd.md',
+  ], 'only records that still exist and completed may count');
 });

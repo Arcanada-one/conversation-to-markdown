@@ -13,7 +13,7 @@ const popup = loadPopupExports();
 
 /** Load popup.js with a caller-supplied `chrome`, so a test can drive the parts
  *  that talk to Chrome's own APIs rather than assert that a function exists. */
-function loadPopupExportsWithChrome(chromeStub) {
+function loadPopupExportsWithChrome(chromeStub, contextOverrides) {
   const zipSource = fs.readFileSync(path.join(__dirname, '..', 'zip.js'), 'utf8');
   const context = {
     module: { exports: {} },
@@ -37,8 +37,12 @@ function loadPopupExportsWithChrome(chromeStub) {
     Blob, URL, Uint8Array, encodeURIComponent,
     buildStoreZip: null,
   };
+  Object.assign(context, contextOverrides || {});
   vm.runInNewContext(zipSource, context);
   context.buildStoreZip = context.module.exports.buildStoreZip;
+  // zip.js's own base64 encoder, which popup.js delegates to. Wired explicitly
+  // because popup.js resolves it from this context, not from a require().
+  context.bytesToDataUrl = context.module.exports.bytesToDataUrl;
   context.module = { exports: {} };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'popup.js'), 'utf8'), context);
   return context.module.exports;
@@ -1382,5 +1386,53 @@ test('a truncated archive is reported, never presented as the whole export', asy
   assert.ok(
     res.errors.some((e) => /archive/i.test(e)),
     'a truncated archive must appear in the errors: ' + JSON.stringify(res.errors),
+  );
+});
+
+test('the base64 fallback encodes in chunks, not one character at a time', () => {
+  // Found by review, and a real gap: the 40.9x memory defect was fixed in
+  // zip.js's bytesToDataUrl, but the popup's own base64 fallback kept the
+  // per-character loop. It is only reached when Blob/createObjectURL are
+  // unavailable — but it handles the ZIP, the largest payload in the product,
+  // so it is the worst place to leave the defect.
+  //
+  // Asserted by COUNTING btoa calls rather than by measuring the heap. The first
+  // version of this test measured `process.memoryUsage().heapUsed`, passed on its
+  // own and failed in the full suite: heap is shared with every test that ran
+  // before it in the same file, so it measures the neighbours as much as the
+  // subject. A flaky gate is worse than none — it teaches people to re-run.
+  assert.equal(typeof popup.bytesToBase64DataUrl, 'function');
+
+  const size = 300 * 1024 + 1;   // not a multiple of 3, so the last chunk pads
+  const bytes = new Uint8Array(size);
+  for (let i = 0; i < size; i += 1) bytes[i] = (i * 7) & 0xff;
+
+  // The spy goes into the vm CONTEXT, because that is where popup.js resolves
+  // btoa. A spy on this file's global never reaches it, and the first attempt
+  // reported "btoa called 0 times" for exactly that reason.
+  let calls = 0;
+  let longest = 0;
+  const counted = loadPopupExportsWithChrome({}, {
+    btoa: (value) => {
+      calls += 1;
+      if (value.length > longest) longest = value.length;
+      return Buffer.from(value, 'binary').toString('base64');
+    },
+  });
+  assert.equal(typeof counted.bytesToBase64DataUrl, 'function');
+  const url = counted.bytesToBase64DataUrl(bytes, 'application/zip');
+
+  // The per-character implementation calls btoa exactly ONCE, with the whole
+  // payload as a single string. That is the shape being ruled out.
+  assert.ok(calls > 1, `btoa was called ${calls} time(s): the payload was not chunked`);
+  assert.ok(
+    longest < size,
+    `btoa received a ${longest}-byte string for a ${size}-byte payload`,
+  );
+
+  // Correctness is not traded away for the allocation shape.
+  assert.equal(
+    url.slice('data:application/zip;base64,'.length),
+    Buffer.from(bytes).toString('base64'),
   );
 });

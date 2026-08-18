@@ -631,10 +631,28 @@ function searchCompletedDownloadPaths(projectSlug) {
   });
 }
 
+/** Base64 fallback for when Blob/createObjectURL are unavailable.
+ *
+ *  Delegates to zip.js rather than carrying a second implementation. The first
+ *  version of this function appended one character at a time, which is the same
+ *  defect measured at 40.9x the payload in memory (1510.8MB for a 40MB export)
+ *  and fixed in `bytesToDataUrl`. Fixing one and not the other left the worst
+ *  case — this path encodes the ZIP, the largest payload in the product —
+ *  unfixed, so the two now share one implementation and cannot drift apart. */
 function bytesToBase64DataUrl(bytes, mimeType) {
-  var binary = '';
-  for (var i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-  return 'data:' + (mimeType || 'application/octet-stream') + ';base64,' + btoa(binary);
+  var type = mimeType || 'application/octet-stream';
+  if (typeof bytesToDataUrl === 'function') return bytesToDataUrl(bytes, type);
+  // zip.js absent (it is loaded by popup.html before this file, so this is only
+  // reachable in a stripped build). Chunked here too: a fallback that reproduces
+  // the defect is not a fallback worth having.
+  var encoded = '';
+  for (var start = 0; start < bytes.length; start += 3072) {
+    var end = Math.min(start + 3072, bytes.length);
+    var binary = '';
+    for (var i = start; i < end; i++) binary += String.fromCharCode(bytes[i]);
+    encoded += btoa(binary);
+  }
+  return 'data:' + type + ';base64,' + encoded;
 }
 
 /** A URL for bytes that chrome.downloads can accept at ANY size.
@@ -1523,6 +1541,7 @@ if (typeof module !== 'undefined' && module.exports) {
     buildMdFilename: buildMdFilename,
     batchMdFilename: batchMdFilename,
     bytesToDownloadUrl: bytesToDownloadUrl,
+    bytesToBase64DataUrl: bytesToBase64DataUrl,
     waitForDownloadComplete: waitForDownloadComplete,
     ZIP_WRITE_TIMEOUT_MS: ZIP_WRITE_TIMEOUT_MS,
     ID_MARKER: ID_MARKER,

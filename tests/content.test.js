@@ -1925,3 +1925,141 @@ test('one working message id is reused across every panel file', async () => {
   // File 1: 'bad' then 'good' = 2 calls. Files 2 and 3: 'good' directly = 1 each.
   assert.equal(downloadCalls, 4, 'the working id must not be re-discovered per file');
 });
+
+test('panel artefacts are appended to the markdown as downloadable links', async () => {
+  // The popup's downloader reads artefacts out of the finished markdown
+  // (parseArtifactRefs), so a file that never appears there is never fetched.
+  const doc = {
+    querySelectorAll(sel) {
+      if (!/open-file|artifact-row/.test(sel)) return [];
+      return [
+        { getAttribute: (n) => (n === 'aria-label' ? 'report.pdf' : null) },
+        { getAttribute: (n) => (n === 'aria-label' ? 'Скачать файл' : null) },
+      ];
+    },
+  };
+  const fetchImpl = stubFetch([
+    ['/interpreter/download', jsonOk({
+      download_url: 'https://chatgpt.com/backend-api/estuary/content?id=file_r&fn=report.pdf',
+      file_name: 'report.pdf',
+    })],
+  ]);
+
+  const out = await parser.appendPanelArtifacts('# Chat\n\nbody', {
+    doc,
+    conversationId: 'conv-1',
+    artifacts: [{ kind: 'asset', messageId: 'msg-a' }],
+    fetchImpl,
+    token: 'tok',
+  });
+
+  assert.ok(out.indexOf('## Files') !== -1, 'a Files section must be added');
+  assert.ok(out.indexOf('[report.pdf](https://chatgpt.com/backend-api/estuary/content') !== -1,
+    'the link must be in the markdown link form the popup parses');
+  assert.ok(out.indexOf('body') !== -1, 'the conversation body must survive');
+});
+
+test('an artefact that cannot be resolved is disclosed, not dropped', async () => {
+  // Silently omitting a file presents a partial export as a complete one.
+  const doc = {
+    querySelectorAll(sel) {
+      return /open-file|artifact-row/.test(sel)
+        ? [{ getAttribute: (n) => (n === 'aria-label' ? 'secret.docx' : null) }]
+        : [];
+    },
+  };
+  const failing = stubFetch([
+    ['/interpreter/download', () => ({ ok: false, status: 500, json: async () => ({}) })],
+  ]);
+
+  const out = await parser.appendPanelArtifacts('body', {
+    doc,
+    conversationId: 'conv-1',
+    artifacts: null,            // the API itself was unreadable
+    fetchImpl: failing,
+    token: 'tok',
+  });
+
+  assert.ok(out.indexOf('secret.docx') !== -1, 'the file must still be named');
+  assert.ok(out.indexOf('Could not retrieve') !== -1, 'the failure must be visible');
+  assert.ok(out.indexOf('conversation API was unreachable') !== -1,
+    'an unreadable API must be distinguished from a failed single file');
+});
+
+test('a conversation with no panel artefacts is left byte-identical', async () => {
+  const doc = { querySelectorAll() { return []; } };
+  const md = '# Chat\n\nbody';
+  assert.equal(await parser.appendPanelArtifacts(md, { doc, conversationId: 'c' }), md);
+});
+
+test('the capture path itself appends panel artefacts', async () => {
+  // Testing appendPanelArtifacts in isolation proved nothing about whether the
+  // export pipeline calls it: a mutation deleting the call from
+  // getConversationMarkdown left every other test green. This test exercises the
+  // wiring, which is the part that ships.
+  const turn = userTurn('user-1', 1, 'Make me a PDF');
+
+  const panelButtons = [
+    { getAttribute: (n) => (n === 'aria-label' ? 'report.pdf' : null) },
+    { getAttribute: (n) => (n === 'aria-label' ? 'Скачать файл' : null) },
+  ];
+
+  const container = createVirtualizedFixture([[turn]], 0);
+  container.overflowY = 'auto';
+  turn.parentElement = container;
+
+  const previousDocument = global.document;
+  const previousStyle = global.getComputedStyle;
+  const previousLocation = global.location;
+  const previousFetch = global.fetch;
+
+  global.document = {
+    title: 'ChatGPT',
+    querySelector: (sel) => (sel === '[data-turn-id]' ? turn : null),
+    querySelectorAll(sel) {
+      if (/open-file|artifact-row/.test(sel)) return panelButtons;
+      // The real page carries message ids on the turns; the download endpoint
+      // needs one and the artefact panel does not supply it.
+      if (sel === '[data-message-id]') {
+        return [{ getAttribute: (n) => (n === 'data-message-id' ? 'msg-1' : null) }];
+      }
+      return container.querySelectorAll('[data-turn-id]');
+    },
+  };
+  global.getComputedStyle = (node) => ({ overflowY: node.overflowY || 'visible' });
+  global.location = { pathname: '/c/conv-77', href: 'https://chatgpt.com/' };
+  global.fetch = async (url) => {
+    const target = String(url);
+    if (target.indexOf('/api/auth/session') !== -1) {
+      return { ok: true, status: 200, json: async () => ({ accessToken: 'tok' }) };
+    }
+    if (target.indexOf('/backend-api/conversation/conv-77/interpreter/download') !== -1) {
+      return { ok: true, status: 200, json: async () => ({
+        download_url: 'https://chatgpt.com/backend-api/estuary/content?id=file_z&fn=report.pdf',
+        file_name: 'report.pdf',
+      }) };
+    }
+    if (target.indexOf('/backend-api/conversation/conv-77') !== -1) {
+      return { ok: true, status: 200, json: async () => ({
+        mapping: { n1: { message: { id: 'msg-1', metadata: {}, content: { parts: ['hi'] } } } },
+      }) };
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+
+  try {
+    const result = await parser.getConversationMarkdown();
+    assert.equal(result.ok, true, 'capture failed: ' + result.error);
+    assert.ok(result.md.indexOf('## Files') !== -1,
+      'the shipped capture path must include panel artefacts');
+    assert.ok(
+      result.md.indexOf('[report.pdf](https://chatgpt.com/backend-api/estuary/content') !== -1,
+      'the artefact must be a markdown link the popup can parse'
+    );
+  } finally {
+    global.document = previousDocument;
+    global.getComputedStyle = previousStyle;
+    global.location = previousLocation;
+    if (previousFetch === undefined) delete global.fetch; else global.fetch = previousFetch;
+  }
+});

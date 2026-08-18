@@ -1032,6 +1032,96 @@ function extractConversation() {
   return buildConversationMarkdown(orderCapturedTurns(turns));
 }
 
+/** Append the artefacts that render no chip anywhere in the message stream.
+ *
+ *  Generated (code-interpreter) files live in a separate panel with no href, no
+ *  testid and no download attribute, outside the message tree — so the per-turn
+ *  scan above cannot see them and `parseArtifactRefs` in the popup has nothing to
+ *  find. Measured on production: a conversation with five PDF/DOCX files yielded
+ *  ZERO matches for every shipped attachment selector.
+ *
+ *  Returns the markdown UNCHANGED when there is nothing to add, and appends a
+ *  visible note when artefacts exist but could not be resolved — a silent drop
+ *  would present a partial export as a complete one.
+ */
+async function appendPanelArtifacts(markdown, options) {
+  const opts = options || {};
+  const doc = opts.doc || (typeof document !== 'undefined' ? document : null);
+  const files = opts.files || listArtifactPanelFiles(doc);
+  if (!files.length) return markdown;
+
+  const conversationId = opts.conversationId ||
+    ((typeof location !== 'undefined' ? location.pathname : '')
+      .match(/\/c\/([A-Za-z0-9-]+)/) || [])[1] || null;
+  if (!conversationId) return markdown;
+
+  const artifacts = opts.artifacts !== undefined
+    ? opts.artifacts
+    : await fetchConversationArtifacts(conversationId, opts);
+
+  // Candidate message ids for the download call. Measured: the endpoint requires
+  // a message_id but does NOT use it to select the file — 12 different ids
+  // resolved one sandbox_path to the same file id. So ANY id from the
+  // conversation works, and taking them only from messages that already showed
+  // an artefact is wrong: a conversation can hold a generated PDF while no
+  // message carries an attachment or asset_pointer, leaving nothing to try and
+  // the file unresolved.
+  //
+  // null artifacts means the API could not be read at all — kept distinct below
+  // rather than implying the conversation had no files.
+  let messageIds = opts.messageIds;
+  if (!messageIds) {
+    messageIds = artifacts
+      ? artifacts.map(function(a) { return a.messageId; }).filter(Boolean)
+      : [];
+    if (!messageIds.length) {
+      // Fall back to the ids the DOM carries; the panel is outside the message
+      // tree but the turns themselves are still in the page.
+      const nodes = doc && doc.querySelectorAll
+        ? doc.querySelectorAll('[data-message-id]')
+        : [];
+      for (const node of Array.from(nodes)) {
+        const id = node.getAttribute ? node.getAttribute('data-message-id') : null;
+        if (id) messageIds.push(id);
+      }
+    }
+  }
+
+  const resolvedList = await resolveArtifactPanelFiles(conversationId, {
+    files: files,
+    messageIds: messageIds,
+    fetchImpl: opts.fetchImpl,
+    token: opts.token,
+  });
+
+  const lines = [];
+  const unresolved = [];
+  for (const entry of resolvedList) {
+    if (entry.resolved && entry.resolved.url) {
+      lines.push(markdownLink(entry.file.name, entry.resolved.url));
+    } else {
+      unresolved.push(entry.file.name);
+    }
+  }
+  // Deliberately overlapping with the `!files.length` early return above: that
+  // one avoids the network round-trips entirely, this one covers a resolver that
+  // returned no rows for files that DID exist. A mutation removing the earlier
+  // guard is therefore harmless to output and survives the suite — recorded in
+  // MUTATION-EVIDENCE.md as redundant-by-design rather than an untested branch,
+  // so it is not "fixed" by deleting one of the two.
+  if (!lines.length && !unresolved.length) return markdown;
+
+  const block = ['## Files'];
+  if (lines.length) block.push(lines.join('\n'));
+  if (unresolved.length) {
+    block.push('> Could not retrieve a download link for: ' +
+      unresolved.join(', ') +
+      (artifacts === null ? ' (the conversation API was unreachable)' : ''));
+  }
+  const body = block.join('\n\n');
+  return markdown ? markdown + '\n\n---\n\n' + body : body;
+}
+
 /** Fallback for older ChatGPT UI that doesn't use [data-turn-id]. */
 function extractConversationLegacy() {
   const messages = document.querySelectorAll('[data-message-author-role]');
@@ -1966,6 +2056,11 @@ async function getConversationMarkdown() {
       if (scanMeta.partial) md = prefixPartialNotice(md, scanMeta.reason);
     }
     if (!md) return { ok: false, error: 'No conversation found on this page.' };
+    // Generated (code-interpreter) files render in a panel outside the message
+    // tree with no href and no testid, so the per-turn scan above cannot see
+    // them. Appending them here puts them in the markdown, which is where the
+    // popup's downloader looks for artefacts.
+    md = await appendPanelArtifacts(md, {});
     const title = extractConversationTitle();
     if (title) md = '# ' + title + '\n\n' + md;
     return {
@@ -2025,6 +2120,7 @@ if (typeof module !== 'undefined' && module.exports) {
     resolveSandboxDownloadUrl: resolveSandboxDownloadUrl,
     listArtifactPanelFiles: listArtifactPanelFiles,
     resolveArtifactPanelFiles: resolveArtifactPanelFiles,
+    appendPanelArtifacts: appendPanelArtifacts,
     findCollapsedProjectRows: findCollapsedProjectRows,
     projectRowContainer: projectRowContainer,
     stripSidebarLabelSuffix: stripSidebarLabelSuffix,

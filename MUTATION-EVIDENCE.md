@@ -1281,10 +1281,46 @@ conversation:
 Where the shipped selectors found zero, this path finds five documents and 41
 artefacts.
 
-### Not yet done
+### Wiring the mechanism into the shipped path
 
-`resolveArtifactPanelFiles` is verified as a unit and against production, but the
-popup does not call it yet — the export pipeline still collects attachments
-per-turn from the DOM. Wiring it in is the remaining work; until then the
-generated-artefact class is FIXED IN MECHANISM, NOT IN SHIPPED BEHAVIOUR, and
-this file should not be read as saying otherwise.
+The mechanism above was verified as a unit and against production while the
+export pipeline still ignored it. Wiring it in exposed two more defects, both
+found by mutation rather than by the passing suite:
+
+| id  | mutation                                                   | verdict |
+|-----|------------------------------------------------------------|---------|
+| B1  | append not called from the shipped capture path             | DIED    |
+| B2  | unresolved artefacts silently dropped                       | DIED    |
+| B3  | unreachable-API note removed                                | DIED    |
+| B4  | Files section emitted with no artefacts                     | SURVIVED (by design) |
+| B5  | link form broken (not a markdown link)                      | DIED    |
+| B6  | DOM message-id fallback removed                             | DIED    |
+
+**B1 was the worst survivor of the whole task.** Deleting the call from
+`getConversationMarkdown` left all 154 tests green: the helper was tested, its
+USE was not. Testing a function in isolation says nothing about whether the
+pipeline invokes it, which is the only part that ships. A test that drives the
+real entry point (`getConversationMarkdown`, with an artefact panel in the DOM)
+kills it.
+
+**B6 was a real defect the wiring test caught.** Candidate message ids were taken
+only from messages that already showed an artefact — but a conversation can hold
+a generated PDF while no message carries an attachment or `asset_pointer`, so the
+list was empty, nothing could be tried, and the file went unresolved. Since the
+endpoint uses `message_id` as required context and not as a selector (12 ids ->
+1 file id), ANY id from the conversation works; the DOM's `[data-message-id]`
+nodes are now the fallback.
+
+**B4 survives by design and must not be "fixed".** The `!files.length` early
+return and the `!lines.length && !unresolved.length` return overlap: the first
+avoids the network round-trips, the second covers a resolver that returned no
+rows for files that did exist. Removing the first changes no output, so no test
+can kill it. Recorded here as redundant-by-design so it is not mistaken for an
+untested branch and closed by deleting one of the two.
+
+### Privacy gate, again
+
+The repository's own gate rejected the first version of the wiring test: it
+embedded `https://chatgpt.com/c/conv-77`, matching the pattern for a real
+conversation URL. Scrubbed to a bare origin. Second time this task that a
+project gate caught the change rather than a reviewer.

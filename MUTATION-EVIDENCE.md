@@ -1377,3 +1377,150 @@ to end. That cost is in the pre-existing scan, not in this change: the artefact
 step is one API call plus one resolve per file. It is recorded here because two
 full scans of it exceeded a 9-minute probe budget, which is a fact about the
 extension a future reader should not have to rediscover.
+
+---
+
+## Wave 7 — the release that became 1.2.0
+
+Three groups of work: a silent turn-loss defect, the export index, and the
+archive's memory cost. Every mutant below was applied to the real file, measured
+with the exit code read from `npm test` itself, and reverted from a backup copy
+rather than by re-editing.
+
+### The scan step (turn loss)
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | step by the viewport, ignoring the mounted band | DIED (7) |
+| M2 | drop `min(band, viewport)` | **SURVIVED — kept and labelled unproven** |
+| M3 | never measure the band (`mountedBand = 0`) | DIED (9) |
+| M4 | stop passing the band to `nextScrollTop` | DIED (7) |
+| G1 | never report a coverage gap | DIED (3) |
+| G2 | credit an empty band as a viewport of coverage | DIED (3) |
+| G3 | blind-tail threshold to zero (false positives) | DIED (7) |
+| G4 | ignore the blind tail entirely | DIED (5) |
+| G5 | drop the 1px seam tolerance | DIED (3) |
+
+**M2 is recorded as a survivor on purpose.** No geometry could be constructed
+where the viewport cap changes the outcome — including bands three viewports
+tall, weighted above and below the scroll position. Turns in a band taller than
+the viewport are already in the DOM and are read in the same round. It is kept
+as a conservative bound on a number ChatGPT chooses, and the comment says it is
+unproven so it is not later mistaken for a checked invariant.
+
+### The fixture could not express the failure
+
+The defect lost every second turn on a 400px band in an 800px viewport — 30 of
+60, returned as a complete export. All 166 tests were green with the defect
+present, and green again after the fix, because `createVirtualizedFixture`
+derives its mounted page from `scrollTop / clientHeight`: a 0.75-viewport step
+always lands on the same page or the next, and can never skip one. A fixture
+placing turns at absolute offsets and mounting only those inside a band was
+needed before any mutant could die.
+
+### Two false-positive rounds, both recorded in tests
+
+Getting the gap detector to distinguish a real hole from ordinary scrolling took
+three attempts, and the two failures are worth as much as the fix:
+
+1. Crediting an unmounted band as a viewport of coverage — reported a gap on
+   exports that captured all 40 turns.
+2. Judging the stretch past the final turn — the scan always overruns it, so
+   every complete export was flagged partial.
+
+A false "partial export" notice tells the user their complete file is
+untrustworthy, so both directions have an assertion.
+
+### The blind-tail threshold was measured, not tuned
+
+| geometry | captured | blind tail | in viewports |
+|---|---|---|---|
+| band 1600 / spacing 300 | 40/40 | −380px | −0.47 |
+| band 800 / spacing 300 | 40/40 | −80px | −0.10 |
+| band 400 / spacing 300 | 40/40 | 25px | 0.03 |
+| band 300 / spacing 300 | 40/40 | 100px | 0.13 |
+| band 900 / spacing 800 | 40/40 | 300px | 0.38 |
+| **band 200 / spacing 300** | **1/40** | **11 860px** | **14.82** |
+
+One viewport sits in empty space between the two populations rather than on a
+boundary either could cross.
+
+### The export index
+
+| # | Mutation | Result |
+|---|---|---|
+| S1 | ignore `runtime.lastError` after a write | DIED (3) |
+| S2 | drop the index byte budget | **SURVIVED → new test → DIED (3)** |
+| S3 | unreadable metadata reads as 'unchanged' | DIED (3) |
+| S4 | ignore `currentNode` in the comparison | DIED (3) |
+| S5 | ignore `messageCount` | DIED (3) |
+| S6 | unguarded `chrome.storage` access | DIED (3) |
+| S7 | store the whole record verbatim | DIED (7) |
+
+S2 survived because the test that appeared to cover it enforced a 4KB *browser*
+quota, so the refusal came from `lastError` rather than from our budget — two
+different guards, only one proven. A test with an effectively unlimited browser
+quota isolates it.
+
+### The feature was tested; its use was not
+
+| # | Mutation | Before | After |
+|---|---|---|---|
+| W1 | never skip an unchanged conversation | SURVIVED | DIED (3) |
+| W2 | never record an export in the index | SURVIVED | DIED (3) |
+| W3 | grown conversation overwrites instead of stamping | SURVIVED | DIED (3) |
+| W4 | never read the index at all | SURVIVED | DIED (3) |
+| W5 | treat 'unknown' as 'unchanged' | — | DIED (3) |
+
+Every helper had tests. None of them drove `runBatchExport`, so the entire
+feature could be deleted with a green suite. This is the same shape as Wave 6's
+B1 and W1/W4 — the third occurrence, which is why it is now a rule in
+`CLAUDE.md`.
+
+The harness also could not express the failure: its markdown stub answered from a
+blind cursor, pairing one conversation's slug with another's id
+(`same--<stamp>~c-grew.md`) — a combination the real page cannot produce. It now
+answers for the conversation the tab is actually on.
+
+### The archive
+
+| # | Mutation | Result |
+|---|---|---|
+| Z1 | revert to the per-character base64 loop | DIED (1) |
+| Z2 | chunk size not a multiple of 3 (3070) | DIED (2) |
+| Z3 | never report a truncated archive | DIED (1) |
+| Z4 | remove the zip byte budget | DIED (1) |
+
+Measured cost of encoding a 40MB export to a data: URL:
+
+| implementation | RSS | heap | output |
+|---|---|---|---|
+| per-character loop | 1510.8MB | 1320.1MB | reference |
+| 3-byte-aligned chunks | **2.1MB** | **101.0MB** | byte-identical |
+
+My own earlier estimate in this task was "roughly 3× the payload", read off the
+code. Measured, it was **40.9×**, and the cost was in the encoder rather than the
+archive. The correctness tests pass with either implementation, so an allocation
+test was added and checked to go red on the old code **both with and without
+`--expose-gc`**, since `npm test` supplies neither.
+
+### Findings that measurement overturned
+
+- **"Scroll to the remembered phrase and read only updates"** — a turn id does
+  survive a reload (`presentImmediately: true`), but walking up from the bottom
+  failed to reach a cursor five turns from the end after 200 steps and 146
+  seconds. The tail read did see only 67 of 327 turns, so reading less than the
+  whole thread saves ~80%; it is the cursor matching that fails. Replaced by a
+  metadata comparison that decides whether to walk at all.
+- **A first probe reported a flat 28 mounted turns** across six scroll steps,
+  which would have suggested these threads are small. It was selecting a
+  container by dimensions alone; the shipped rule requires
+  `overflowY: auto|scroll|overlay`. Re-measured: **327 turns** and still not
+  finished at 400 steps.
+- **`chrome.storage` measured before being designed against:** works from the
+  popup with no service worker; 800 conversations = 210 743 bytes, 15ms write,
+  6ms read; survives a browser restart; hard 10MB quota
+  (`Resource::kQuotaBytes quota exceeded` at 10MB); and **absent entirely**
+  without the permission, so every access needs a guard rather than a try/catch.
+- **The conversation mapping is 4 661 057 bytes** for one thread, which is why
+  the index stores five scalars and caches nothing.

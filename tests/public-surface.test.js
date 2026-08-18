@@ -240,10 +240,17 @@ test('PRIVACY.md describes every permission the manifest declares', () => {
   const manifest = JSON.parse(read('manifest.json'));
   const privacy = read('PRIVACY.md');
 
+  const readme = read('README.md');
   for (const permission of manifest.permissions) {
     assert.match(
       privacy, new RegExp('`' + permission + '`'),
       `PRIVACY.md must account for the ${permission} permission`,
+    );
+    // The README's permission list is what most users actually read, and it had
+    // gone stale in exactly the same way: `storage` was declared and undescribed.
+    assert.match(
+      readme, new RegExp('`' + permission + '`'),
+      `README.md must account for the ${permission} permission`,
     );
   }
 
@@ -258,4 +265,76 @@ test('PRIVACY.md describes every permission the manifest declares', () => {
     assert.match(privacy, /No conversation content is stored/);
     assert.match(privacy, /does not use `chrome\.storage\.sync`/);
   }
+});
+
+test('a release cannot add a version without touching the feature checklist', () => {
+  // The checklist is only useful if it is current, and a document nobody is
+  // forced to update drifts within one release. This couples the two: the number
+  // of dated CHANGELOG versions is recorded here, so adding a release without
+  // revisiting FEATURES.md fails the build.
+  //
+  // Deliberately a count rather than content matching. Anything cleverer would be
+  // guessing which paragraph belongs to which release, and a wrong guess makes
+  // the gate either unfailable or permanently red.
+  const changelog = read('CHANGELOG.md');
+  const features = read('FEATURES.md');
+  const releases = [...changelog.matchAll(/^## \[(\d+\.\d+\.\d+)\] — \d{4}-\d{2}-\d{2}$/gm)];
+
+  const declared = (features.match(/^Published history:.*$/m) || [])[0]
+    || (features.match(/^Published so far:.*$/m) || [])[0]
+    || '';
+  const listedVersions = [...declared.matchAll(/\d+\.\d+\.\d+/g)].map((m) => m[0]);
+
+  assert.ok(
+    listedVersions.length > 0,
+    'FEATURES.md must record the published version history under "Published history:"',
+  );
+  assert.equal(
+    listedVersions.length, releases.length,
+    `FEATURES.md lists ${listedVersions.length} released versions and CHANGELOG.md has ${releases.length}; `
+    + 'update FEATURES.md in the same change as the release',
+  );
+  // The version being shipped must be the newest one named there.
+  const manifest = JSON.parse(read('manifest.json'));
+  assert.equal(
+    listedVersions[listedVersions.length - 1], manifest.version,
+    'the version being shipped must be the last entry of FEATURES.md\'s published history',
+  );
+});
+
+test('the feature checklist covers every option the popup offers', () => {
+  // A checkbox with no checklist paragraph is a feature nobody re-tests before a
+  // release. The mapping is explicit rather than inferred from label text, so
+  // renaming a label cannot quietly drop an item from the checklist.
+  const popupHtml = read('popup.html');
+  const features = read('FEATURES.md');
+  const options = [
+    ['chk-images', /All attachment types|Files are opt-in/],
+    ['chk-timestamp', /Optional timestamp/],
+    ['chk-batch', /Whole-Project export/],
+  ];
+
+  for (const [id, expected] of options) {
+    assert.match(popupHtml, new RegExp('id="' + id + '"'), `popup.html must still offer ${id}`);
+    assert.match(features, expected, `FEATURES.md must describe the ${id} option`);
+  }
+
+  // Every section the checklist promises, so a wholesale rewrite cannot drop one.
+  for (const heading of ['## Capture', '## Files and artifacts', '## Batch export',
+    '## Privacy and permissions', '## Release mechanics']) {
+    assert.ok(features.indexOf(heading) !== -1, `FEATURES.md must keep the "${heading}" section`);
+  }
+});
+
+test('the repository rules and the checklist ship with the extension', () => {
+  // Both are part of the public surface: CLAUDE.md records why the rules exist,
+  // and a rule whose reason is lost gets removed by the next person who finds it
+  // inconvenient.
+  assert.ok(fs.existsSync(path.join(root, 'CLAUDE.md')), 'CLAUDE.md must exist');
+  assert.ok(fs.existsSync(path.join(root, 'FEATURES.md')), 'FEATURES.md must exist');
+  const rules = read('CLAUDE.md');
+  // The version rule is the one the operator asked for by name; it must not be
+  // softened into a suggestion.
+  assert.match(rules, /one bump per release/i);
+  assert.match(rules, /1\.1\.8/, 'the rule must cite the published version it protects');
 });

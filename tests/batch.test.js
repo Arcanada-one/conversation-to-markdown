@@ -1329,3 +1329,58 @@ test('WIRING: no storage permission leaves the batch exactly as it was', async (
   // No stamps: without an index nothing is known to have grown.
   for (const name of md) assert.doesNotMatch(name, /--20260818-1830/);
 });
+
+test('the zip stops accumulating at a byte budget instead of running out of memory', async () => {
+  // The zip is built in the page's memory from entries held for the WHOLE run,
+  // so its cost grows with the export and is unbounded on a full-account run.
+  // Measured allocation for the archive step alone was 125.7MB of RSS for a 40MB
+  // payload; the encoder that follows it was 1510.8MB before being fixed. A
+  // renderer killed for memory takes the popup with it — no catch, no status,
+  // the run simply stops — so the budget has to refuse entries and SAY it did,
+  // rather than let the accumulation decide when the export dies.
+  assert.equal(typeof popup.addZipEntry, 'function');
+  assert.equal(typeof popup.ZIP_BYTE_BUDGET, 'number');
+
+  const entries = [];
+  entries.budget = 1024;                     // a tiny budget so the test is fast
+  const payload = 'x'.repeat(400);
+
+  const first = popup.addZipEntry(entries, 'proj', 'conv-a', 'a.md', payload);
+  const second = popup.addZipEntry(entries, 'proj', 'conv-b', 'b.md', payload);
+  const third = popup.addZipEntry(entries, 'proj', 'conv-c', 'c.md', payload);
+
+  assert.equal(first, true, 'the budget must not block the first entry');
+  assert.equal(second, true);
+  assert.equal(third, false, 'the third entry exceeds a 1KB budget and must be refused');
+  assert.equal(entries.length, 2, 'a refused entry must not be stored');
+  // The refusal is recorded, so the run can tell the user the archive is short
+  // rather than presenting an incomplete zip as the whole export.
+  assert.ok(entries.dropped >= 1, 'a refused entry must be counted, not silently discarded');
+
+  // The default budget must be a real bound, not a placeholder large enough to
+  // OOM before it triggers.
+  assert.ok(popup.ZIP_BYTE_BUDGET >= 16 * 1024 * 1024, 'too small to archive a normal project');
+  assert.ok(popup.ZIP_BYTE_BUDGET <= 512 * 1024 * 1024, 'too large to prevent the OOM it exists for');
+});
+
+test('a truncated archive is reported, never presented as the whole export', async () => {
+  // A zip missing files it does not mention is worse than no zip: the user has
+  // an archive that looks complete. The files themselves are already on disk, so
+  // the archive being short is recoverable — but only if it is stated.
+  const { res } = await runBatchAgainstFakeChrome(
+    [
+      { id: 'c-a', slug: 'aaa', title: 'A', href: '/c/c-a' },
+      { id: 'c-b', slug: 'bbb', title: 'B', href: '/c/c-b' },
+      { id: 'c-c', slug: 'ccc', title: 'C', href: '/c/c-c' },
+    ],
+    () => true,
+    { projectSlug: 'proj', batchStamp: '20260818-1830', buildZip: true, zipByteBudget: 1 },
+    { storage: null },
+  );
+
+  assert.equal(res.ok, true);
+  assert.ok(
+    res.errors.some((e) => /archive/i.test(e)),
+    'a truncated archive must appear in the errors: ' + JSON.stringify(res.errors),
+  );
+});

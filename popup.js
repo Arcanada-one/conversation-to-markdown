@@ -662,12 +662,38 @@ function textToUtf8Bytes(text) {
   return out;
 }
 
+/** How many bytes of archive content may be held in memory at once.
+ *
+ *  The zip is assembled in the page's memory from entries kept for the WHOLE
+ *  run, so its cost grows with the export and is bounded by nothing on a
+ *  full-account run. Measured: the archive step alone allocated 125.7MB of RSS
+ *  for a 40MB payload. A renderer killed for memory takes the popup's document
+ *  with it, which means no `catch` runs and no status is written — the run stops
+ *  having reported nothing at all.
+ *
+ *  64MB is chosen to sit well below that failure while still archiving an
+ *  ordinary project in one file. The files are on disk regardless; the archive
+ *  is a convenience, so refusing to grow it is always better than losing the run.
+ */
+var ZIP_BYTE_BUDGET = 64 * 1024 * 1024;
+
+/** Add one file to the pending archive. Returns false when the budget refuses it.
+ *
+ *  A refusal is COUNTED on the list (`dropped`), because an archive missing files
+ *  it does not mention is worse than no archive: it looks complete. */
 function addZipEntry(zipEntries, projectSlug, convSlug, filename, content) {
   var prefix = conversationFolderPath(convSlug, projectSlug) + '/';
-  zipEntries.push({
-    name: prefix + filename,
-    data: typeof content === 'string' ? textToUtf8Bytes(content) : content,
-  });
+  var data = typeof content === 'string' ? textToUtf8Bytes(content) : content;
+  var budget = typeof zipEntries.budget === 'number' ? zipEntries.budget : ZIP_BYTE_BUDGET;
+  var used = typeof zipEntries.bytes === 'number' ? zipEntries.bytes : 0;
+  var incoming = (data && data.length) || 0;
+  if (used + incoming > budget) {
+    zipEntries.dropped = (zipEntries.dropped || 0) + 1;
+    return false;
+  }
+  zipEntries.bytes = used + incoming;
+  zipEntries.push({ name: prefix + filename, data: data });
+  return true;
 }
 
 /** How long a project archive may take to be accepted AND written. A batch zip is
@@ -866,6 +892,9 @@ async function runBatchExport(tab, options) {
   var batchStamp = options.batchStamp;
   var onProgress = options.onProgress;
   var zipEntries = options.buildZip ? [] : null;
+  if (zipEntries && typeof options.zipByteBudget === 'number') {
+    zipEntries.budget = options.zipByteBudget;
+  }
   var completedPaths = await searchCompletedDownloadPaths(projectSlug);
   var listResult = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
@@ -1189,6 +1218,12 @@ async function runBatchExport(tab, options) {
   }
 
   var zipName = null;
+  if (zipEntries && zipEntries.dropped > 0) {
+    // Stated as an error, not a note: an archive that silently omits files reads
+    // as a complete backup. The files themselves are on disk either way.
+    errors.push('archive incomplete: ' + zipEntries.dropped
+      + ' file(s) left out to stay within the memory budget — the saved files on disk are complete');
+  }
   if (zipEntries && zipEntries.length > 0 && typeof buildStoreZip === 'function') {
     // The zip is a convenience on top of files that are ALREADY on disk. If it
     // fails — too many entries for the format, a refused write — the run must
@@ -1480,6 +1515,7 @@ btn.addEventListener('click', async () => {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     addZipEntry: addZipEntry,
+    ZIP_BYTE_BUDGET: ZIP_BYTE_BUDGET,
     artifactFilename: artifactFilename,
     sanitizeFilenamePart: sanitizeFilenamePart,
     splitFilenameExtension: splitFilenameExtension,

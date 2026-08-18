@@ -16,6 +16,32 @@ A checked item means **exercised against chatgpt.com**, not "the test passes".
 Items marked *(fixture-only)* cannot be checked any other way and are called out
 so the gap is visible rather than assumed away.
 
+## Checking against the live site
+
+Four things waste an hour each time they are rediscovered:
+
+- `waitForSelector('[data-turn-id]')` times out on a perfectly healthy page.
+  Turns mounted mid-thread sit outside the viewport and the default is
+  `visible: true` — wait for `state: 'attached'`, or poll.
+- ChatGPT's Content Security Policy blocks injecting a `<script>` into the page.
+  That is precisely why the extension uses `chrome.scripting`, which runs in an
+  isolated world the page's CSP does not govern.
+- Opening `chrome://extensions` or the popup page **before** loading a
+  conversation leaves the conversation tab unable to mount its thread. Do the
+  conversation work first.
+- A long fixed sleep after navigation is worse than polling: the page re-renders
+  and the scan finds nothing to read.
+
+### Last verified: 1.2.0, against chatgpt.com
+
+    full export     32 964 lines, 564 turns, partial: false, 342s
+    metadata read   updateTime + currentNode + messageCount 1146, one request
+    filename        PUA codepoint 0x5FFFF stripped; Cyrillic and diacritics kept
+
+Not checked live in 1.2.0, and worth doing when a multi-hour run is possible: a
+whole-Project batch, the second-run skip, and the stamped copy of a grown
+conversation. All three are covered by tests driving the real `runBatchExport`.
+
 ## How to keep this file honest
 
 - Adding a feature means adding a paragraph here **in the same change**. A test

@@ -563,6 +563,37 @@ async function resolveArtifactPanelFiles(conversationId, options) {
   return out;
 }
 
+/** Wait for the artefact panel to mount, then list it.
+ *
+ *  Measured on production: after navigating to a conversation, `[data-message-id]`
+ *  turns appeared at ~9s and the artefact rows only at ~12s — no scrolling
+ *  involved, just render latency. Reading one frame at 11s returned nothing, so
+ *  an export triggered right after opening a conversation dropped all five of its
+ *  generated documents without a word.
+ *
+ *  Bounded and silent on absence: most conversations have no panel at all, and
+ *  waiting the full budget for every one of them would slow every export. The
+ *  loop therefore exits as soon as rows appear, and gives up quietly otherwise.
+ */
+async function waitForArtifactPanel(doc, options) {
+  const opts = options || {};
+  const root = doc || (typeof document !== 'undefined' ? document : null);
+  const budgetMs = opts.panelWaitMs === undefined ? 15000 : opts.panelWaitMs;
+  const stepMs = opts.panelPollMs === undefined ? 500 : opts.panelPollMs;
+  const sleep = opts.sleep || function(ms) {
+    return new Promise(function(resolve) { setTimeout(resolve, ms); });
+  };
+  const now = opts.now || function() { return Date.now(); };
+
+  const deadline = now() + budgetMs;
+  let files = listArtifactPanelFiles(root);
+  while (!files.length && now() < deadline) {
+    await sleep(stepMs);
+    files = listArtifactPanelFiles(root);
+  }
+  return files;
+}
+
 /** Read the artefact panel's rows from the DOM: file name plus its sandbox path.
  *  This supplies the sandbox_path the API needs for interpreter output. The panel
  *  is identified structurally (no testid exists) and its label is the file name,
@@ -1047,9 +1078,11 @@ function extractConversation() {
 async function appendPanelArtifacts(markdown, options) {
   const opts = options || {};
   const doc = opts.doc || (typeof document !== 'undefined' ? document : null);
-  const files = opts.files || listArtifactPanelFiles(doc);
-  if (!files.length) return markdown;
-
+  // The panel mounts LATE. Measured on production: turns appeared at 9s and the
+  // artefact rows only at 12s after navigation, with no scrolling needed. A
+  // single-frame read at 11s found nothing, so a user who exports immediately
+  // after opening a conversation would silently lose every generated file. Wait
+  // for it, bounded — and treat "still absent" as absent, not as an error.
   const conversationId = opts.conversationId ||
     ((typeof location !== 'undefined' ? location.pathname : '')
       .match(/\/c\/([A-Za-z0-9-]+)/) || [])[1] || null;
@@ -1058,6 +1091,20 @@ async function appendPanelArtifacts(markdown, options) {
   const artifacts = opts.artifacts !== undefined
     ? opts.artifacts
     : await fetchConversationArtifacts(conversationId, opts);
+
+  // Ask the API FIRST, then decide whether waiting for the panel is worth it.
+  // Most conversations have no generated files, and paying the panel-wait budget
+  // on every one of them would slow every export for nothing. When the API says
+  // there is nothing to find, a single-frame read is enough; when it reports
+  // artefacts (or could not be read at all), wait for the panel to mount.
+  let files = opts.files;
+  if (!files) {
+    const mayHaveFiles = artifacts === null || artifacts.length > 0;
+    files = mayHaveFiles
+      ? await waitForArtifactPanel(doc, opts)
+      : listArtifactPanelFiles(doc);
+  }
+  if (!files.length) return markdown;
 
   // Candidate message ids for the download call. Measured: the endpoint requires
   // a message_id but does NOT use it to select the file — 12 different ids
@@ -2126,6 +2173,7 @@ if (typeof module !== 'undefined' && module.exports) {
     listArtifactPanelFiles: listArtifactPanelFiles,
     resolveArtifactPanelFiles: resolveArtifactPanelFiles,
     appendPanelArtifacts: appendPanelArtifacts,
+    waitForArtifactPanel: waitForArtifactPanel,
     findCollapsedProjectRows: findCollapsedProjectRows,
     projectRowContainer: projectRowContainer,
     stripSidebarLabelSuffix: stripSidebarLabelSuffix,

@@ -2115,3 +2115,124 @@ test('a plain copy makes no network request at all', async () => {
     if (previousFetch === undefined) delete global.fetch; else global.fetch = previousFetch;
   }
 });
+
+test('a late-mounting artefact panel is waited for', async () => {
+  // Measured on production: after navigation, turns mounted at ~9s and the
+  // artefact rows only at ~12s. A single-frame read at 11s found nothing, so an
+  // export triggered right after opening a conversation dropped all five of its
+  // generated documents in silence.
+  let ticks = 0;
+  const doc = {
+    querySelectorAll(sel) {
+      if (!/open-file|artifact-row/.test(sel)) return [];
+      // The panel appears only on the third poll.
+      return ticks >= 3
+        ? [{ getAttribute: (n) => (n === 'aria-label' ? 'late.pdf' : null) }]
+        : [];
+    },
+  };
+  const sleep = async () => { ticks += 1; };
+  let clock = 0;
+  const now = () => (clock += 100);
+
+  const files = await parser.waitForArtifactPanel(doc, { sleep, now, panelWaitMs: 5000 });
+  assert.deepEqual(files.map((f) => f.name), ['late.pdf']);
+  assert.ok(ticks >= 3, 'the wait must actually poll');
+});
+
+test('the panel wait gives up quietly instead of hanging', async () => {
+  const doc = { querySelectorAll() { return []; } };
+  let clock = 0;
+  const files = await parser.waitForArtifactPanel(doc, {
+    sleep: async () => {},
+    now: () => (clock += 400),
+    panelWaitMs: 1000,
+  });
+  assert.deepEqual(files, [], 'absence is absence, not an error');
+});
+
+test('a conversation the API says has no files does not pay the panel wait', async () => {
+  // Most conversations have no generated files. Waiting the full budget for each
+  // of them would slow every export, so the API result gates the wait.
+  let slept = 0;
+  const doc = { querySelectorAll() { return []; } };
+  const out = await parser.appendPanelArtifacts('body', {
+    doc,
+    conversationId: 'conv-1',
+    artifacts: [],                 // the API answered: nothing here
+    sleep: async () => { slept += 1; },
+    now: () => Date.now(),
+  });
+  assert.equal(out, 'body');
+  assert.equal(slept, 0, 'an empty conversation must not wait for a panel');
+});
+
+test('appendPanelArtifacts waits for a panel that has not mounted yet', async () => {
+  // Testing waitForArtifactPanel alone proved nothing about whether the export
+  // uses it: a mutant replacing the call with a single-frame read survived —
+  // and that single-frame read IS the production bug (panel at ~12s, read at
+  // ~11s, five documents lost silently).
+  let polls = 0;
+  const doc = {
+    querySelectorAll(sel) {
+      if (!/open-file|artifact-row/.test(sel)) return [];
+      return polls >= 2
+        ? [{ getAttribute: (n) => (n === 'aria-label' ? 'slow.pdf' : null) }]
+        : [];
+    },
+  };
+  const fetchImpl = stubFetch([
+    ['/interpreter/download', jsonOk({
+      download_url: 'https://chatgpt.com/backend-api/estuary/content?id=file_s',
+      file_name: 'slow.pdf',
+    })],
+  ]);
+
+  const out = await parser.appendPanelArtifacts('body', {
+    doc,
+    conversationId: 'conv-1',
+    artifacts: [{ kind: 'asset', messageId: 'msg-1' }],  // API says files exist
+    fetchImpl,
+    token: 'tok',
+    sleep: async () => { polls += 1; },
+    now: () => Date.now(),
+    panelWaitMs: 5000,
+  });
+
+  assert.ok(out.indexOf('slow.pdf') !== -1,
+    'a panel that mounts late must still be exported');
+});
+
+test('an unreadable API still waits for the panel', async () => {
+  // artifacts === null means "could not tell". Skipping the wait there would
+  // turn a transient API failure into a silently file-less export, which is the
+  // same collapse of "no files" and "could not tell" the null return exists to
+  // prevent.
+  let polls = 0;
+  const doc = {
+    querySelectorAll(sel) {
+      if (!/open-file|artifact-row/.test(sel)) return [];
+      return polls >= 2
+        ? [{ getAttribute: (n) => (n === 'aria-label' ? 'orphan.pdf' : null) }]
+        : [];
+    },
+  };
+  const failing = stubFetch([
+    ['/interpreter/download', () => ({ ok: false, status: 500, json: async () => ({}) })],
+  ]);
+
+  const out = await parser.appendPanelArtifacts('body', {
+    doc,
+    conversationId: 'conv-1',
+    artifacts: null,
+    fetchImpl: failing,
+    token: 'tok',
+    sleep: async () => { polls += 1; },
+    now: () => Date.now(),
+    panelWaitMs: 5000,
+  });
+
+  assert.ok(out.indexOf('orphan.pdf') !== -1,
+    'the file must be named even though its link could not be resolved');
+  assert.ok(out.indexOf('Could not retrieve') !== -1);
+});

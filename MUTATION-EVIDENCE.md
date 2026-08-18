@@ -1326,3 +1326,54 @@ pattern the gate reserves for real conversation links. Scrubbed to a bare origin
 Second time this task that a project gate caught the change rather than a
 reviewer — and this note itself tripped the same gate on its first draft, for
 quoting the offending URL verbatim while describing it.
+
+### The panel mounts late, and the first fix read one frame
+
+Verifying the built package on production exposed a defect the unit tests could
+not have shown, because they hand the function a DOM that already contains the
+panel.
+
+Timing measured after navigating to the conversation (no scrolling involved):
+
+    t=3s    turns 0    artefact rows 0
+    t=6s    turns 0    artefact rows 0
+    t=9s    turns 12   artefact rows 0
+    t=12s   turns 29   artefact rows 10   <- panel appears here
+
+An earlier probe read the panel at 11s and reported `gotFiles: false`. A user who
+presses export right after opening a conversation would have lost all five
+generated documents in silence — the same failure the API path was added to fix,
+reintroduced by a timing assumption.
+
+| id  | mutation                                        | verdict |
+|-----|-------------------------------------------------|---------|
+| W1  | no wait; single-frame read (the production bug)  | DIED    |
+| W2  | wait loop never polls                            | DIED    |
+| W3  | empty conversation still pays the wait           | DIED    |
+| W4  | unreadable API skips the wait                    | DIED    |
+
+W1 and W4 SURVIVED the first sweep — the same mistake as B1, one layer down: the
+wait helper was tested in isolation while nothing asserted that
+`appendPanelArtifacts` uses it. Tests driving the caller kill both.
+
+W3 guards the cost. Most conversations have no generated files, so the API result
+gates the wait: when it reports nothing, a single frame is read and no time is
+spent. When it reports artefacts — or could not be read at all (W4) — the panel is
+waited for, because skipping the wait on an unreadable API collapses "could not
+tell" into "no files" again.
+
+Verified on production against the built package, exporting deliberately early:
+
+    panelAtStart  0          (the panel was genuinely absent)
+    elapsedMs     14106
+    gotFiles      true
+    links         5
+    unresolved    false
+
+### A timing figure worth recording
+
+A full export of that conversation (32,974 lines, 66 images) took ~6 minutes end
+to end. That cost is in the pre-existing scan, not in this change: the artefact
+step is one API call plus one resolve per file. It is recorded here because two
+full scans of it exceeded a 9-minute probe budget, which is a fact about the
+extension a future reader should not have to rediscover.

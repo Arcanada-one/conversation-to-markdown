@@ -120,6 +120,15 @@ experience plus another week to fix. Before submitting: full suite green,
 `npm run check` clean, `FEATURES.md` walked against the live site, and the
 version bumped exactly once.
 
+## Stage before you test
+
+Some gates read `git ls-files`, so an untracked new file is invisible to them.
+Running the suite before `git add` is the one window in which the allowlist check
+cannot see the file it exists to check — CI then fails on something that was
+green locally a minute earlier.
+
+For any change that ADDS a file: stage first, then run the suite.
+
 ## Practical notes
 
 - No runtime or build dependencies; tests are `node:test` with hand-rolled

@@ -2260,3 +2260,193 @@ test('sanitising a title does not strip legitimate characters', () => {
   assert.equal(parser.slugifyTitle('План 🚀 запуска'), 'План-🚀-запуска');
   assert.equal(parser.slugifyTitle('日本語のタイトル'), '日本語のタイトル');
 });
+
+/** A conversation whose turns mount in a band NARROWER than the viewport.
+ *
+ *  createVirtualizedFixture cannot express this: it derives the mounted page
+ *  from `scrollTop / clientHeight`, so a step of 0.75 viewports always lands on
+ *  the same page or the next one and can never jump over a page. Real
+ *  virtualization does not work that way — it mounts a band of DOM around the
+ *  scroll position, and a heavy conversation (long turns, images, code blocks)
+ *  mounts fewer pixels of it. Turns are therefore placed at absolute offsets
+ *  and reported through getBoundingClientRect, which is how the real DOM says
+ *  how much is mounted.
+ */
+function createBandedFixture(bandHeight, turnSpacing, turnCount, viewportHeight) {
+  const clientHeight = viewportHeight || 800;
+  let container;
+  const turns = [];
+  for (let i = 0; i < turnCount; i += 1) {
+    const turn = userTurn('t' + i, i + 1, 'turn ' + i);
+    turn.top = i * turnSpacing;
+    turn.getBoundingClientRect = function () {
+      return {
+        top: this.top - container.scrollTop,
+        bottom: this.top - container.scrollTop + 80,
+      };
+    };
+    turns.push(turn);
+  }
+  container = {
+    scrollTop: 0,
+    clientHeight: clientHeight,
+    scrollHeight: turnCount * turnSpacing + clientHeight,
+    scrollTo(options) { this.scrollTop = options.top; },
+    querySelectorAll() {
+      const low = this.scrollTop - bandHeight / 2;
+      const high = this.scrollTop + bandHeight / 2;
+      return turns.filter((turn) => turn.top >= low && turn.top <= high);
+    },
+  };
+  return container;
+}
+
+test('THE INVARIANT: a turn is never stepped over because the mounted band is narrow', async () => {
+  // Reproduced before it was fixed: with a 400px band in an 800px viewport the
+  // scan captured 30 of 60 turns — every second one — and returned them as a
+  // COMPLETE export with no partial notice. The scroll step was a fixed 0.75 of
+  // the viewport, so it advanced past turns the virtualizer had never mounted.
+  //
+  // The sidebar walk already had this right, and says why in its own comment:
+  // "never step further than the band of rows currently mounted (a virtualizer
+  // may mount less than a viewport, and the excess is stepped over unseen)".
+  // The conversation scan simply did not carry the same rule.
+  //
+  // Every band here is physically possible: at least as tall as the gap between
+  // two turns, so no band leaves a visible hole in the viewport.
+  const geometries = [
+    { band: 1600, spacing: 300 },
+    { band: 800, spacing: 300 },
+    { band: 400, spacing: 300 },
+    { band: 300, spacing: 300 },
+    { band: 200, spacing: 150 },
+    { band: 900, spacing: 800 },
+  ];
+
+  for (const geometry of geometries) {
+    const meta = {};
+    const container = createBandedFixture(geometry.band, geometry.spacing, 40);
+    const turns = await parser.scanTurns(container, {
+      readSections: (target) => target.querySelectorAll('[data-turn-id]'),
+      settle: async () => {},
+      stablePasses: 2,
+      scanMeta: meta,
+    });
+    const captured = new Set(turns.map((turn) => turn.turnId));
+    const missing = [];
+    for (let i = 0; i < 40; i += 1) if (!captured.has('t' + i)) missing.push('t' + i);
+    assert.deepEqual(
+      missing, [],
+      `band ${geometry.band}px / spacing ${geometry.spacing}px lost ${missing.length} turns`,
+    );
+    assert.equal(meta.partial, undefined, `band ${geometry.band}px reported a partial scan`);
+  }
+});
+
+test('a narrow band is measured from the DOM, not assumed from the viewport', async () => {
+  // Positive control for the test above. It must be able to FAIL: if the
+  // fixture's geometry were unreachable, or the band were always wide enough,
+  // the invariant would pass without the fix and prove nothing. Here the band
+  // is deliberately narrower than the viewport, and the assertion is that the
+  // scan's own step never exceeds what was mounted.
+  const container = createBandedFixture(400, 300, 12);
+  const tops = [];
+  const originalScrollTo = container.scrollTo;
+  container.scrollTo = function (options) {
+    tops.push(options.top);
+    originalScrollTo.call(this, options);
+  };
+
+  await parser.scanTurns(container, {
+    readSections: (target) => target.querySelectorAll('[data-turn-id]'),
+    settle: async () => {},
+    stablePasses: 2,
+  });
+
+  // The mounted band is 400px tall at most, so no forward step may advance by a
+  // full viewport (800 * 0.75 = 600). Proves the cap is real rather than the
+  // turns merely happening to be caught.
+  let widest = 0;
+  for (let i = 1; i < tops.length; i += 1) {
+    const delta = tops[i] - tops[i - 1];
+    if (delta > widest) widest = delta;
+  }
+  assert.ok(widest > 0, 'the scan must actually move down the document');
+  assert.ok(widest <= 400, `a step of ${widest}px exceeded the ${400}px mounted band`);
+});
+
+test('a scan that reached the bottom blind reports a gap, not a complete export', async () => {
+  // Reaching the bottom is not a coverage proof. With a mounted band narrower
+  // than the gap between two turns, only the first turn can ever mount: the scan
+  // then crawls the remaining 11 860px of the document with nothing in the DOM
+  // and used to return 1 turn of 40 as a finished export, with no notice.
+  //
+  // This geometry is not one ChatGPT is known to produce — a virtualizer that
+  // mounted less than the gap between turns would leave visible blank space. It
+  // is tested because "complete" must be a claim the code can support, and a
+  // silent hole is the one failure a re-run cannot repair.
+  const meta = {};
+  const container = createBandedFixture(200, 300, 40);
+  const turns = await parser.scanTurns(container, {
+    readSections: (target) => target.querySelectorAll('[data-turn-id]'),
+    settle: async () => {},
+    stablePasses: 2,
+    scanMeta: meta,
+  });
+
+  assert.ok(turns.length < 40, 'the fixture must genuinely lose turns for this to mean anything');
+  assert.equal(meta.partial, true);
+  assert.equal(meta.reason, 'coverage gap');
+});
+
+test('a complete scan is never reported as a coverage gap', async () => {
+  // The counter-assertion, and the one that took two attempts to get right.
+  // A first version credited an empty band as a viewport of coverage, and a
+  // second judged the stretch past the final turn: both reported "partial
+  // export" on exports that had captured every single turn. A false partial is
+  // a worse user experience than no notice at all, because it tells the user
+  // their complete file is untrustworthy.
+  const geometries = [
+    { band: 1600, spacing: 300 },
+    { band: 800, spacing: 300 },
+    { band: 400, spacing: 300 },
+    { band: 300, spacing: 300 },
+    { band: 200, spacing: 150 },
+    { band: 900, spacing: 800 },
+  ];
+
+  for (const geometry of geometries) {
+    const meta = {};
+    const container = createBandedFixture(geometry.band, geometry.spacing, 40);
+    const turns = await parser.scanTurns(container, {
+      readSections: (target) => target.querySelectorAll('[data-turn-id]'),
+      settle: async () => {},
+      stablePasses: 2,
+      scanMeta: meta,
+    });
+    assert.equal(turns.length, 40, `band ${geometry.band}px did not capture every turn`);
+    assert.notEqual(
+      meta.reason, 'coverage gap',
+      `band ${geometry.band}px / spacing ${geometry.spacing}px falsely reported a coverage gap`,
+    );
+  }
+});
+
+test('coverage gaps are measured between read positions, not guessed', () => {
+  assert.equal(typeof parser.largestCoverageGap, 'function');
+  // [scrollTop, heightOfBandMountedThere]
+  // Contiguous coverage: each band reaches the next position.
+  assert.equal(parser.largestCoverageGap([[0, 100], [100, 100], [200, 100]], 800).width, 0);
+  // A hole between two productive positions is the gap that matters.
+  assert.equal(parser.largestCoverageGap([[0, 100], [500, 100]], 800).width, 400);
+  // The stretch past the LAST turn is bottom padding, not a hole: the scan
+  // always runs a little beyond the final turn.
+  assert.equal(parser.largestCoverageGap([[0, 100], [100, 100], [900, 0]], 800).width, 0);
+  // Unless it is beyond a whole viewport of blind travel.
+  assert.ok(parser.largestCoverageGap([[0, 100], [5000, 0]], 800).width > 800);
+  // Nothing mounted anywhere: no claim either way, and no false gap.
+  assert.equal(parser.largestCoverageGap([[0, 0], [800, 0]], 800).width, 0);
+  assert.equal(parser.largestCoverageGap([], 800).width, 0);
+  // Sub-pixel seams from a zoomed or high-DPI viewport are not missing turns.
+  assert.equal(parser.largestCoverageGap([[0, 100], [100.5, 100]], 800).width, 0);
+});

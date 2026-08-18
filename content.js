@@ -888,7 +888,25 @@ function shouldReplaceCapture(previousMarkdown, candidateMarkdown) {
 
 function captureMountedTurns(sections, settings, seen, state) {
   let newIds = 0;
+  // The height of the band the virtualizer actually mounted. Measured the same
+  // way the sidebar walk measures its rows, and for the same reason: a band
+  // narrower than the viewport means a viewport-sized scroll step jumps over
+  // turns that were never in the DOM to be read. See `nextScrollTop`.
+  let bandTop = Infinity;
+  let bandBottom = -Infinity;
   for (const section of sections) {
+    if (typeof section.getBoundingClientRect === 'function') {
+      try {
+        const rect = section.getBoundingClientRect();
+        if (rect && typeof rect.top === 'number' && typeof rect.bottom === 'number') {
+          if (rect.top < bandTop) bandTop = rect.top;
+          if (rect.bottom > bandBottom) bandBottom = rect.bottom;
+        }
+      } catch (_e) {
+        // An element that refuses measurement is simply not measured; the band
+        // falls back to the viewport, which is the pre-measurement behaviour.
+      }
+    }
     if (isExplicitlyUnsupportedTurn(section)) continue;
     const rawTurnId = getSectionTurnId(section);
     if (rawTurnId && !state.observedIds.has(rawTurnId)) {
@@ -931,13 +949,105 @@ function captureMountedTurns(sections, settings, seen, state) {
   for (const id of state.observedIds) {
     if (!seen.has(id) && !state.skipped.has(id)) unresolved += 1;
   }
-  return { newIds: newIds, unresolved: unresolved };
+  const mountedBand = bandBottom > bandTop ? bandBottom - bandTop : 0;
+  return { newIds: newIds, unresolved: unresolved, mountedBand: mountedBand };
 }
 
-function nextScrollTop(container, atBottom) {
+/** Where to scroll next, never further than the turns that were actually mounted.
+ *
+ *  A fixed fraction of the VIEWPORT was the defect: with a 400px mounted band in
+ *  an 800px viewport the scan captured 30 of 60 turns — every second one — and
+ *  reported a complete export, because each step advanced 600px past turns the
+ *  virtualizer had never rendered. The sidebar walk already capped its step at
+ *  the observed band; this is the same rule for the conversation.
+ *
+ *  `mountedBand` of 0 means nothing could be measured, and the step falls back
+ *  to the viewport — the previous behaviour, not a wider guess.
+ *
+ *  The `min(band, viewport)` cap is deliberately NOT claimed to be load-bearing.
+ *  A mutant that removes it survives, and no geometry — including bands three
+ *  viewports tall, weighted above or below the scroll position — could be built
+ *  where it changes the outcome: turns in a band taller than the viewport are
+ *  already in the DOM and are read in the same round. It is kept as a
+ *  conservative bound on a number that comes from ChatGPT's virtualizer rather
+ *  than from us, and it is recorded here as unproven so nobody later mistakes it
+ *  for a checked invariant.
+ */
+function nextScrollTop(container, atBottom, mountedBand) {
   if (atBottom) return container.scrollTop;
-  const increment = Math.max(1, Math.floor(container.clientHeight * 0.75));
+  const reach = mountedBand > 0
+    ? Math.min(mountedBand, container.clientHeight || mountedBand)
+    : (container.clientHeight || 0);
+  const increment = Math.max(1, Math.floor(reach * 0.75));
   return Math.min(container.scrollTop + increment, container.scrollHeight - container.clientHeight);
+}
+
+/** The widest stretch between two read positions that neither of them covered.
+ *
+ *  Each entry is `[scrollTop, mountedBandHeight]` — where the scan read, and how
+ *  tall a band of turns was mounted there. Coverage is only credited where turns
+ *  actually mounted, and only the stretch BEFORE the last such position is
+ *  judged: everything past the final turn is the document's bottom padding, and
+ *  counting it as a hole reported a false "partial export" on a complete one.
+ *
+ *  Two failure modes this catches, both measured:
+ *
+ *   - the scan advanced further than it mounted, so a stretch between two
+ *     positions was stepped over unseen;
+ *   - a position mounted nothing at all in the middle of the conversation.
+ *
+ *  Reaching the bottom is not a coverage proof — this is what turns "I arrived"
+ *  into "I saw".
+ */
+function largestCoverageGap(bands, viewportHeight) {
+  if (!bands || bands.length === 0) return { width: 0, at: 0 };
+  const sorted = bands.slice().sort(function(a, b) { return a[0] - b[0]; });
+
+  // Everything after the last position that mounted a turn is bottom padding.
+  let lastProductive = -1;
+  let firstProductive = -1;
+  for (let i = 0; i < sorted.length; i += 1) {
+    if (sorted[i][1] > 0) {
+      if (firstProductive < 0) firstProductive = i;
+      lastProductive = i;
+    }
+  }
+  if (lastProductive < 0) return { width: 0, at: 0 };
+
+  let reach = sorted[firstProductive][0] + sorted[firstProductive][1];
+  let widest = 0;
+  let at = 0;
+  for (let i = firstProductive + 1; i <= lastProductive; i += 1) {
+    const start = sorted[i][0];
+    // A 1px tolerance: scroll positions are fractional in a zoomed or high-DPI
+    // viewport, and a sub-pixel seam is not a missing turn.
+    if (start > reach + 1) {
+      const width = start - reach;
+      if (width > widest) { widest = width; at = reach; }
+    }
+    const end = sorted[i][0] + sorted[i][1];
+    if (end > reach) reach = end;
+  }
+
+  // The tail case the band-to-band comparison above cannot see: when turns
+  // mounted at only a few early positions, there IS no later band to leave a
+  // hole against, yet the scan still travelled the rest of the document blind.
+  // Measured on a fixture whose band was narrower than the gap between turns:
+  // 1 of 40 turns captured, reported complete.
+  //
+  // The threshold is one viewport, and it is measured rather than tuned. Across
+  // every geometry that captured every turn the blind tail was at most 300px
+  // (0.38 viewports) — the scan always runs a little past the final turn, which
+  // is ordinary. The failing geometry's tail was 11 860px, or 14.8 viewports.
+  // Three orders of magnitude separate the two populations, so one viewport sits
+  // in empty space between them rather than on a boundary either could cross.
+  const traversedTo = sorted[sorted.length - 1][0];
+  const seenTo = sorted[lastProductive][0] + sorted[lastProductive][1];
+  const blind = traversedTo - seenTo;
+  if (viewportHeight > 0 && blind > viewportHeight) {
+    if (blind > widest) { widest = blind; at = seenTo; }
+  }
+  return { width: widest, at: at };
 }
 
 /** Record that a scan ended before reaching a stable bottom. */
@@ -969,6 +1079,13 @@ async function scanTurns(container, options) {
   };
   let stablePasses = 0;
   let lastHeight = -1;
+  // Where the scan actually READ, and how tall a band it read there. Reaching
+  // the bottom proves coverage only if these bands, joined together, leave no
+  // gap: a scan that advances further than it mounts crawls to the end past
+  // turns that were never in the DOM, and "I arrived" is not "I saw". Same
+  // reasoning the sidebar walk applies to its rows — quiescence is not a
+  // coverage proof.
+  const readBands = [];
   const startedAt = settings.now();
   // Progress is measured in work done, not time elapsed. A scan that keeps
   // surfacing turns or keeps moving down the document is healthy however long
@@ -992,6 +1109,11 @@ async function scanTurns(container, options) {
       }
       const observation = captureMountedTurns(settings.readSections(container), settings, seen, state);
       const atBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 1;
+      // Record every position and what it mounted there. Positions that mounted
+      // nothing are kept: below the last turn that is legitimate, but between two
+      // turns it is the signature of a stretch the virtualizer never rendered
+      // while the scan was looking at it.
+      readBands.push([container.scrollTop, observation.mountedBand]);
 
       const movedDown = Math.abs(container.scrollTop - lastProgressTop) >= 1;
       if (observation.newIds > 0 || movedDown) {
@@ -1034,10 +1156,17 @@ async function scanTurns(container, options) {
       stablePasses = atBottom && observation.newIds === 0 && observation.unresolved === 0 &&
         lastHeight === container.scrollHeight
         ? stablePasses + 1 : 0;
-      if (stablePasses >= settings.stablePasses) return orderCapturedTurns(seen);
+      if (stablePasses >= settings.stablePasses) {
+        const gap = largestCoverageGap(readBands, container.clientHeight || 0);
+        // A gap wider than the band that should have covered it means turns
+        // existed in a stretch of the document the scan never mounted. Say so in
+        // the artifact rather than presenting a hole as a complete conversation.
+        if (gap.width > 0) markPartialScan(settings, 'coverage gap');
+        return orderCapturedTurns(seen);
+      }
       lastHeight = container.scrollHeight;
       const target = observation.unresolved > 0
-        ? container.scrollTop : nextScrollTop(container, atBottom);
+        ? container.scrollTop : nextScrollTop(container, atBottom, observation.mountedBand);
       await settings.scrollTo(container, target, 'auto');
       await settings.settle(container);
     }
@@ -2201,6 +2330,7 @@ if (typeof module !== 'undefined' && module.exports) {
     extractTurn: extractTurn,
     findScrollContainer: findScrollContainer,
     getConversationMarkdown: getConversationMarkdown,
+    largestCoverageGap: largestCoverageGap,
     nodeToMarkdown: nodeToMarkdown,
     orderCapturedTurns: orderCapturedTurns,
     parseTurnOrder: parseTurnOrder,

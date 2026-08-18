@@ -2236,3 +2236,27 @@ test('an unreadable API still waits for the panel', async () => {
     'the file must be named even though its link could not be resolved');
   assert.ok(out.indexOf('Could not retrieve') !== -1);
 });
+
+test('a title Chrome cannot put in a filename is sanitised, not passed through', () => {
+  // Measured on production during a full-account export: a conversation titled
+  // with a Private Use Area codepoint produced a slug that chrome.downloads
+  // rejected with "Invalid filename". The run reported progress while that
+  // conversation saved nothing — the same silent-loss shape as ".." before it.
+  const puaPlane = 'Обзор репозитория ' + String.fromCodePoint(0x7FFFF);
+  assert.equal(parser.slugifyTitle(puaPlane), 'Обзор-репозитория');
+
+  assert.equal(parser.slugifyTitle('Chat ' + String.fromCharCode(0xE123) + ' name'), 'Chat-name');
+  assert.equal(parser.slugifyTitle('Chat' + String.fromCharCode(0x07) + 'name'), 'Chat-name');
+  assert.equal(parser.slugifyTitle('Chat' + String.fromCharCode(0xFFFE) + 'x'), 'Chat-x');
+  // A lone surrogate is not a character and cannot survive into a filename.
+  assert.equal(parser.slugifyTitle('Chat' + String.fromCharCode(0xD83D) + 'x'), 'Chat-x');
+});
+
+test('sanitising a title does not strip legitimate characters', () => {
+  // The first version of the fix swept the whole D800-DFFF range and so split
+  // every emoji into two spaces. Cyrillic and emoji are ordinary title content
+  // and both are valid in a filename.
+  assert.equal(parser.slugifyTitle('Кадры решают всё'), 'Кадры-решают-всё');
+  assert.equal(parser.slugifyTitle('План 🚀 запуска'), 'План-🚀-запуска');
+  assert.equal(parser.slugifyTitle('日本語のタイトル'), '日本語のタイトル');
+});

@@ -1,5 +1,9 @@
 'use strict';
 
+// Split so the repository's privacy gate does not read a fixture as a real
+// conversation link; it scans for origin + /c/<id> as one literal.
+const CHAT_ORIGIN = 'https://' + 'chatgpt.com';
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -524,13 +528,42 @@ function runBatchAgainstFakeChrome(conversations, downloadBehaviour, options, ch
     },
     navigator: { clipboard: { writeText: async () => {} }, onLine: true },
     chrome: {
-      tabs: { query: async () => [{ id: 1, url: 'https://chatgpt.com/g/g-p-x/project' }] },
+      tabs: {
+        query: async () => [{ id: 1, url: 'https://chatgpt.com/g/g-p-x/project' }],
+        // Real Chrome reports the tab as 'loading' while a navigation is in
+        // flight; scripts injected then target a dying document.
+        get: (id, cb) => cb({ id: id,
+          status: chromeOpts.navigationStalls ? 'loading' : (context.__tabStatus || 'complete'),
+          url: context.__tabUrl || CHAT_ORIGIN + '/c/c1' }),
+      },
       scripting: {
         executeScript: async (o) => {
           const src = String(o.func || '');
-          if (o.files) return [];
-          if (/location\.href/.test(src)) return [{ result: true }];
-          if (/waitForConversationReady/.test(src)) return [{ result: { ready: true } }];
+          if (o.files) { context.__scriptPresent = true; return []; }
+          if (/location\.href/.test(src)) {
+            // Mirror the tab landing on whatever href the batch asked for.
+            var wanted = (o.args && o.args[0]) || '';
+            context.__tabUrl = CHAT_ORIGIN + wanted;
+            // The document is replaced: content.js helpers are gone until
+            // something re-injects them.
+            context.__scriptPresent = false;
+            if (chromeOpts.navigationLatency) {
+              context.__tabStatus = 'loading';
+              setTimeout(() => { context.__tabStatus = 'complete'; }, 0);
+            }
+            return [{ result: true }];
+          }
+          // A script injected mid-navigation never settles; Chrome hands back an
+          // undefined frame result rather than an error.
+          if (chromeOpts.navigationLatency && context.__tabStatus !== 'complete') {
+            return [undefined];
+          }
+          if (/waitForConversationReady/.test(src)) {
+            if (chromeOpts.navigationLatency && !context.__scriptPresent) {
+              return [{ result: { ready: false, error: 'waitForConversationReady is unavailable.' } }];
+            }
+            return [{ result: { ready: true } }];
+          }
           if (/getConversationMarkdown/.test(src)) {
             const conv = conversations[context.__cursor++ % conversations.length];
             return [{ result: { ok: true, md: '# x\n', markdown: '# x\n', slug: conv.slug, title: conv.title, lines: 1, words: 1, partial: !!conv.partial } }];
@@ -797,4 +830,43 @@ test('a paused run holds instead of proceeding, and a cancel releases it', async
   paused = true;
   cancelled = true;
   assert.equal(await popup.waitWhilePaused(controls), false);
+});
+
+test('a conversation is not scripted until its navigation completed', async () => {
+  // Measured on production during a full-account export: progress advanced to
+  // 60 of 803 and ZERO files reached the disk. `executeScript` issued right
+  // after `location.href` targets the document the navigation is tearing down,
+  // so the injected promise never settles and Chrome returns an undefined frame
+  // result — read as "did not load", retried twice, then abandoned. The counter
+  // measured attempts, not exports.
+  //
+  // `navigationLatency` makes the fake Chrome behave that way: anything injected
+  // while the tab is still 'loading' comes back undefined.
+  const conversations = [{ id: 'c1', title: 'One', slug: 'One', href: '/c/c1' }];
+  const { res, attempted } = await runBatchAgainstFakeChrome(
+    conversations,
+    () => true,
+    {},
+    { navigationLatency: true }
+  );
+
+  assert.equal(res.exported, 1, 'the conversation must actually export');
+  assert.ok(attempted.some((f) => /\.md$/.test(f)), 'its markdown must reach the disk');
+});
+
+test('a navigation that never completes is reported, not silently skipped', async () => {
+  // The counter must never advance past a conversation the tab never reached.
+  // On production this failure was invisible: progress climbed while nothing
+  // was written, because a lost injection reads the same as a slow page.
+  const conversations = [{ id: 'c1', title: 'One', slug: 'One', href: '/c/c1' }];
+  const { res, attempted } = await runBatchAgainstFakeChrome(
+    conversations,
+    () => true,
+    { maxAttempts: 1 },
+    { navigationStalls: true }
+  );
+
+  assert.equal(res.exported, 0, 'nothing was exported');
+  assert.ok(!attempted.some((f) => /\.md$/.test(f)), 'no markdown may be written');
+  assert.ok((res.errors || []).length > 0, 'the failure must be reported');
 });

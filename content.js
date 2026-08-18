@@ -2049,6 +2049,25 @@ function slugifyTitle(title, maxLength) {
   if (!title) return null;
   const slug = String(title)
     .normalize('NFC')
+    // Characters Chrome refuses in a download filename even though they are
+    // legal in a title. Measured on production: a conversation titled
+    // "Обзор репозитория \u{7FFFF}" (a Private Use Area codepoint) produced a
+    // slug Chrome rejected with "Invalid filename", so the whole conversation
+    // failed to save while the run reported progress. Covers C0/C1 controls, the
+    // BMP Private Use Area, both Private Use planes, unpaired surrogates, and
+    // the non-characters at the end of each plane.
+    .replace(/[\u0000-\u001F\u007F-\u009F\uE000-\uF8FF\uFDD0-\uFDEF\uFFF0-\uFFFF]/g, ' ')
+    .replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, function(pair) {
+      const code = pair.codePointAt(0);
+      const inPrivatePlane = code >= 0xF0000 && code <= 0x10FFFD;
+      const isNonCharacter = (code & 0xFFFE) === 0xFFFE;
+      return (inPrivatePlane || isNonCharacter) ? ' ' : pair;
+    })
+    // A LONE surrogate only: the pair rule above already ran and returned valid
+    // pairs untouched, so sweeping the whole D800-DFFF range here would split
+    // every emoji into two spaces. Verified: "План 🚀 запуска" kept its emoji
+    // before this change and lost it after, until the range was narrowed.
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, ' ')
     .replace(/[\\/:*?"<>|]+/g, ' ')
     // `~` is reserved as the marker that introduces a conversation id in an export
     // filename. Excluding it here is what makes the two name formats

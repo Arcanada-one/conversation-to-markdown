@@ -758,11 +758,54 @@ async function runBatchExport(tab, options) {
   };
 
   /** Fetch one conversation. Returns {ok, result} or {ok:false, error}. */
+  /** Wait for the tab to finish navigating before scripting it again.
+   *
+   *  Measured during a full-account export: every conversation reported progress
+   *  and NOTHING reached the disk — 60 conversations in, zero files. The cause is
+   *  here. `executeScript` issued immediately after `location.href` targets the
+   *  document the navigation is destroying, so the injected promise never
+   *  settles and the call resolves with `undefined` — not an error, just null.
+   *  `attemptConversation` then read that as "did not load", retried twice, and
+   *  moved on. The counter advanced; nothing was ever exported.
+   */
+  function waitForTabNavigation(tabId, conversationId, timeoutMs) {
+    var budget = timeoutMs || 30000;
+    // Without chrome.tabs.get there is no way to observe the navigation. Resolve
+    // true rather than hanging: the readiness check that follows is the real
+    // gate, and a missing optional API must not wedge the run.
+    if (typeof chrome === 'undefined' || !chrome.tabs || !chrome.tabs.get) {
+      return Promise.resolve(true);
+    }
+    return new Promise(function(resolve) {
+      var startedAt = Date.now();
+      function poll() {
+        chrome.tabs.get(tabId, function(t) {
+          if (chrome.runtime.lastError || !t) return resolve(false);
+          var onConversation = !conversationId ||
+            String(t.url || '').indexOf('/c/' + conversationId) !== -1;
+          if (t.status === 'complete' && onConversation) return resolve(true);
+          if (Date.now() - startedAt >= budget) return resolve(false);
+          setTimeout(poll, 300);
+        });
+      }
+      poll();
+    });
+  }
+
   async function attemptConversation(conv) {
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: function(href) { window.location.href = href; },
       args: [conv.href],
+    });
+
+    // The navigation replaces the document, taking the content script with it.
+    var navigated = await waitForTabNavigation(tab.id, conv.id, 30000);
+    if (!navigated) return { ok: false, error: 'did not load' };
+    // Re-inject into the NEW document; the helpers below live in content.js.
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['content.js'],
     });
 
     var readyResult = await chrome.scripting.executeScript({

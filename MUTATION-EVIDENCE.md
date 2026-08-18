@@ -1321,6 +1321,8 @@ untested branch and closed by deleting one of the two.
 ### Privacy gate, again
 
 The repository's own gate rejected the first version of the wiring test: it
-embedded `https://chatgpt.com/c/conv-77`, matching the pattern for a real
-conversation URL. Scrubbed to a bare origin. Second time this task that a
-project gate caught the change rather than a reviewer.
+embedded a full conversation URL (origin plus the `/c/<id>` path), matching the
+pattern the gate reserves for real conversation links. Scrubbed to a bare origin.
+Second time this task that a project gate caught the change rather than a
+reviewer — and this note itself tripped the same gate on its first draft, for
+quoting the offending URL verbatim while describing it.

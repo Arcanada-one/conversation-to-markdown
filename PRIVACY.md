@@ -18,6 +18,10 @@ If you tick **Save .md + files to chatgpt-export/** before pressing the button, 
 
 In this mode the extension requests each file directly from that host, converts the bytes in memory, and hands the result to the browser's own download mechanism. The requests go only to the host already serving the conversation you are reading, carry no identifiers added by the extension, and reach no developer-operated endpoint. Nothing is uploaded anywhere.
 
+Files that ChatGPT **generates** for you — a PDF or Word document it produced during the conversation — are not links in the page at all, so saving them needs one additional step in this same mode: the extension asks ChatGPT for the conversation's own file list, exactly as the page does when you click a file yourself, and then requests the file. This uses the session you are already signed in with; the extension does not read, store, or transmit your credentials or session token, and the request goes to `chatgpt.com` and nowhere else.
+
+This lookup happens **only** when the save checkbox is ticked. A plain **Copy as Markdown** reads the page and nothing more — it makes no network request of any kind, and that is enforced by a test in the repository, not only by this document.
+
 ## Exporting a whole Project
 
 If you tick the batch option on a ChatGPT Project page, the extension reads the conversation list from the page's sidebar and exports each conversation in turn. Because that list is virtualized, it first scrolls the sidebar to the end so every row renders, then restores your scroll position; the rows' on-screen positions are measured to confirm the whole list was seen. Those measurements stay in the page and are discarded when the run ends. It does this by **navigating the tab you are looking at** through those conversations one at a time, and returns control to you when the run ends. This is a change from single-conversation export, where only the page already open is read. The run can be paused, resumed and cancelled; cancelling keeps whatever already landed.

@@ -2024,7 +2024,12 @@ function slugifyTitle(title, maxLength) {
 }
 
 /** Called by popup via chrome.scripting.executeScript — returns text, does NOT write clipboard. */
-async function getConversationMarkdown() {
+async function getConversationMarkdown(settings) {
+  // Retrieving generated artefacts requires calling ChatGPT's own conversation
+  // API. PRIVACY.md states that saving files is the ONLY mode in which the
+  // extension makes network requests, so that lookup is opt-in and off by
+  // default: a plain "copy as Markdown" stays a pure DOM read.
+  const wantFiles = !!(settings && settings.downloadFiles);
   try {
     const firstSection = document.querySelector('[data-turn-id]');
     let md;
@@ -2060,7 +2065,7 @@ async function getConversationMarkdown() {
     // tree with no href and no testid, so the per-turn scan above cannot see
     // them. Appending them here puts them in the markdown, which is where the
     // popup's downloader looks for artefacts.
-    md = await appendPanelArtifacts(md, {});
+    if (wantFiles) md = await appendPanelArtifacts(md, {});
     const title = extractConversationTitle();
     if (title) md = '# ' + title + '\n\n' + md;
     return {

@@ -2048,7 +2048,7 @@ test('the capture path itself appends panel artefacts', async () => {
   };
 
   try {
-    const result = await parser.getConversationMarkdown();
+    const result = await parser.getConversationMarkdown({ downloadFiles: true });
     assert.equal(result.ok, true, 'capture failed: ' + result.error);
     assert.ok(result.md.indexOf('## Files') !== -1,
       'the shipped capture path must include panel artefacts');
@@ -2056,6 +2056,58 @@ test('the capture path itself appends panel artefacts', async () => {
       result.md.indexOf('[report.pdf](https://chatgpt.com/backend-api/estuary/content') !== -1,
       'the artefact must be a markdown link the popup can parse'
     );
+  } finally {
+    global.document = previousDocument;
+    global.getComputedStyle = previousStyle;
+    global.location = previousLocation;
+    if (previousFetch === undefined) delete global.fetch; else global.fetch = previousFetch;
+  }
+});
+
+test('a plain copy makes no network request at all', async () => {
+  // PRIVACY.md states that saving files is the ONLY mode in which the extension
+  // makes network requests. Retrieving generated artefacts needs the conversation
+  // API, so that lookup must stay behind the save option — otherwise a plain
+  // "Copy as Markdown" silently starts calling out and the shipped privacy
+  // promise becomes false.
+  const turn = userTurn('user-1', 1, 'Make me a PDF');
+  const panelButtons = [
+    { getAttribute: (n) => (n === 'aria-label' ? 'report.pdf' : null) },
+  ];
+  const container = createVirtualizedFixture([[turn]], 0);
+  container.overflowY = 'auto';
+  turn.parentElement = container;
+
+  const previousDocument = global.document;
+  const previousStyle = global.getComputedStyle;
+  const previousLocation = global.location;
+  const previousFetch = global.fetch;
+
+  const requests = [];
+  global.document = {
+    title: 'ChatGPT',
+    querySelector: (sel) => (sel === '[data-turn-id]' ? turn : null),
+    querySelectorAll(sel) {
+      if (/open-file|artifact-row/.test(sel)) return panelButtons;
+      if (sel === '[data-message-id]') {
+        return [{ getAttribute: (n) => (n === 'data-message-id' ? 'msg-1' : null) }];
+      }
+      return container.querySelectorAll('[data-turn-id]');
+    },
+  };
+  global.getComputedStyle = (node) => ({ overflowY: node.overflowY || 'visible' });
+  global.location = { pathname: '/c/conv-77', href: 'https://chatgpt.com/' };
+  global.fetch = async (url) => {
+    requests.push(String(url));
+    return { ok: false, status: 500, json: async () => ({}) };
+  };
+
+  try {
+    const result = await parser.getConversationMarkdown();
+    assert.equal(result.ok, true);
+    assert.deepEqual(requests, [], 'a plain copy must not touch the network');
+    assert.ok(result.md.indexOf('## Files') === -1,
+      'no Files section is added when file saving was not requested');
   } finally {
     global.document = previousDocument;
     global.getComputedStyle = previousStyle;

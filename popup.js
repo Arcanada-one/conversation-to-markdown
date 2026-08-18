@@ -791,7 +791,8 @@ async function runBatchExport(tab, options) {
     try {
       results = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
-        func: async function() { return getConversationMarkdown(); },
+        func: async function(wantFiles) { return getConversationMarkdown({ downloadFiles: wantFiles }); },
+        args: [!!downloadImages],
       });
     } finally {
       stopProgressPolling();
@@ -1100,7 +1101,8 @@ btn.addEventListener('click', async () => {
 
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: async () => getConversationMarkdown(),
+      func: async (wantFiles) => getConversationMarkdown({ downloadFiles: wantFiles }),
+      args: [!!downloadImages],
     });
 
     stopProgressPolling();

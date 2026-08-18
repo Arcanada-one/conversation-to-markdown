@@ -19,6 +19,7 @@ icons/icon16.png
 icons/icon32.png
 icons/icon48.png
 manifest.json
+package-extension.sh
 package.json
 popup.html
 popup.js

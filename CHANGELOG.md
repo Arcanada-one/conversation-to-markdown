@@ -5,7 +5,68 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.2.0] — 2026-08-18
+## [1.3.0] — 2026-08-19
+
+Repairs three defects that lost a real export, and settles the popup's options
+into two that mean what they say.
+
+**1.2.0 was tagged but never published to the Web Store.** It contains the
+`data:` URL defect below, which fails the save path for exactly the long Russian
+conversations it was built for. 1.3.0 replaces it; users go from 1.1.8 to 1.3.0.
+
+### Fixed
+
+- **A long Russian conversation failed to save, silently.** The markdown was
+  written through a `data:` URL, and `encodeURIComponent` expands Cyrillic 4.99x
+  (`П` → `%D0%9F`). A 600-turn Russian export became a 4.17 MB URL against
+  Chrome's ~2 MB ceiling and was refused; the threshold falls near 300 turns in
+  Russian, and past 1,500 in English — which is why it was never seen in testing.
+  The markdown now goes through a blob, as the project archive already did.
+- **A refused write reported success.** `saveConversationExport` returned an
+  `mdOk` flag that no caller read, so a refusal produced "✓ Copied!" over an
+  empty folder. The status now leads with the refusal and names the browser's
+  own reason.
+- **A clipboard failure erased a successful save.** The clipboard was written
+  after the file and after the success message; `writeText` rejects with
+  "Document is not focused" whenever the popup has lost focus — routine during a
+  scan that runs for minutes — and the rejection replaced the success with a red
+  error over a file that was safely on disk. With the save option on, the
+  clipboard is no longer written at all.
+- **An attachment failure discarded the whole conversation.** The attachment
+  fetch runs before the markdown write and was unguarded, so a navigated tab
+  threw past the write and lost turns that had taken minutes to capture. The
+  fetch is now contained and its failure named in the status.
+- **A `var` shadowed the status element.** `var status` inside the click handler
+  hoisted over the module-level `status`, so the handler threw on its own first
+  line. Found by the existing tests, not by review.
+
+### Changed
+
+- **Every export is stamped with its date and time.** The stamp is no longer an
+  option: re-exporting always writes a new file, so the name should say when it
+  was taken. Skipping already-exported conversations moved entirely to the
+  export index, which compares message counts rather than filenames — a stamped
+  name can never match a rebuilt one.
+- **The "Re-export with date-time stamp" checkbox is gone.** It changed the
+  filename and nothing else, while reading as though re-exporting worked
+  differently when ticked. The extension has never been able to append to a file.
+- **Choosing a project batch turns file saving on and holds it there.** A batch
+  without it archives signed, short-lived links instead of files — an export that
+  looks complete the day it runs and is empty hours later. This was a warning
+  paragraph; it is now a constraint.
+- **The clipboard and the file are separate outcomes.** Save option on: the file
+  is the deliverable. Off: the clipboard is. `README.md` previously promised the
+  clipboard always receives what was written to disk; that promise is withdrawn.
+
+### Added
+
+- **Failures are recorded.** The extension shipped with zero `console` calls in
+  any of its three scripts, so a failure left nothing to investigate — "I have no
+  logs" was an accurate description of the code. Errors now carry their phase and
+  stack to the console and the last one is kept in `chrome.storage.local`, so it
+  outlives the popup that reported it.
+
+## [1.2.0] — 2026-08-18 (tagged, never published)
 
 The first release since 1.1.8. It collapses work that was developed as 1.2.0
 through 1.8.0 into a single published version, because those numbers never

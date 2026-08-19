@@ -310,7 +310,6 @@ test('the feature checklist covers every option the popup offers', () => {
   const features = read('FEATURES.md');
   const options = [
     ['chk-images', /All attachment types|Files are opt-in/],
-    ['chk-timestamp', /Optional timestamp/],
     ['chk-batch', /Whole-Project export/],
   ];
 
@@ -318,6 +317,18 @@ test('the feature checklist covers every option the popup offers', () => {
     assert.match(popupHtml, new RegExp('id="' + id + '"'), `popup.html must still offer ${id}`);
     assert.match(features, expected, `FEATURES.md must describe the ${id} option`);
   }
+
+  // The stamp is no longer an option, so the checklist must not describe one —
+  // otherwise the list grows stale in the direction nothing detects: an item that
+  // cannot be tested because the control it names does not exist.
+  assert.doesNotMatch(
+    popupHtml, /id="chk-timestamp"/,
+    'the timestamp checkbox was removed in 1.3.0; it changed only the filename',
+  );
+  assert.doesNotMatch(
+    features, /Optional timestamp/,
+    'FEATURES.md still lists the removed timestamp option',
+  );
 
   // Every section the checklist promises, so a wholesale rewrite cannot drop one.
   for (const heading of ['## Capture', '## Files and artifacts', '## Batch export',

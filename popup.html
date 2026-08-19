@@ -173,14 +173,12 @@
   <button id="btn-pause">Pause</button>
   <button id="btn-cancel">Stop scanning</button>
 
+  <!-- Two options, not three. "Re-export with a date-time stamp" was removed in
+       1.3.0: it changed the FILENAME and nothing else, which read as if it made
+       re-exporting work somehow differently. Every export is stamped now. -->
   <label class="toggle">
     <input type="checkbox" id="chk-images" />
     <span>Save .md + files to chatgpt-export/</span>
-  </label>
-
-  <label class="toggle">
-    <input type="checkbox" id="chk-timestamp" />
-    <span>Re-export with date-time stamp in filename</span>
   </label>
 
   <label class="toggle">
@@ -188,13 +186,7 @@
     <span>Export all sidebar conversations (project batch)</span>
   </label>
 
-  <p id="batch-warning" class="batch-warning">Keep this popup open until the batch finishes. Closing it cancels the run; restart to resume — conversations already saved to disk are skipped. Only conversations the sidebar lists can be exported, so scroll it to the end first.</p>
-
-  <!-- Shown when a batch is requested WITHOUT the save-files option. The links
-       ChatGPT serves for attachments are signed and short-lived, so an archive
-       that keeps them instead of the files is an archive that expires. The
-       caveat has to appear before the run, not in the summary afterwards. -->
-  <p id="links-warning" class="batch-warning">Attachment links in the saved Markdown expire within hours. Tick <strong>Save .md + files</strong> above to keep the files themselves.</p>
+  <p id="batch-warning" class="batch-warning">Keep this popup open until the batch finishes. Closing it cancels the run; restart to resume — conversations already exported are skipped. Only conversations the sidebar lists can be exported, so scroll it to the end first.</p>
 
   <div id="status"></div>
 

@@ -129,6 +129,24 @@ green locally a minute earlier.
 
 For any change that ADDS a file: stage first, then run the suite.
 
+## Test in the language the product fails in
+
+The defect that cost a user a 600-turn export was invisible to every test in the
+suite, because every fixture was English. `encodeURIComponent` leaves ASCII alone
+and expands Cyrillic 4.99x, so a Russian conversation crossed Chrome's URL ceiling
+near 300 turns while an English one of the same length saved fine past 1,500.
+
+The users of this extension export Russian conversations. A fixture that cannot
+reach the failing size is the "fixture cannot express the failure" trap wearing a
+different hat — and it stayed green for the whole life of the defect.
+
+## `var` inside a handler shadows the module scope
+
+`var status = ...` inside the click handler hoisted over the module-level
+`status` ELEMENT and made the handler throw on its own first line. Prefer a
+distinct name for locals in long handlers; the elements are module-level `const`
+and share the obvious nouns (`status`, `button`).
+
 ## Practical notes
 
 - No runtime or build dependencies; tests are `node:test` with hand-rolled

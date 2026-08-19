@@ -1524,3 +1524,43 @@ test was added and checked to go red on the old code **both with and without
   without the permission, so every access needs a guard rather than a try/catch.
 - **The conversation mapping is 4 661 057 bytes** for one thread, which is why
   the index stores five scalars and caches nothing.
+
+
+## Wave 8 — 1.3.0: the operator's lost export
+
+Six mutants, all killed. Each reverts one fix from this release. Restored from a
+backup copy between runs, exit code read from `npm test` itself.
+
+| # | Mutation | Result |
+|---|----------|--------|
+| M1 | `.md` written through a `data:` URL again | killed (3 tests) |
+| M2 | `saved.mdOk` ignored in the status | killed (1) |
+| M3 | clipboard written again on the save path | killed (1) |
+| M4 | attachment-fetch guard rethrows | killed (1) |
+| M5 | stamp back to being conditional | killed (3) |
+| M6 | batch no longer forces file saving | killed (2) |
+
+One mutant was discarded rather than counted: the first M4 attempt left the file
+syntactically invalid, so its 2 failures measured a parse error, not a guard.
+
+### The measurement that found M1
+
+`encodeURIComponent` expansion, Cyrillic conversation text:
+
+| turns | chars | `data:` URL | verdict |
+|-------|-------|-------------|---------|
+| 200 | 292,400 | 1.39 MB | under |
+| 300 | 438,600 | 2.09 MB | **over ~2 MB** |
+| 564 | 824,653 | 3.92 MB | over |
+| 600 | 877,290 | 4.17 MB | over |
+
+Expansion factor 4.99x. The same conversation in English stays under the ceiling
+past 1,500 turns, which is why 197 tests and a live 564-turn run all passed while
+the defect was shipping.
+
+### A defect the OLD tests found
+
+`var status` inside the click handler shadowed the module-level status element,
+so the handler threw on its own first line. Twelve pre-existing tests went red
+immediately. Worth recording because it is the reverse of this file's usual
+lesson: the suite caught what review did not.

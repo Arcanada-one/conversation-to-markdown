@@ -32,6 +32,12 @@ Four things waste an hour each time they are rediscovered:
 - A long fixed sleep after navigation is worse than polling: the page re-renders
   and the scan finds nothing to read.
 
+### Not shipped: 1.2.0
+
+1.2.0 was tagged and released on GitHub but **never published to the Web Store**.
+It carries the `data:` URL defect above, which fails the save path for any long
+Russian conversation — the case it was most needed for. 1.3.0 supersedes it.
+
 ### Last verified: 1.2.0, against chatgpt.com
 
     full export     32 964 lines, 564 turns, partial: false, 342s
@@ -124,10 +130,37 @@ saved page link.
 network request of any kind** — enforced by a test as well as by the privacy
 policy.
 
+**Save and copy are separate outcomes.** With the save option ticked the export
+goes to disk and the clipboard is left alone; without it the clipboard IS the
+delivery. Verify both. Until 1.3.0 the save path also wrote the clipboard, and a
+clipboard rejection — routine, since the popup loses focus during a long scan —
+replaced an already-displayed success with a red error over a file that was
+safely on disk.
+
+**A refused write is reported as a failure.** If the browser refuses to write the
+markdown, the run says so and names the reason instead of reporting success.
+Verify by exporting to a full disk or a refused path — before 1.3.0 the refusal
+flag was returned by the code and read by nothing, so "✓ Copied!" appeared over
+an empty folder.
+
+**A large Russian conversation saves.** The markdown is written through a blob,
+not a `data:` URL. Verify on a long Cyrillic conversation of 300+ turns:
+`encodeURIComponent` expands Cyrillic 4.99x, so a 600-turn Russian export
+produced a 4.17 MB URL against Chrome's ~2 MB ceiling and was refused, while
+every English conversation of the same length saved normally.
+
+**Attachments never cost the conversation.** A failure fetching files still
+writes the markdown, and names the failure. Verify by exporting with the tab
+navigating mid-run: the .md must land.
+
 ## Batch export (Projects)
 
 **Whole-Project export.** Every conversation in a Project exports in one run,
-each into its own folder, optionally bundled into one `.zip`.
+each into its own folder, optionally bundled into one `.zip`. Choosing a batch
+switches file saving on and holds it there: an archive built without it contains
+signed, short-lived LINKS rather than files, so it looks complete on the day it
+runs and is empty hours later. Verify the save option is ticked and disabled the
+moment the batch box is ticked, and released when it is unticked.
 
 **List completeness.** The virtualized sidebar is walked to the end and every row
 verified as observed with no gaps. An unconfirmed walk is reported as
@@ -156,15 +189,21 @@ re-running: that conversation must be re-exported, the rest skipped.
 
 **Unchanged conversations are skipped.** A conversation whose metadata matches
 what was recorded is skipped without being re-read. Verify the run reports them
-as unchanged.
+as unchanged. This decision reads the export INDEX, never a filename — with every
+export stamped, a rebuilt filename can never match, so a build that fell back to
+name matching would re-export the whole project on every run.
 
 **Grown conversations get a new dated copy.** A conversation that gained messages
 is written beside the earlier file under its own stamp; the old file is
 untouched, because a Chrome extension cannot append to a file. Verify by adding a
 message to an exported conversation and re-running: two files, both readable.
 
-**Optional timestamp.** The date-time stamp can be requested for every export,
-keeping previous versions alongside new ones.
+**Every export is stamped.** The filename always carries the date and time the
+export was taken, so a folder of backups is readable without opening the files
+and no export silently replaces another. Verify that a second run of the same
+project produces new dated files and leaves the earlier ones untouched. The
+separator is a DOUBLE hyphen: `slugifyTitle` turns spaces into single hyphens, so
+a single one would be indistinguishable from a word break in the title.
 
 **Archive budget.** The `.zip` stops accumulating at a memory budget and reports
 the files it left out. Verify a large project still produces a usable archive, or
@@ -194,7 +233,7 @@ match the CHANGELOG's top entry, and users must never see a gap. The last entry
 below is the version being shipped; a test checks this line against the CHANGELOG
 so a release cannot be added without revisiting this file.
 
-Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.2.0
+Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.3.0
 
 **Changelog coupling.** A version bump with no dated CHANGELOG entry fails the
 build, because releases 1.1.6 and 1.1.7 reached the store leaving no record of

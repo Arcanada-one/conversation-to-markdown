@@ -44,6 +44,8 @@ function createPopupHarness(runScan, options = {}) {
   let scriptCalls = 0;
   const downloads = [];
   const injected = [];
+  const blobs = [];
+  const blobUrls = new Map();
   // Stands in for the page's window.__c2mScan the scan loop reads.
   const pageScanState = { cancelled: false, captured: 0, observed: 0, elapsedMs: 0 };
   const button = {
@@ -189,7 +191,34 @@ function createPopupHarness(runScan, options = {}) {
     clearTimeout,
     setInterval,
     clearInterval,
-    URL,
+    // The .md is written through a blob URL, so its BYTES never appear in the
+    // download options. Capturing them here is what lets a test assert on the
+    // file the user ends up with rather than on the clipboard, which the save
+    // path deliberately no longer writes.
+    Blob: class {
+      constructor(parts, opts) {
+        this.parts = parts;
+        this.type = (opts && opts.type) || '';
+        blobs.push(this);
+      }
+    },
+    Uint8Array,
+    // The REAL URL class, extended — not replaced. popup.js also calls
+    // `new URL(href)` to derive attachment filenames from their links, so a
+    // stub object with only createObjectURL silently broke every downloaded
+    // name (b.jpg came out as image_002.png) while looking like an unrelated
+    // assertion failure.
+    URL: Object.assign(
+      class extends URL {},
+      {
+        createObjectURL: (blob) => {
+          const id = 'blob:c2m/' + blobs.indexOf(blob);
+          blobUrls.set(id, blob);
+          return id;
+        },
+        revokeObjectURL: (id) => { blobUrls.delete(id); },
+      },
+    ),
     encodeURIComponent,
     TextEncoder,
     btoa: (value) => Buffer.from(value, 'binary').toString('base64'),
@@ -212,6 +241,14 @@ function createPopupHarness(runScan, options = {}) {
     clickCancel: () => cancelHandler(),
     click: () => clickHandler(),
     clipboardValue: () => clipboardValue,
+    // What was actually WRITTEN for a download, decoded from its blob.
+    writtenText: (filenameSuffix) => {
+      const entry = downloads.find((d) => String(d.filename).endsWith(filenameSuffix));
+      if (!entry) return null;
+      const blob = blobUrls.get(entry.url) || blobs[Number(String(entry.url).split('/').pop())];
+      if (!blob) return null;
+      return Buffer.concat(blob.parts.map((part) => Buffer.from(part))).toString('utf8');
+    },
     scriptCalls: () => scriptCalls,
     downloads: () => downloads,
     batchCheckbox,
@@ -221,42 +258,35 @@ function createPopupHarness(runScan, options = {}) {
   };
 }
 
-test('the batch caveats appear when the option is ticked, not after the run starts', () => {
-  // Both warnings used to be revealed inside the click handler — after the user
-  // had already committed. A caveat that arrives then is a status message.
-  const harness = createPopupHarness(() => ({ ok: true, md: '#', slug: 's', lines: 1, words: 1 }), {});
-
-  assert.equal(harness.batchWarningVisible(), false, 'nothing to warn about before the option is chosen');
-  assert.equal(harness.linksWarningVisible(), false);
-
-  harness.batchCheckbox.checked = true;
-  harness.batchCheckbox.dispatchChange();
-
-  assert.equal(harness.batchWarningVisible(), true, 'the popup-must-stay-open caveat must show on ticking batch');
-  // Attachment links ChatGPT serves are signed and short-lived, so a project
-  // archive that keeps links instead of files is an archive that expires.
-  assert.equal(
-    harness.linksWarningVisible(),
-    true,
-    'a batch without the save-files option must warn that links expire'
-  );
-});
-
-test('the expiring-links caveat disappears once files are being saved', () => {
+test('ticking the batch forces file saving on, instead of warning about it', () => {
+  // There used to be two caveats here, one of which warned that a batch without
+  // file saving archives signed, short-lived LINKS rather than files — an export
+  // that looks complete on the day it runs and is empty hours later. A warning
+  // the user can read past is the wrong mechanism for a failure that destroys
+  // the archive's whole point, so the option is now set and held instead.
   const harness = createPopupHarness(
     () => ({ ok: true, md: '#', slug: 's', lines: 1, words: 1 }),
     { downloadImages: true },
   );
 
+  // Positive control: the state under test is genuinely reachable from "off".
+  harness.imagesCheckbox.checked = false;
+  harness.imagesCheckbox.disabled = false;
+  assert.equal(harness.batchWarningVisible(), false, 'nothing to warn about before the option is chosen');
+
   harness.batchCheckbox.checked = true;
   harness.batchCheckbox.dispatchChange();
 
-  assert.equal(harness.batchWarningVisible(), true);
-  assert.equal(
-    harness.linksWarningVisible(),
-    false,
-    'with files saved there are no expiring links to warn about'
-  );
+  assert.equal(harness.batchWarningVisible(), true, 'the popup-must-stay-open caveat must show on ticking batch');
+  assert.equal(harness.imagesCheckbox.checked, true, 'a batch must save the files it archives');
+  assert.equal(harness.imagesCheckbox.disabled, true, 'the option must not be switchable back off');
+
+  // Untick and the choice is handed back — the lock belongs to the batch, not
+  // to the session.
+  harness.batchCheckbox.checked = false;
+  harness.batchCheckbox.dispatchChange();
+  assert.equal(harness.imagesCheckbox.disabled, false, 'the option stayed locked after the batch was cancelled');
+  assert.equal(harness.batchWarningVisible(), false);
 });
 
 test('waits for asynchronous scanning before writing Markdown to the clipboard', async () => {
@@ -362,14 +392,26 @@ test('sets conflictAction explicitly so Chrome does not uniquify to (1).md', asy
   const mdDownload = harness.downloads().find((d) => d.filename.endsWith('.md'));
   assert.ok(mdDownload, 'must download the markdown file');
   assert.equal(mdDownload.conflictAction, 'overwrite');
-  assert.equal(mdDownload.filename, 'chatgpt-export/Title/Title.md');
+  // Stamped: every export records when it was taken. `overwrite` still matters —
+  // it is what stops Chrome appending "(1)" when a name does repeat, which it can
+  // within the same minute.
+  assert.match(
+    mdDownload.filename,
+    /^chatgpt-export\/Title\/Title--\d{8}-\d{4}\.md$/,
+    mdDownload.filename,
+  );
 });
 
-test('timestamp checkbox produces a stamped filename for re-export', async () => {
+test('the stamp is unconditional — there is no option that turns it off', async () => {
+  // There used to be a "Re-export with date-time stamp" checkbox. It changed the
+  // FILENAME and nothing else, which read as though re-exporting worked somehow
+  // differently when it was ticked — while the extension has never been able to
+  // append to a file at all. Removing it leaves one meaning: every export says
+  // when it was taken.
   const md = '# chat\n\nbody';
   const harness = createPopupHarness(async () => [{
     result: { ok: true, md, title: 'chat', slug: 'chat', lines: 2, words: 1 },
-  }], { downloadImages: true, useTimestamp: true, extracted: [] });
+  }], { downloadImages: true, extracted: [] });   // no useTimestamp passed at all
 
   await harness.click();
 
@@ -394,15 +436,22 @@ test('prefixes downloaded image names with the conversation slug', async () => {
   await harness.click();
 
   const paths = harness.downloads().map((d) => d.filename);
-  assert.deepEqual(paths, [
+  // Attachment names are asserted exactly; the .md carries an unconditional stamp,
+  // so it is matched by shape. The prefix — the thing this test is about — is
+  // still checked character for character.
+  assert.deepEqual(paths.slice(0, 2), [
     'chatgpt-export/Агент-Аркана/Агент-Аркана-image_001.png',
     'chatgpt-export/Агент-Аркана/Агент-Аркана-image_002.jpg',
-    'chatgpt-export/Агент-Аркана/Агент-Аркана.md',
   ]);
+  assert.match(paths[2], /^chatgpt-export\/Агент-Аркана\/Агент-Аркана--\d{8}-\d{4}\.md$/);
 
   // The saved Markdown must point at the same slug-prefixed local files.
-  assert.match(harness.clipboardValue(), /!\[first\]\(\.\/Агент-Аркана-image_001\.png\)/);
-  assert.match(harness.clipboardValue(), /!\[second\]\(\.\/Агент-Аркана-image_002\.jpg\)/);
+  // Asserted against the FILE, not the clipboard: with the save option on the
+  // clipboard is deliberately left alone, and the rewritten links are a property
+  // of the document the user keeps.
+  const written = harness.writtenText('.md');
+  assert.match(written, /!\[first\]\(\.\/Агент-Аркана-image_001\.png\)/);
+  assert.match(written, /!\[second\]\(\.\/Агент-Аркана-image_002\.jpg\)/);
 });
 
 test('falls back to unprefixed image names when the conversation has no title', async () => {
@@ -416,10 +465,9 @@ test('falls back to unprefixed image names when the conversation has no title', 
 
   await harness.click();
 
-  assert.deepEqual(harness.downloads().map((d) => d.filename), [
-    'chatgpt-export/image_001.png',
-    'chatgpt-export/conversation.md',
-  ]);
+  const untitled = harness.downloads().map((d) => d.filename);
+  assert.equal(untitled[0], 'chatgpt-export/image_001.png');
+  assert.match(untitled[1], /^chatgpt-export\/conversation--\d{8}-\d{4}\.md$/);
 });
 
 test('shows an execution failure and restores the button', async () => {
@@ -496,14 +544,22 @@ test('downloads non-image attachment files alongside images', async () => {
   await harness.click();
 
   const paths = harness.downloads().map((d) => d.filename);
-  assert.deepEqual(paths, [
+  assert.deepEqual(paths.slice(0, 2), [
     'chatgpt-export/Export/Export-image_001.png',
     'chatgpt-export/Export/Export-002-report.pdf',
-    'chatgpt-export/Export/Export.md',
   ]);
-  assert.match(harness.clipboardValue(), /!\[chart\]\(\.\/Export-image_001\.png\)/);
-  assert.match(harness.clipboardValue(), /\[report\.pdf\]\(\.\/Export-002-report\.pdf\)/);
-  assert.match(harness.status.textContent, /Files: 2\/2 downloaded/);
+  assert.match(paths[2], /^chatgpt-export\/Export\/Export--\d{8}-\d{4}\.md$/);
+  const exported = harness.writtenText('.md');
+  assert.match(exported, /!\[chart\]\(\.\/Export-image_001\.png\)/);
+  assert.match(exported, /\[report\.pdf\]\(\.\/Export-002-report\.pdf\)/);
+  // "Saved", not "Copied": with the save option on, the file is the deliverable
+  // and the clipboard is deliberately left untouched.
+  assert.match(harness.status.textContent, /✓ Saved/);
+  assert.match(harness.status.textContent, /2\/2 files/);
+  assert.equal(
+    harness.clipboardValue(), null,
+    'the clipboard was written even though the export went to disk',
+  );
 });
 
 test('batch mode reports per-conversation progress and writes a zip archive', async () => {

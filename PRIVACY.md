@@ -2,7 +2,7 @@
 
 Conversation to Markdown processes conversation content locally in your browser.
 
-The extension's content script is present only on the two sites declared in the manifest: `https://chatgpt.com/*` and `https://chat.openai.com/*`. It begins extraction only after you press **Copy as Markdown** in the extension popup. During extraction, it reads the conversation DOM, temporarily scrolls the page so virtualized content can render, creates Markdown in memory, restores the starting scroll position, and writes the finished result to your clipboard.
+The extension's content script is present only on the two sites declared in the manifest: `https://chatgpt.com/*` and `https://chat.openai.com/*`. It begins extraction only after you press **Copy as Markdown** in the extension popup. During extraction, it reads the conversation DOM, temporarily scrolls the page so virtualized content can render, creates Markdown in memory, restores the starting scroll position, and delivers the finished result. Where it goes depends on the save option: ticked, it is written to a file in your Downloads folder and the clipboard is left alone; unticked, it is written to your clipboard and no file is created.
 
 Copying a conversation uses two permissions:
 
@@ -46,7 +46,13 @@ For each conversation you have exported, the index stores five values and nothin
 
 It is stored in `chrome.storage.local`, which means it stays on this computer. The extension does not use `chrome.storage.sync`, so nothing about your conversations is copied to your Google account — also enforced by a test. The index never leaves your browser, is sent to no server, and the developer has no access to it.
 
-You can delete it at any time by removing the extension, which discards its storage with it. Deleting it costs you nothing but speed: the files on your disk remain the authoritative record, and a run with no index falls back to reading download history as before.
+You can delete it at any time by removing the extension, which discards its storage with it. Deleting it costs you nothing but time: the files already on your disk are untouched, and the next run simply exports everything again, writing new dated files beside the old ones.
+
+## The last error
+
+From version 1.3.0 the extension also records its most recent failure in the same local storage, so a failure that happens while the popup is closing leaves something to look at. It holds the error message, the stack, which phase of the run failed, and the time. It contains no conversation content and no message text, is overwritten by the next failure, and is discarded with the extension. It is never sent anywhere.
+
+This exists because earlier versions recorded nothing at all: a failure part-way through a long export left the user with a message that vanished with the popup and no way to find out what happened.
 
 ## The zip archive
 

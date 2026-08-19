@@ -3,29 +3,28 @@ const btnCancel = document.getElementById('btn-cancel');
 const btnPause = document.getElementById('btn-pause');
 const status = document.getElementById('status');
 const chkImages = document.getElementById('chk-images');
-const chkTimestamp = document.getElementById('chk-timestamp');
 const chkBatch = document.getElementById('chk-batch');
 const batchWarning = document.getElementById('batch-warning');
-const linksWarning = document.getElementById('links-warning');
 
-/** Show the caveats that should inform the choice, while it is still a choice.
+/** Keep the two options consistent, and show the caveat while it is still a choice.
  *
- *  Both were previously revealed inside the click handler, i.e. after the user
- *  had already committed to the run. A warning that arrives then is a status
- *  message, not a warning.
+ *  A batch WITHOUT file saving archives signed, short-lived links rather than the
+ *  files themselves: the export looks complete the day it runs and is empty a few
+ *  hours later. That used to be a paragraph of warning text the user could read
+ *  past — and a warning that can be ignored into data loss is the wrong mechanism.
+ *  Choosing a batch now switches saving on and holds it there, so the archive
+ *  cannot be built out of links that expire.
  *
- *  The links caveat matters most for a batch: attachment links ChatGPT serves are
- *  signed and short-lived, so a project archive that keeps the links instead of
- *  the files is an archive that expires. */
-function refreshOptionWarnings() {
+ *  Unchecking the batch hands the option back rather than leaving it stuck on. */
+function syncBatchOptions() {
   var batchOn = !!(chkBatch && chkBatch.checked);
-  var filesOn = !!(chkImages && chkImages.checked);
   if (batchWarning) batchWarning.classList.toggle('visible', batchOn);
-  if (linksWarning) linksWarning.classList.toggle('visible', batchOn && !filesOn);
+  if (!chkImages) return;
+  if (batchOn) chkImages.checked = true;
+  chkImages.disabled = batchOn;
 }
 
-if (chkBatch) chkBatch.addEventListener('change', refreshOptionWarnings);
-if (chkImages) chkImages.addEventListener('change', refreshOptionWarnings);
+if (chkBatch) chkBatch.addEventListener('change', syncBatchOptions);
 
 // Id of the tab currently being scanned, so Stop knows where to send the flag.
 var scanningTabId = null;
@@ -720,6 +719,12 @@ function addZipEntry(zipEntries, projectSlug, convSlug, filename, content) {
  *  reading the blob, and the caller would then revoke the URL mid-write. */
 var ZIP_WRITE_TIMEOUT_MS = 120000;
 
+/** The same budget for a single conversation's markdown, and for the same reason.
+ *  A long export is megabytes of text; `downloadOne`'s 12s default is sized for a
+ *  per-file attachment, and giving up early would revoke the blob URL while Chrome
+ *  was still reading it — writing a truncated .md that looks complete. */
+var MD_WRITE_TIMEOUT_MS = 120000;
+
 /** Wait until Chrome has finished writing a download, so a blob URL backing it
  *  is not revoked out from under a write still in progress.
  *
@@ -844,16 +849,29 @@ async function saveConversationExport(tabId, result, options) {
     var extracted = [];
     if (refs.length > 0) {
       var urls = refs.map(function(r) { return r.url; });
-      var extractResult = await chrome.scripting.executeScript({
-        target: { tabId: tabId },
-        func: async function(urls) {
-          if (typeof fetchImageDataUrls === 'function') return await fetchImageDataUrls(urls);
-          if (typeof extractImageDataUrls === 'function') return await extractImageDataUrls(urls);
-          return urls.map(function() { return null; });
-        },
-        args: [urls],
-      });
-      extracted = extractResult?.[0]?.result || [];
+      // Guarded because this runs BEFORE the .md write, and its failure used to
+      // take the conversation with it: a navigated tab, a content script that
+      // went away, or an oversized payload threw straight past the write, so a
+      // scan that had already spent minutes capturing several hundred turns
+      // produced no file at all. The turns are the expensive, unrepeatable part;
+      // attachments are cheap and can be fetched again by re-running.
+      try {
+        var extractResult = await chrome.scripting.executeScript({
+          target: { tabId: tabId },
+          func: async function(urls) {
+            if (typeof fetchImageDataUrls === 'function') return await fetchImageDataUrls(urls);
+            if (typeof extractImageDataUrls === 'function') return await extractImageDataUrls(urls);
+            return urls.map(function() { return null; });
+          },
+          args: [urls],
+        });
+        extracted = extractResult?.[0]?.result || [];
+      } catch (fetchErr) {
+        // Named, not swallowed: the .md then keeps the original links, and those
+        // expire. An export that looks complete today and is empty next month is
+        // the failure this message exists to prevent.
+        dlErrors.push('attachments unavailable (' + ((fetchErr && fetchErr.message) || fetchErr) + ')');
+      }
     }
 
     mdFinal = md;
@@ -883,11 +901,43 @@ async function saveConversationExport(tabId, result, options) {
   // a full disk, a user-cancelled prompt), so the outcome is returned rather than
   // discarded: a caller that counts a refused write as a saved conversation
   // reports success for an empty folder.
+  //
+  // Written through a BLOB, never a `data:` URL. `encodeURIComponent` leaves ASCII
+  // alone but expands every Cyrillic character to six bytes (`П` -> `%D0%9F`), so a
+  // Russian conversation inflates 4.99x on the way into the URL. Measured on the
+  // export that exposed this: 877,000 characters became a 4.17 MB URL against
+  // Chrome's ~2 MB ceiling, and the write was refused — silently, because the
+  // caller did not read mdOk either. The threshold lands near 300 turns in Russian
+  // and past 1,500 in English, which is why every English test stayed green.
+  // bytesToDownloadUrl already existed for the zip; the .md is the larger payload.
+  var mdHandle = bytesToDownloadUrl(textToUtf8Bytes(mdFinal), 'text/markdown;charset=utf-8');
   var mdWrite = await downloadOne(
-    'data:text/markdown;charset=utf-8,' + encodeURIComponent(mdFinal),
+    mdHandle.url,
     mdName,
-    folderPath + '/' + mdName
+    folderPath + '/' + mdName,
+    MD_WRITE_TIMEOUT_MS
   );
+  // Chrome accepted the download; the bytes are still being written. Revoking the
+  // blob URL now truncates the file — the same trap the zip path documents.
+  //
+  // Only when completion is OBSERVABLE. `waitForDownloadComplete` answers false
+  // both for "the write was interrupted" and for "there is no onChanged to listen
+  // to", and those must not be treated alike here: Chrome accepted the download,
+  // so reporting "nothing was written — run it again" on the strength of a missing
+  // API is a false alarm over a file that is on disk. A false warning costs the
+  // user their trust in a good export, which is a real cost in the other
+  // direction. The zip resolves this the opposite way on purpose — an archive is
+  // a convenience, and an unverified one is better left unclaimed.
+  var canObserveCompletion = typeof chrome !== 'undefined' &&
+    chrome.downloads && chrome.downloads.onChanged;
+  if (mdWrite.ok && canObserveCompletion) {
+    var mdWritten = await waitForDownloadComplete(mdWrite.downloadId, MD_WRITE_TIMEOUT_MS);
+    if (!mdWritten) {
+      mdWrite.ok = false;
+      mdWrite.error = mdWrite.error || 'the write did not complete';
+    }
+  }
+  mdHandle.revoke(mdHandle.url);
   if (zipEntries) addZipEntry(zipEntries, projectSlug, convSlug, mdName, mdFinal);
 
   return {
@@ -899,6 +949,84 @@ async function saveConversationExport(tabId, result, options) {
     mdName: mdName,
     mdOk: mdWrite.ok,
     mdError: mdWrite.error || null,
+  };
+}
+
+/** Where the last failure is kept so it outlives the popup. */
+var LAST_ERROR_KEY = 'c2mLastError';
+
+/** Report a failure so it can be investigated afterwards.
+ *
+ *  The operator hit a failure on a ~600-turn conversation and had nothing to look
+ *  at: this product shipped with ZERO console calls in any of its three scripts,
+ *  and the only channel was `err.message` in a popup element that dies with the
+ *  popup. "I have no logs" was an accurate description of the code.
+ *
+ *  Three channels, because each fails differently. The status element is the one
+ *  the user reads and the one that disappears. The console survives as long as
+ *  DevTools is attached and carries the STACK, which the status never showed.
+ *  chrome.storage survives the popup closing entirely, which is the case that
+ *  left the operator with nothing. */
+function reportFailure(phase, err, extra) {
+  var message = (err && err.message) || String(err) || 'unknown error';
+  showStatus('error', message);
+
+  var detail = Object.assign({
+    phase: phase,
+    message: message,
+    stack: (err && err.stack) || null,
+    at: new Date().toISOString(),
+  }, extra || {});
+
+  // eslint-disable-next-line no-console
+  if (typeof console !== 'undefined' && console.error) {
+    console.error('[conversation-to-markdown] ' + phase + ' failed:', detail, err);
+  }
+
+  // Best effort by design: a failure to record a failure must not replace it.
+  try {
+    var area = storageArea();
+    if (area) area.set({ [LAST_ERROR_KEY]: detail }, function() { void chrome.runtime.lastError; });
+  } catch (_e) { /* the report is a courtesy; the error above is the message */ }
+}
+
+/** The status line for a save-to-disk export: what landed, what did not, and why.
+ *
+ *  Extracted from the click handler so it can be tested. It was inline, and the
+ *  consequence was not cosmetic: `saved.mdOk` went unread for the whole life of
+ *  the feature, so Chrome refusing the .md write produced "✓ Copied!" over an
+ *  empty folder. The helper had always returned the flag; nothing consumed it.
+ *
+ *  Returns {type, text} rather than calling showStatus, so a test can read the
+ *  words the user gets instead of asserting that a function was called. */
+function buildSaveStatus(parts) {
+  var saved = parts.saved || {};
+  var refs = parts.refs || [];
+  var counts = parts.lines + ' lines · ' + parts.words + ' words';
+
+  // THE FILE IS THE EXPORT. Its refusal is the headline, above any attachment
+  // count: a run that saved nine images and no conversation saved nothing.
+  if (!saved.mdOk) {
+    return {
+      type: 'error',
+      text: 'Not saved: ' + (saved.mdError || 'the browser refused the write') + '\n' +
+        (refs.length > 0 ? saved.dlOk + '/' + refs.length + ' files were fetched. ' : '') +
+        'Nothing was written for this conversation — run it again.',
+    };
+  }
+
+  var head = '✓ Saved' + parts.partialSuffix + ' ' + counts + '\n' + saved.mdName;
+  if (refs.length === 0) return { type: 'success', text: head };
+  if (saved.dlOk > 0) {
+    return { type: 'success', text: head + ' + ' + saved.dlOk + '/' + refs.length + ' files' };
+  }
+  // Files were referenced and none arrived. Said plainly, because the .md then
+  // holds URLs that expire: the export looks complete today and is empty later.
+  var reason = (saved.dlErrors && saved.dlErrors.length > 0) ? ' (' + saved.dlErrors[0] + ')' : '';
+  return {
+    type: 'success',
+    text: head + '\n0/' + refs.length + ' files fetched' + reason +
+      ' — the .md keeps their original links, which expire.',
   };
 }
 
@@ -1176,7 +1304,18 @@ async function runBatchExport(tab, options) {
     // Chrome cannot append to a file and overwriting would destroy the earlier
     // export, so the new copy must carry a name of its own. This is the whole
     // reason the stamp exists; it is not a user preference in this case.
-    var stampThis = useTimestamp || grewThisRound;
+    // ALWAYS stamped. Every export records the moment it was taken, so a folder of
+    // backups is readable at a glance and no file silently replaces another.
+    //
+    // This is only safe because the skip decision moved to the export index. A
+    // stamped name is unique by construction, so rebuilding it to look for it in
+    // the download history can never match — a stamp-always build that still
+    // relied on filename matching would re-export the whole project every run.
+    // `filterPendingConversations` remains as the fallback for the case where the
+    // index is unavailable, where it still recognises unstamped legacy exports.
+    var stampThis = true;
+    void useTimestamp;
+    void grewThisRound;
     if (downloadImages) {
       var saved = await saveConversationExport(tab.id, result, {
         downloadImages: true,
@@ -1354,7 +1493,7 @@ btn.addEventListener('click', async () => {
   btnCancel.textContent = batchMode ? 'Stop export' : 'Stop scanning';
   status.className = '';
   status.textContent = '';
-  refreshOptionWarnings();
+  syncBatchOptions();
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -1364,7 +1503,8 @@ btn.addEventListener('click', async () => {
       return;
     }
 
-    const useTimestamp = chkTimestamp && chkTimestamp.checked;
+    // Every export is stamped. The stamp is part of what a backup file IS — the
+    // moment it was taken — not an option, so there is nothing here to read.
     const downloadImages = chkImages && chkImages.checked;
 
     if (batchMode) {
@@ -1382,12 +1522,13 @@ btn.addEventListener('click', async () => {
         },
       });
       var projectSlug = projectInfo?.[0]?.result?.slug || 'project-batch';
-      var batchStamp = useTimestamp ? formatExportTimestamp() : null;
+      // One stamp for the whole run, so every file from a single batch carries the
+      // same moment rather than drifting minute by minute as the run progresses.
+      var batchStamp = formatExportTimestamp();
       scanningTabId = tab.id;
 
       var batchResult = await runBatchExport(tab, {
         downloadImages: downloadImages,
-        useTimestamp: useTimestamp,
         projectSlug: projectSlug,
         batchStamp: batchStamp,
         buildZip: true,
@@ -1473,45 +1614,43 @@ btn.addEventListener('click', async () => {
     let md = result.md;
     // Conversation title drives both the .md filename and its export folder.
     const slug = result.slug || null;
-    const mdName = buildMdFilename(slug, useTimestamp);
+    const mdName = buildMdFilename(slug, true);
     const partialSuffix = result.partial ? ' (partial export)' : '';
 
     if (downloadImages && typeof chrome.downloads !== 'undefined') {
       var saved = await saveConversationExport(tab.id, result, {
         downloadImages: true,
-        useTimestamp: useTimestamp,
+        useTimestamp: true,
         projectSlug: null,
         zipEntries: null,
       });
-      var mdFinal = saved.mdFinal;
-      var refs = parseArtifactRefs(md);
-      var dlOk = saved.dlOk;
-      var dlErrors = saved.dlErrors || [];
+      // NOT named `status`: that is the module-level status ELEMENT, and a `var`
+      // of the same name hoists to the top of this handler and shadows it for the
+      // whole function — including `status.className = ''` at its very first line,
+      // which then throws on undefined before the run even starts.
+      var saveStatus = buildSaveStatus({
+        saved: saved,
+        refs: parseArtifactRefs(md),
+        lines: result.lines,
+        words: result.words,
+        partialSuffix: partialSuffix,
+      });
+      showStatus(saveStatus.type, saveStatus.text);
 
-      if (dlOk > 0) {
-        showStatus('success',
-          '✓ Copied!' + partialSuffix + ' ' + result.lines + ' lines · ' + result.words + ' words\n' +
-          'Files: ' + dlOk + '/' + refs.length + ' downloaded + ' + mdName
-        );
-      } else if (refs.length > 0) {
-        var hint = dlErrors.length > 0 ? ' (' + dlErrors[0] + ')' : '';
-        showStatus('success',
-          '✓ Copied!' + partialSuffix + ' ' + result.lines + ' lines · ' + result.words + ' words\n' +
-          'Files: 0/' + refs.length + ' fetched' + hint + ' — original URLs kept in .md'
-        );
-      } else {
-        showStatus('success',
-          '✓ Copied!' + partialSuffix + ' ' + result.lines + ' lines · ' + result.words + ' words\n' +
-          mdName + ' saved'
-        );
-      }
-
-      await navigator.clipboard.writeText(mdFinal);
+      // NOT copied to the clipboard. With the save option on, the file is the
+      // deliverable and the clipboard is a second copy nobody asked for — and it
+      // used to be the run's most dangerous step: `writeText` rejects with
+      // "Document is not focused" the moment the popup loses focus, which a
+      // multi-minute scan invites, and the rejection landed in the catch below
+      // and REPLACED an already-displayed success with a red error. The file was
+      // on disk the whole time.
       btn.disabled = false;
       btn.textContent = 'Copy as Markdown';
       return;
     }
 
+    // No save option: the clipboard IS the delivery, so its failure is the run's
+    // failure and belongs in the catch.
     await navigator.clipboard.writeText(md);
 
     showStatus(
@@ -1519,7 +1658,7 @@ btn.addEventListener('click', async () => {
       '✓ Copied!' + partialSuffix + ' ' + result.lines + ' lines · ' + result.words + ' words'
     );
   } catch (err) {
-    showStatus('error', err.message || String(err));
+    reportFailure('single export', err);
   } finally {
     stopProgressPolling();
     scanningTabId = null;
@@ -1552,6 +1691,12 @@ if (typeof module !== 'undefined' && module.exports) {
     stampsInPaths: stampsInPaths,
     conversationFolderPath: conversationFolderPath,
     downloadOne: downloadOne,
+    saveConversationExport: saveConversationExport,
+    buildSaveStatus: buildSaveStatus,
+    syncBatchOptions: syncBatchOptions,
+    reportFailure: reportFailure,
+    LAST_ERROR_KEY: LAST_ERROR_KEY,
+    MD_WRITE_TIMEOUT_MS: MD_WRITE_TIMEOUT_MS,
     filterPendingConversations: filterPendingConversations,
     classifyBatchFailure: classifyBatchFailure,
     backoffDelayMs: backoffDelayMs,

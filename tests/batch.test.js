@@ -1270,11 +1270,12 @@ test('WIRING: the batch itself skips unchanged conversations and stamps grown on
   const grewFiles = wrote('grew');
   assert.equal(grewFiles.length, 1, 'md written: ' + JSON.stringify(md));
   assert.match(grewFiles[0], /grew--20260818-1830~c-grew\.md$/);
-  // A conversation the index never saw is exported plainly — no stamp, because
-  // there is no earlier file to preserve.
+  // A conversation the index never saw is stamped too. Every export records when
+  // it was taken; the stamp stopped being a signal about growth and became part
+  // of what a backup file is.
   const freshFiles = wrote('fresh');
   assert.equal(freshFiles.length, 1);
-  assert.match(freshFiles[0], /fresh~c-fresh\.md$/);
+  assert.match(freshFiles[0], /fresh--20260818-1830~c-fresh\.md$/);
 
   // And the index now records what this run did, so the NEXT run can skip it.
   const after = await seeder.readExportIndex();
@@ -1330,8 +1331,16 @@ test('WIRING: no storage permission leaves the batch exactly as it was', async (
   assert.equal(res.exported, 2);
   const md = attempted.filter((n) => n.endsWith('.md'));
   assert.equal(md.length, 2);
-  // No stamps: without an index nothing is known to have grown.
-  for (const name of md) assert.doesNotMatch(name, /--20260818-1830/);
+  // Still stamped. The stamp is a property of the file — when it was taken — not
+  // a signal about growth, so it does not depend on the index being readable.
+  //
+  // The cost is real and accepted: with no index AND a stamped name, nothing can
+  // recognise an earlier export, so a re-run writes every conversation again
+  // beside the old ones. `storage` is a required manifest permission that Chrome
+  // grants at install and the user cannot revoke, so this is the shape of a
+  // cleared or corrupted index rather than an ordinary run. It errs towards
+  // exporting, which is the direction that cannot lose a conversation.
+  for (const name of md) assert.match(name, /--20260818-1830/);
 });
 
 test('the zip stops accumulating at a byte budget instead of running out of memory', async () => {
@@ -1435,4 +1444,269 @@ test('the base64 fallback encodes in chunks, not one character at a time', () =>
     url.slice('data:application/zip;base64,'.length),
     Buffer.from(bytes).toString('base64'),
   );
+});
+
+/** Build a Cyrillic markdown body of roughly `turns` conversation turns.
+ *
+ *  Cyrillic on purpose. The defect this guards is invisible in Latin text:
+ *  `encodeURIComponent` leaves ASCII alone but expands every Cyrillic character
+ *  to six (`П` -> `%D0%9F`), so the same conversation crosses Chrome's URL
+ *  ceiling in Russian and stays under it in English. A fixture in English cannot
+ *  produce the failure at all. */
+function cyrillicMarkdown(turns) {
+  // 1462 chars per turn, measured on a real export: 824,653 chars / 564 turns.
+  const line = 'Это обычная строка русского текста в диалоге, с пунктуацией — и тире.\n';
+  const target = Math.round(1462 * turns);
+  let out = '';
+  while (out.length < target) out += line;
+  return out.slice(0, target);
+}
+
+test('a long Russian conversation is written through a blob, not a data: URL', async () => {
+  // THE DEFECT THE OPERATOR HIT. A ~600-turn Russian conversation failed to save
+  // with the files checkbox on. Measured: 877,000 chars of Cyrillic markdown
+  // expand 4.99x through encodeURIComponent to a 4.17 MB `data:` URL, against a
+  // Chrome ceiling of roughly 2 MB. The threshold falls near 300 turns in
+  // Russian — which is an ordinary conversation, not an extreme one.
+  //
+  // popup.js already carries the fix for exactly this problem and applies it
+  // only to the zip (see bytesToDownloadUrl's comment: "A `data:` URL cannot
+  // carry a project archive"). The single .md — the payload most likely to
+  // exceed the cap — was the one path still building a data: URL.
+  const requested = [];
+  const popupWithDownloads = loadPopupExportsWithChrome({
+    downloads: {
+      download(options, cb) {
+        requested.push(options);
+        cb(requested.length);
+      },
+      search(_q, cb) { cb([]); },
+      onChanged: {
+        addListener(fn) {
+          // Report completion so the caller may revoke the blob URL.
+          setTimeout(() => fn({ id: requested.length, state: { current: 'complete' } }), 0);
+        },
+        removeListener() {},
+      },
+    },
+    scripting: { executeScript: async () => [{ result: [] }] },
+  });
+
+  const md = cyrillicMarkdown(600);
+  const saved = await popupWithDownloads.saveConversationExport(1, {
+    md: md,
+    slug: 'Кадры-решают-всё',
+    partial: false,
+  }, { downloadImages: true, useTimestamp: true, projectSlug: null, zipEntries: null });
+
+  const mdRequest = requested.find((r) => /\.md$/.test(r.filename || ''));
+  assert.ok(mdRequest, 'the markdown was never handed to chrome.downloads');
+
+  // A data: URL for this payload is over the ceiling; the URL must be a handle.
+  assert.ok(
+    !/^data:/.test(mdRequest.url),
+    'the markdown was written as a data: URL, which Chrome refuses at this size',
+  );
+  assert.ok(
+    /^blob:/.test(mdRequest.url) || mdRequest.url.startsWith('blob'),
+    `expected a blob URL, got ${String(mdRequest.url).slice(0, 40)}`,
+  );
+
+  // Positive control: prove the fixture actually reaches the failing size, or
+  // the assertion above passes for a payload that was never at risk.
+  const wouldHaveBeen = 'data:text/markdown;charset=utf-8,' + encodeURIComponent(md);
+  assert.ok(
+    wouldHaveBeen.length > 2 * 1024 * 1024,
+    `fixture only reached ${wouldHaveBeen.length} bytes — below the ceiling it must exceed`,
+  );
+
+  assert.equal(saved.mdOk, true, 'the write was not reported as successful');
+});
+
+test('a refused markdown write is reported, never shown as a success', async () => {
+  // The second half of the operator's failure. Chrome refused the .md write, and
+  // saveConversationExport returned {mdOk: false} — which NOTHING read. The popup
+  // showed "✓ Copied!" over an empty folder. A backup tool that says "saved" for a
+  // file that does not exist is worse than one that fails loudly.
+  // `lastError` is set immediately before the callback and cleared right after,
+  // which is how Chrome actually presents it: readable only inside the callback.
+  const runtime = { lastError: null };
+  const popupRefusing = loadPopupExportsWithChrome({
+    runtime: runtime,
+    downloads: {
+      download(_options, cb) {
+        runtime.lastError = { message: 'Invalid filename' };
+        cb(undefined);
+        runtime.lastError = null;
+      },
+      search(_q, cb) { cb([]); },
+      onChanged: { addListener() {}, removeListener() {} },
+    },
+    scripting: { executeScript: async () => [{ result: [] }] },
+  });
+
+  const saved = await popupRefusing.saveConversationExport(1, {
+    md: '# Диалог\n\nТекст.',
+    slug: 'диалог',
+    partial: false,
+  }, { downloadImages: true, useTimestamp: true, projectSlug: null, zipEntries: null });
+
+  assert.equal(saved.mdOk, false, 'a refused write must not report success');
+  assert.ok(saved.mdError, 'the refusal must carry a reason the user can act on');
+
+  // The helper was never the defect — it returned mdOk all along and NOBODY read
+  // it. Asserting the return value alone would have passed against the broken
+  // build, which is this repository's recurring failure shape ("the helper is
+  // tested, its use is not"). So assert on the STATUS TEXT the user sees, built
+  // by the same function the popup calls.
+  const message = popupRefusing.buildSaveStatus({
+    saved: saved, refs: [], lines: 120, words: 900, partialSuffix: '',
+  });
+  assert.equal(message.type, 'error', 'a refused write must not be styled as success');
+  assert.ok(
+    !/Copied|✓/.test(message.text),
+    `status claimed success for a refused write: ${message.text}`,
+  );
+  assert.ok(
+    /Invalid filename/.test(message.text),
+    `status hid the reason Chrome gave: ${message.text}`,
+  );
+});
+
+test('a failure fetching attachments still writes the conversation', async () => {
+  // The attachment fetch runs BEFORE the .md write and was unguarded, so a tab
+  // that navigated, a content script that vanished, or an oversized payload threw
+  // straight past the write — discarding a conversation that had already been
+  // captured in full. Turns are expensive (minutes of scrolling); attachments are
+  // cheap and retryable. The markdown must never be hostage to them.
+  const requested = [];
+  const popupBrokenFetch = loadPopupExportsWithChrome({
+    downloads: {
+      download(options, cb) { requested.push(options); cb(requested.length); },
+      search(_q, cb) { cb([]); },
+      onChanged: {
+        addListener(fn) {
+          setTimeout(() => fn({ id: requested.length, state: { current: 'complete' } }), 0);
+        },
+        removeListener() {},
+      },
+    },
+    scripting: {
+      executeScript: async () => { throw new Error('Frame with ID 0 was removed.'); },
+    },
+  });
+
+  const md = '# Диалог\n\n![схема](https://files.example/a.png)\n\nТекст беседы.';
+  const saved = await popupBrokenFetch.saveConversationExport(1, {
+    md: md, slug: 'диалог', partial: false,
+  }, { downloadImages: true, useTimestamp: true, projectSlug: null, zipEntries: null });
+
+  assert.equal(saved.mdOk, true, 'the conversation was lost to an attachment failure');
+  assert.ok(
+    requested.some((r) => /\.md$/.test(r.filename || '')),
+    'no markdown reached chrome.downloads',
+  );
+  // The user is told, rather than left to discover expired links later.
+  assert.ok(
+    (saved.dlErrors || []).length > 0,
+    'the attachment failure was swallowed without a word',
+  );
+});
+
+test('WIRING: every export is stamped, and a second run still skips what it saved', async () => {
+  // The operator's request: every backup carries the date it was taken, so a
+  // folder of exports is readable without opening the files.
+  //
+  // The risk it introduces is the reason this test drives the real entry point.
+  // Skipping used to work by rebuilding a conversation's expected FILENAME and
+  // looking for it in the download history. Once every name carries the minute it
+  // was written, a later run rebuilds a DIFFERENT name and matches nothing — so a
+  // naive "stamp always" re-exports the entire project on every run, silently
+  // turning a resumable backup into a full one. The index is what has to carry
+  // the skip decision instead, and this test fails if it does not.
+  const storage = fakeStorage();
+  const conversations = [
+    { id: 'c-same', slug: 'same', title: 'Unchanged', href: '/c/c-same' },
+    { id: 'c-fresh', slug: 'fresh', title: 'Never seen', href: '/c/c-fresh' },
+  ];
+
+  const seeder = loadPopupExportsWithChrome({
+    storage: { local: storage }, runtime: storage.__runtime,
+  });
+  await seeder.recordExportedConversation('c-same', {
+    updateTime: 100, currentNode: 'n-same', messageCount: 10, bytes: 500, files: 0,
+  });
+
+  const { res, attempted } = await runBatchAgainstFakeChrome(
+    conversations,
+    () => true,
+    // useTimestamp is NOT passed: the stamp is no longer an option to switch on.
+    { projectSlug: 'proj', batchStamp: '20260819-0130' },
+    {
+      storage: { local: storage },
+      liveMetadata: {
+        'c-same': { updateTime: 100, currentNode: 'n-same', messageCount: 10 },
+        'c-fresh': { updateTime: 300, currentNode: 'n-f', messageCount: 5 },
+      },
+    },
+  );
+
+  assert.equal(res.ok, true);
+  const md = attempted.filter((name) => name.endsWith('.md'));
+
+  // The unchanged conversation is still skipped — the point of the test.
+  assert.deepEqual(
+    md.filter((name) => name.indexOf('same~') !== -1 || name.indexOf('same--') !== -1),
+    [],
+    'stamping broke the skip: an unchanged conversation was re-exported',
+  );
+
+  // The new one lands WITH a stamp, where it previously landed without one.
+  const fresh = md.filter((name) => name.indexOf('fresh') !== -1);
+  assert.equal(fresh.length, 1, 'md written: ' + JSON.stringify(md));
+  assert.match(
+    fresh[0],
+    /fresh--20260819-0130~c-fresh\.md$/,
+    `a first-time export must carry its date: ${fresh[0]}`,
+  );
+});
+
+test('choosing a project batch turns file saving on and holds it there', async () => {
+  // A batch without file saving produces an archive of SIGNED, SHORT-LIVED links
+  // instead of files: it looks complete on the day it runs and is empty a few
+  // hours later. That was previously a yellow paragraph the user could read past.
+  // A caveat nobody can act on wrongly is better than a caveat nobody reads, so
+  // the batch now sets the option and disables it for the duration of the choice.
+  const images = { checked: false, disabled: false, listeners: {},
+    addEventListener(n, f) { this.listeners[n] = f; },
+    classList: { add() {}, remove() {}, toggle() {} } };
+  const batch = { checked: false, disabled: false, listeners: {},
+    addEventListener(n, f) { this.listeners[n] = f; },
+    classList: { add() {}, remove() {}, toggle() {} } };
+
+  const elements = { 'chk-images': images, 'chk-batch': batch };
+  const popupUi = loadPopupExportsWithChrome({}, {
+    document: {
+      getElementById: (id) => elements[id] || ({
+        addEventListener() {}, disabled: false, textContent: '', checked: false,
+        classList: { add() {}, remove() {}, toggle() {} },
+      }),
+    },
+  });
+  assert.equal(typeof popupUi.syncBatchOptions, 'function');
+
+  // Positive control: before the batch is chosen, saving is genuinely off and
+  // free to toggle — otherwise the assertions below prove nothing.
+  assert.equal(images.checked, false);
+  assert.equal(images.disabled, false);
+
+  batch.checked = true;
+  popupUi.syncBatchOptions();
+  assert.equal(images.checked, true, 'a batch must save the files it archives');
+  assert.equal(images.disabled, true, 'the option must not be switchable back off mid-choice');
+
+  // Turning the batch off returns control; it does not silently keep forcing it.
+  batch.checked = false;
+  popupUi.syncBatchOptions();
+  assert.equal(images.disabled, false, 'the option stayed locked after the batch was cancelled');
 });

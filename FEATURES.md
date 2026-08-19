@@ -32,6 +32,24 @@ Four things waste an hour each time they are rediscovered:
 - A long fixed sleep after navigation is worse than polling: the page re-renders
   and the scan finds nothing to read.
 
+### Last verified: 1.3.0, in Chrome
+
+Driven through the real click handler in a real Chrome, on the shipped package
+(not the working tree), with the operator's own failing case as the fixture:
+
+    save on   877,050 chars Cyrillic -> blob: URL, content byte-identical,
+              file Кадры-решают-всё--20260819-1156.md, status "✓ Saved",
+              clipboard NOT written
+    the ceiling that broke it: the same payload as a data: URL is 4.53 MB
+    refusal   Chrome refuses the .md -> red "Not saved: Invalid filename",
+              never a success message  (negative control)
+    save off  0 downloads, clipboard holds the full markdown, "✓ Copied!"
+    options   two checkboxes; ticking batch sets AND disables file saving,
+              unticking releases it
+
+Not verified in this pass: a whole-Project batch against the live site, and the
+skip on a second run. Both need a multi-hour run against chatgpt.com.
+
 ### Not shipped: 1.2.0
 
 1.2.0 was tagged and released on GitHub but **never published to the Web Store**.

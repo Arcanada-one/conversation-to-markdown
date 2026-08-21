@@ -54,10 +54,26 @@ out="$PWD/dist"
 mkdir -p "$out"
 zip_path="$out/conversation-to-markdown-v$version.zip"
 rm -f "$zip_path"
-# -X drops extra file attributes so the archive is reproducible across machines.
-( cd "$stage" && zip -rqX "$zip_path" "${files[@]}" -x '.*' -x '__MACOSX/*' )
+# Prefer Info-ZIP: `-X` drops extra file attributes so the archive is reproducible
+# across machines. Some release hosts have 7-Zip but not Info-ZIP, so keep a
+# second, explicit ZIP writer instead of making release packaging depend on one
+# host-specific binary. The input list is identical in both branches.
+if command -v zip >/dev/null 2>&1; then
+  ( cd "$stage" && zip -rqX "$zip_path" "${files[@]}" -x '.*' -x '__MACOSX/*' )
+elif command -v 7z >/dev/null 2>&1; then
+  ( cd "$stage" && 7z a -tzip -mx=9 "$zip_path" "${files[@]}" >/dev/null )
+else
+  echo "cannot build submission package: install zip or 7z" >&2
+  exit 1
+fi
 ( cd "$out" && shasum -a 256 "$(basename "$zip_path")" > "$(basename "$zip_path").sha256" )
 
 echo "built $zip_path"
-unzip -l "$zip_path"
+if command -v unzip >/dev/null 2>&1; then
+  unzip -t "$zip_path"
+  unzip -l "$zip_path"
+elif command -v 7z >/dev/null 2>&1; then
+  7z t "$zip_path" >/dev/null
+  7z l -ba "$zip_path"
+fi
 cat "$zip_path.sha256"

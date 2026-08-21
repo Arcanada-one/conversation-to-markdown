@@ -44,6 +44,18 @@ function element(tag, children, attributes) {
       return attrs[name] ?? null;
     },
     querySelector(selector) {
+      if (selector === 'a[href]') {
+        const visit = (candidate) => {
+          if (candidate.nodeType !== 1) return null;
+          if (candidate.tagName === 'A' && candidate.getAttribute('href')) return candidate;
+          for (const child of candidate.childNodes || []) {
+            const found = visit(child);
+            if (found) return found;
+          }
+          return null;
+        };
+        return visit(this);
+      }
       return this.querySelectorAll(selector)[0] || null;
     },
     querySelectorAll(selector) {
@@ -221,46 +233,82 @@ test('elapsed time alone never ends a healthy scan', async () => {
   );
 });
 
-test('a stalled scan still fails, and does not return partial turns', async () => {
-  // The counterpart to the test above: removing the deadline must not remove
-  // the ability to detect a genuinely stuck scan. Here nothing ever moves and
-  // no new turn appears, so the no-progress guard must fire.
-  const container = createVirtualizedFixture([[{ turnId: 'u1', markdown: 'partial' }]], 12);
-  let steps = 0;
+test('a stalled scan returns partial turns with a notice in the artifact', async () => {
+  // When a scan genuinely stalls mid-conversation, whatever was captured must
+  // survive — never silently discarded. The partial notice lives in the markdown
+  // itself, not only in the popup.
+  const container = createVirtualizedFixture([
+    [{ turnId: 'u1', markdown: 'partial' }],
+    [{ turnId: 'u2', markdown: 'never reached' }],
+  ], 12);
+  const scanMeta = {};
 
-  await assert.rejects(
-    parser.scanTurns(container, {
-      readSections: () => [],
-      extractTurn: (turn) => turn,
-      settle: async () => {},
-      scrollTo: async () => { steps += 1; },
-      noProgressSteps: 5,
-    }),
-    /stopped making progress/
-  );
-  assert.ok(steps < 30, 'the stall is caught quickly, not after a long budget');
+  const turns = await parser.scanTurns(container, {
+    readSections: (target) => target.querySelectorAll('[data-turn-id]'),
+    extractTurn: (turn) => turn,
+    settle: async () => {},
+    scrollTo: async () => {},
+    noProgressSteps: 5,
+    scanMeta: scanMeta,
+  });
+
+  assert.deepEqual(turns.map((turn) => turn.turnId), ['u1']);
+  assert.equal(scanMeta.partial, true);
+  assert.equal(scanMeta.reason, 'stall');
   assert.equal(container.scrollTop, 12);
+  const md = parser.prefixPartialNotice(parser.buildConversationMarkdown(turns), scanMeta.reason);
+  assert.match(md, />\s*\*\*Partial export\*\*/);
 });
 
-test('the operator can cancel a scan at any point', async () => {
-  // Cancellation is the deliberate replacement for the deadline: the operator
-  // decides when a long job is too long, the code does not decide for them.
+test('an unexpected scan error propagates even when turns were captured', async () => {
+  const container = createVirtualizedFixture([
+    [{ turnId: 'u1', markdown: 'captured' }],
+    [{ turnId: 'u2', markdown: 'boom' }],
+  ], 0);
+  const scanMeta = {};
+  let capturedBeforeThrow = false;
+
+  await assert.rejects(
+    () => parser.scanTurns(container, {
+      readSections: (target) => target.querySelectorAll('[data-turn-id]'),
+      extractTurn: (turn) => {
+        if (turn.turnId === 'u1') capturedBeforeThrow = true;
+        if (turn.turnId === 'u2') throw new TypeError('extractor bug');
+        return turn;
+      },
+      settle: async () => {},
+      scanMeta: scanMeta,
+      noProgressSteps: 1000,
+    }),
+    /extractor bug/
+  );
+  assert.equal(capturedBeforeThrow, true);
+  assert.notEqual(scanMeta.partial, true);
+});
+
+test('the operator can cancel a scan and keep whatever was captured', async () => {
+  // Cancellation must not destroy turns already held in memory — the operator
+  // stopped the scan, they did not ask to discard it.
   const pages = [];
   for (let i = 1; i <= 40; i += 1) {
     pages.push([{ turnId: 't' + i, order: i, role: 'user', markdown: 'turn ' + i }]);
   }
   const container = createVirtualizedFixture(pages, 5);
   let steps = 0;
+  const scanMeta = {};
 
-  await assert.rejects(
-    parser.scanTurns(container, {
-      readSections: (target) => target.querySelectorAll('[data-turn-id]'),
-      extractTurn: (turn) => turn,
-      settle: async () => {},
-      isCancelled: () => { steps += 1; return steps > 3; },
-    }),
-    /cancelled/
-  );
+  const turns = await parser.scanTurns(container, {
+    readSections: (target) => target.querySelectorAll('[data-turn-id]'),
+    extractTurn: (turn) => turn,
+    settle: async () => {},
+    isCancelled: () => { steps += 1; return steps > 3; },
+    scanMeta: scanMeta,
+  });
+
+  assert.ok(turns.length > 0, 'cancelled scan must return captured turns');
+  assert.ok(turns.length < 40, 'cancelled scan must not claim completeness');
+  assert.equal(scanMeta.partial, true);
+  assert.equal(scanMeta.reason, 'cancelled');
   assert.equal(container.scrollTop, 5, 'a cancelled scan still restores the page');
 });
 
@@ -333,21 +381,23 @@ test('still times out when a reachable scroll target is never approached', async
       return [turn];
     },
   };
+  const scanMeta = {};
 
   try {
     global.requestAnimationFrame = (callback) => setImmediate(callback);
     Date.now = () => { clock += 500; return clock; };
 
-    await assert.rejects(
-      parser.scanTurns(container, {
-        extractTurn: (candidate) => candidate,
-        settle: async () => {},
-        stablePasses: 2,
-        maxSteps: 10,
-        timeoutMs: 120000,
-      }),
-      /Conversation scan exceeded its step limit before reaching a stable bottom/
-    );
+    const turns = await parser.scanTurns(container, {
+      extractTurn: (candidate) => candidate,
+      settle: async () => {},
+      stablePasses: 2,
+      maxSteps: 10,
+      timeoutMs: 120000,
+      scanMeta: scanMeta,
+    });
+    assert.equal(turns.length, 1);
+    assert.equal(scanMeta.partial, true);
+    assert.match(scanMeta.reason, /step limit/);
   } finally {
     global.requestAnimationFrame = previousAnimationFrame;
     Date.now = previousNow;
@@ -575,6 +625,27 @@ test('slugifies titles into filesystem-safe names', () => {
   assert.doesNotMatch(parser.slugifyTitle('trailing---'), /-$/);
 });
 
+test('a dot-only title never becomes a path segment', () => {
+  // The slug becomes a DIRECTORY name, and in a batch the project slug does too.
+  // Chrome rejects any downloads.download() filename containing a `..`
+  // back-reference, so a conversation titled ".." made every single write fail —
+  // and because the download result was discarded, the popup reported the whole
+  // project as exported. Zero files on disk, "40 saved" on screen.
+  //
+  // This is a different sanitizer from artifactFilename's: that one only ever
+  // produces a leaf filename, while this one produces path segments.
+  for (const hostile of ['..', '.', '...', '....', '. .', '../..']) {
+    const slug = parser.slugifyTitle(hostile);
+    if (slug === null) continue;                    // rejecting outright is fine
+    assert.doesNotMatch(
+      '/' + slug + '/',
+      /\/\.\.?\//,
+      'slug ' + JSON.stringify(slug) + ' from title ' + JSON.stringify(hostile) +
+        ' is a relative-path segment and would be rejected by chrome.downloads'
+    );
+  }
+});
+
 test('parses numeric conversation order from data-testid', () => {
   assert.equal(typeof parser.parseTurnOrder, 'function');
   assert.equal(parser.parseTurnOrder('conversation-turn-17'), 17);
@@ -644,6 +715,146 @@ test('preserves every assistant message segment within one turn', () => {
   } finally {
     global.Node = previousNode;
   }
+});
+
+// Closes the surviving mutant recorded as Wave 2a / A: removing the
+// isAttachmentChip branch from nodeToMarkdown left the whole suite green,
+// because every chip fixture wrapped an inner <a href> and therefore still
+// exported through `case 'a'`. A chip carrying no resolvable href has no such
+// fallback -- without the branch it degrades to bare text and the reader is
+// never told a file was attached.
+test('names an attachment chip that carries no link', () => {
+  const chip = {
+    nodeType: 1,
+    tagName: 'div',
+    getAttribute(name) {
+      return name === 'data-testid' ? 'file-chip' : null;
+    },
+    querySelector() {
+      return null;
+    },
+    childNodes: [],
+    textContent: 'quarterly-report.pdf',
+  };
+
+  const previousNode = global.Node;
+  global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
+  try {
+    const md = parser.nodeToMarkdown(chip, 0);
+    assert.match(md, /quarterly-report\.pdf/);
+    assert.notEqual(md.trim(), '');
+  } finally {
+    global.Node = previousNode;
+  }
+});
+
+// Shapes below are TRANSCRIBED FROM A REAL SAVED ChatGPT PAGE (an operator-held
+// sample of a 4-exchange conversation, not committed here: it carries signed
+// `sig=` URLs and a real conversation id, which the public-surface gate bans).
+// Every attribute and nesting level was read off those bytes; the URLs and ids
+// are replaced with synthetic ones.
+//
+// What the real page proved, and why this test exists:
+//  - An assistant turn whose answer is IMAGE-ONLY carries no `.markdown` and no
+//    `[class*="prose"]` container at all, and no `[data-message-author-role]`
+//    wrapper either. Its role lives ONLY in `data-turn="assistant"` on the
+//    section. Two such turns were dropped by the shipped 1.1.x extractor
+//    (8 turns in, 6 out) — the defect this project was filed for.
+//  - Generated files are served from `chatgpt.com/backend-api/estuary/content`
+//    with the id in a query parameter and NO extension in the path, so filename
+//    derivation cannot rely on the URL path.
+// A hand-written fixture that gives such a turn a prose container, or an
+// author-role attribute, tests a page ChatGPT does not serve.
+test('captures an image-only assistant turn shaped like the real page', () => {
+  const image = {
+    nodeType: 1,
+    tagName: 'img',
+    getAttribute(name) {
+      return {
+        src: 'https://chatgpt.com/backend-api/estuary/content?id=file_synth_0001&ts=1&p=fs',
+        alt: 'Сформированное изображение: statistics',
+      }[name] ?? null;
+    },
+    childNodes: [],
+    closest: () => null,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+
+  const section = {
+    nodeType: 1,
+    tagName: 'section',
+    getAttribute(name) {
+      // Role is carried by data-turn ALONE — this is the real shape.
+      return {
+        'data-turn-id': 'synth-image-only-turn',
+        'data-testid': 'conversation-turn-6',
+        'data-turn': 'assistant',
+      }[name] ?? null;
+    },
+    // No [data-message-author-role], no .markdown, no [class*="prose"].
+    querySelector: () => null,
+    querySelectorAll(selector) {
+      return selector === 'img' ? [image] : [];
+    },
+    childNodes: [image],
+  };
+
+  const previousNode = global.Node;
+  global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
+  try {
+    const turn = parser.extractTurn(section, 5);
+    assert.notEqual(turn, null, 'an image-only assistant turn must not be dropped');
+    assert.equal(turn.role, 'assistant');
+    assert.match(turn.markdown, /!\[/, 'the image must survive into the markdown');
+    assert.match(turn.markdown, /estuary\/content/);
+  } finally {
+    global.Node = previousNode;
+  }
+});
+
+test('derives a filename for an estuary URL that carries no extension', () => {
+  // Real generated-file URLs put the id in a query parameter and end the path
+  // at `/content`, so there is no extension to read. An image still gets a
+  // usable name; a file with no label anywhere degrades to .bin rather than to
+  // an extensionless name Chrome would refuse.
+  const popupPath = require('path').join(__dirname, '..', 'popup.js');
+  const vm = require('node:vm');
+  const context = {
+    module: { exports: {} },
+    document: {
+      getElementById: () => ({
+        addEventListener() {},
+        disabled: false,
+        textContent: '',
+        classList: { add() {}, remove() {} },
+      }),
+    },
+    chrome: {
+      tabs: { query: async () => [] },
+      scripting: { executeScript: async () => [] },
+      downloads: { download() {} },
+      runtime: { lastError: null },
+    },
+    navigator: { clipboard: { writeText: async () => {} } },
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    URL,
+    encodeURIComponent,
+    decodeURIComponent,
+    btoa,
+  };
+  vm.runInNewContext(require('fs').readFileSync(popupPath, 'utf8'), context);
+  const popup = context.module.exports;
+
+  const estuary = 'https://chatgpt.com/backend-api/estuary/content?id=file_synth_0002&ts=1&p=fs';
+  assert.equal(popup.isDownloadableFileUrl(estuary), true);
+  assert.equal(popup.artifactFilename(estuary, '', 0, 'Chat', 'image'), 'Chat-image_001.png');
+  assert.equal(popup.artifactFilename(estuary, '', 0, 'Chat', 'file'), 'Chat-file_001.bin');
+  // A labelled link still wins, which is the common case for documents.
+  assert.equal(popup.artifactFilename(estuary, 'quarterly.xlsx', 0, 'Chat', 'file'), 'Chat-001-quarterly.xlsx');
 });
 
 test('falls back to the child author role when data-turn is absent', () => {
@@ -1004,6 +1215,12 @@ test('one never-resolving turn does not cost the rest of a long conversation', a
   assert.ok(turns.length >= 20, `the conversation survives one bad turn (got ${turns.length})`);
 });
 
+test('prefixPartialNotice labels the markdown artifact itself', () => {
+  const md = parser.prefixPartialNotice('#### You said:\n\nHi', 'cancelled');
+  assert.match(md, />\s*\*\*Partial export\*\* — scan was stopped before reaching the end\./);
+  assert.match(md, /#### You said:/);
+});
+
 test('an assistant turn without the author-role wrapper is still captured', async () => {
   // Measured on the operator's 570-turn conversation: 12 of 285 assistant turns
   // carried no [data-message-author-role] wrapper. extractTurn looked only
@@ -1033,4 +1250,1276 @@ test('an assistant turn without the author-role wrapper is still captured', asyn
   } finally {
     global.Node = previousNode;
   }
+});
+
+test('emits a markdown link for a file attachment chip', () => {
+  const previousNode = global.Node;
+  const previousLocation = global.location;
+  global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
+  global.location = { href: 'https://chatgpt.com/' };
+  const chip = element('a', [textNode('report.pdf')], {
+    href: 'https://files.oaiusercontent.com/file-synth-abc/report.pdf',
+    'data-testid': 'file-chip',
+  });
+  try {
+    const markdown = parser.nodeToMarkdown(chip).trim();
+    assert.match(markdown, /\[report\.pdf\]\(https:\/\/files\.oaiusercontent\.com\/file-synth-abc\/report\.pdf\)/);
+  } finally {
+    global.Node = previousNode;
+    global.location = previousLocation;
+  }
+});
+
+test('emits a markdown link for a div-wrapped attachment chip', () => {
+  const previousNode = global.Node;
+  const previousLocation = global.location;
+  global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
+  global.location = { href: 'https://chatgpt.com/' };
+  const chip = element('div', [
+    element('a', [textNode('bundle.zip')], {
+      href: 'https://files.oaiusercontent.com/file-synth-rst/bundle.zip',
+    }),
+  ], { 'data-testid': 'file-chip' });
+  try {
+    const markdown = parser.nodeToMarkdown(chip).trim();
+    assert.match(markdown, /\[bundle\.zip\]\(https:\/\/files\.oaiusercontent\.com\/file-synth-rst\/bundle\.zip\)/);
+  } finally {
+    global.Node = previousNode;
+    global.location = previousLocation;
+  }
+});
+
+test('extracts file attachment chips outside the prose container', () => {
+  const chip = {
+    getAttribute(name) {
+      return name === 'data-testid' ? 'file-chip' : null;
+    },
+    closest: () => null,
+    querySelector() {
+      return {
+        getAttribute(name) {
+          return name === 'href'
+            ? 'https://files.oaiusercontent.com/file-synth-def/data.csv'
+            : null;
+        },
+      };
+    },
+    textContent: 'data.csv',
+  };
+  const section = {
+    querySelectorAll(selector) {
+      if (selector === '[data-testid="file-chip"]') return [chip];
+      return [];
+    },
+  };
+
+  assert.deepEqual(parser.extractAttachments(section), [
+    '[data.csv](https://files.oaiusercontent.com/file-synth-def/data.csv)',
+  ]);
+});
+
+/** A chip carrying a real file link, with a caller-chosen data-testid. */
+function attachmentChipWithTestid(testid, href) {
+  return {
+    getAttribute(name) {
+      if (name === 'data-testid') return testid;
+      if (name === 'href') return href;
+      return null;
+    },
+    tagName: 'A',
+    closest: () => null,
+    querySelector: () => null,
+    textContent: 'report.pdf',
+  };
+}
+
+/** A section whose querySelectorAll understands the shipped selector shapes. */
+function sectionMatching(chips) {
+  return {
+    querySelectorAll(selector) {
+      // A generic `[attr=…]` / `[attr*=…]` engine, derived from the selector
+      // itself rather than hardcoded per selector. This keeps the fixture honest
+      // about CSS semantics — `*=` really is a substring test, hostile URL or not
+      // — without any line here resembling a host check, which it is not: the
+      // assertion under test is that the SHIPPED code refuses what this finds.
+      const parsed = /^(?:a)?\[([a-z-]+)(\*?)="([^"]+)"\]$/.exec(selector);
+      if (!parsed) return [];
+      const [, attribute, wildcard, needle] = parsed;
+      return chips.filter((chip) => {
+        const value = chip.getAttribute(attribute) || '';
+        return wildcard ? value.indexOf(needle) !== -1 : value === needle;
+      });
+    },
+  };
+}
+
+test('a renamed attachment testid still yields the attachment, and is reported as drift', () => {
+  // The failure this guards: one private testid was the ONLY way an attachment
+  // was recognised, so a rename stripped every file from every conversation
+  // while the export still reported success (0 of 0 saved).
+  const url = 'https://chatgpt.com/files/report.pdf';
+
+  const intact = parser.extractAttachmentsDetailed(
+    sectionMatching([attachmentChipWithTestid('file-chip', url)])
+  );
+  assert.equal(intact.links.length, 1);
+  assert.equal(intact.primaryMatched, true);
+
+  for (const renamed of ['file-chip-v2', 'attachment-tile', 'something-else-entirely']) {
+    const drifted = parser.extractAttachmentsDetailed(
+      sectionMatching([attachmentChipWithTestid(renamed, url)])
+    );
+    assert.equal(drifted.links.length, 1, 'testid "' + renamed + '" must still yield the file');
+    assert.equal(drifted.primaryMatched, false, 'and must be reported as drift, not as normal');
+    assert.ok(drifted.matchedBy, 'the selector that rescued it is named');
+  }
+});
+
+test('a fallback href match is re-checked against the real host, not a substring', () => {
+  // A `[href*="…"]` selector matches a substring, so these all satisfy it while
+  // pointing somewhere else entirely. The popup FETCHES attachment URLs, so a
+  // substring match must not be enough to treat one as a conversation file.
+  const hostile = [
+    'https://evil.example/steal?x=files.oaiusercontent.com',
+    'https://files.oaiusercontent.com.attacker.example/payload',
+    'https://attacker.example/chatgpt.com/files/report.pdf',
+    // A SUFFIX impostor: this host ends with the real one, so a check written
+    // with endsWith() instead of an exact comparison would accept it.
+    'https://notfiles.oaiusercontent.com/payload',
+    'https://evil-files.oaiusercontent.com/payload',
+    // http, not https — a downgrade that must not be followed.
+    'http://files.oaiusercontent.com/file-abc/report.pdf',
+  ];
+
+  for (const url of hostile) {
+    const found = parser.extractAttachmentsDetailed(
+      sectionMatching([attachmentChipWithTestid('renamed-away', url)])
+    );
+    assert.deepEqual(found.links, [], 'must not accept ' + url);
+  }
+
+  // The genuine host still works through the same fallback path, so the guard
+  // rejects impostors rather than disabling the fallback.
+  const genuine = parser.extractAttachmentsDetailed(
+    sectionMatching([
+      attachmentChipWithTestid('renamed-away', 'https://files.oaiusercontent.com/file-abc/report.pdf'),
+    ])
+  );
+  assert.equal(genuine.links.length, 1);
+  assert.equal(genuine.primaryMatched, false);
+});
+
+test('a turn with genuinely no attachment is distinguishable from selector drift', () => {
+  const none = parser.extractAttachmentsDetailed(sectionMatching([]));
+  assert.deepEqual(none.links, []);
+  // The distinguishing signal: nothing matched at all, versus matchedBy naming a
+  // fallback. Previously both cases were an empty array and nothing else.
+  assert.equal(none.matchedBy, null);
+  assert.equal(none.primaryMatched, false);
+});
+
+test('includes user-uploaded attachments in the turn markdown', () => {
+  const chip = {
+    getAttribute(name) {
+      return name === 'data-testid' ? 'file-chip' : null;
+    },
+    closest: () => null,
+    querySelector() {
+      return {
+        getAttribute(name) {
+          return name === 'href'
+            ? 'https://files.oaiusercontent.com/file-synth-ghi/source.py'
+            : null;
+        },
+      };
+    },
+    textContent: 'source.py',
+  };
+  const bubble = { textContent: 'Please review this file.' };
+  const message = {
+    querySelector(selector) {
+      return selector === '.whitespace-pre-wrap' ? bubble : null;
+    },
+  };
+  const section = {
+    getAttribute(name) {
+      return {
+        'data-turn-id': 'user-attach',
+        'data-turn': 'user',
+        'data-testid': 'conversation-turn-1',
+      }[name] ?? null;
+    },
+    querySelector(selector) {
+      return selector === '[data-message-author-role="user"]' ? message : null;
+    },
+    querySelectorAll(selector) {
+      if (selector === '[data-testid="file-chip"]') return [chip];
+      return [];
+    },
+  };
+
+  const turn = parser.extractTurn(section, 0);
+  assert.match(turn.markdown, /Please review this file\./);
+  assert.match(turn.markdown, /\[source\.py\]\(https:\/\/files\.oaiusercontent\.com\/file-synth-ghi\/source\.py\)/);
+});
+
+test('preserves sandbox Code Interpreter links visibly in markdown', () => {
+  const previousNode = global.Node;
+  const previousLocation = global.location;
+  global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
+  global.location = { href: 'https://chatgpt.com/' };
+  const link = element('a', [textNode('output.csv')], { href: 'sandbox:/mnt/data/output.csv' });
+  try {
+    const markdown = parser.nodeToMarkdown(link);
+    assert.match(markdown, /Code Interpreter file/);
+    assert.match(markdown, /sandbox:\/mnt\/data\/output\.csv/);
+    assert.doesNotMatch(markdown, /\[output\.csv\]\(https?:/);
+  } finally {
+    global.Node = previousNode;
+    global.location = previousLocation;
+  }
+});
+
+test('emits visible placeholders for silent-loss media elements', () => {
+  const previousNode = global.Node;
+  global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
+  const cases = ['canvas', 'audio', 'video', 'svg'];
+  try {
+    for (const tag of cases) {
+      const markdown = parser.nodeToMarkdown(element(tag, []));
+      assert.match(markdown, new RegExp('\\*\\[' + tag + ' artifact'), tag + ' must not be silently dropped');
+    }
+  } finally {
+    global.Node = previousNode;
+  }
+});
+
+test('renders KaTeX once by skipping the hidden MathML layer', () => {
+  const previousNode = global.Node;
+  global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
+  const katex = element('span', [
+    element('span', [textNode('E=mc^2')], { class: 'katex-mathml' }),
+    element('span', [textNode('E=mc^2')], { class: 'katex-html' }),
+  ], { class: 'katex' });
+  try {
+    const markdown = parser.nodeToMarkdown(katex);
+    assert.equal(markdown.trim(), 'E=mc^2');
+  } finally {
+    global.Node = previousNode;
+  }
+});
+
+test('lists every sidebar conversation link once', () => {
+  assert.equal(typeof parser.listSidebarConversations, 'function');
+  const makeLink = (href, title) => ({
+    getAttribute(name) {
+      if (name === 'href') return href;
+      if (name === 'aria-label') return title;
+      return null;
+    },
+    querySelector: () => null,
+    textContent: title,
+  });
+  const doc = {
+    // Any conversation-link selector, not one pinned literal: the shipped
+    // selector had to widen once already and a restated string breaks the moment
+    // the code is corrected.
+    querySelectorAll(selector) {
+      if (typeof selector !== 'string' || selector.indexOf('/c/') === -1) return [];
+      return [
+        makeLink('/c/aaa111', 'Alpha chat'),
+        makeLink('/c/bbb222', 'Beta chat'),
+        makeLink('/c/aaa111', 'Alpha duplicate'),
+      ];
+    },
+  };
+  const listed = parser.listSidebarConversations(doc);
+  assert.deepEqual(listed.map((item) => item.id), ['aaa111', 'bbb222']);
+  assert.equal(listed[0].title, 'Alpha chat');
+  assert.equal(listed[0].slug, 'Alpha-chat');
+  assert.equal(listed[0].projectId, null, 'a plain conversation has no project');
+});
+
+test('a project conversation title comes from the sidebar, not the document title', () => {
+  // Reproduces the production defect exactly. On a project conversation both
+  // original selectors miss — `a[href="/c/{id}"]` because the href is
+  // project-scoped, and `a[data-active][href^="/c/"]` likewise — so the lookup
+  // fell through to document.title, which reads "Qoople - Перевод i18n JSON для
+  // сайта". The project name then became part of every filename and folder.
+  const convId = '69847c8d-e3b0-838f-a0a5-a3b1aff85e96';
+  const projectId = 'g-p-6954db053ec481919faff2151c140cb6';
+  const projectHref = '/g/' + projectId + '/c/' + convId;
+
+  const sidebarLink = {
+    getAttribute(name) {
+      if (name === 'href') return projectHref;
+      if (name === 'aria-label') return 'Перевод i18n JSON для сайта, chat in project Qoople';
+      return null;
+    },
+    querySelector: () => null,
+    textContent: 'Перевод i18n JSON для сайта',
+  };
+
+  const doc = {
+    title: 'Qoople - Перевод i18n JSON для сайта',
+    querySelector(selector) {
+      const text = String(selector || '');
+      // The row is NOT marked data-active in this DOM, so a selector requiring
+      // that attribute must miss — otherwise every href variant looks rescued and
+      // the test cannot tell which selector is load-bearing.
+      if (text.indexOf('[data-active]') !== -1) return null;
+      const parsed = /\[href(\^|\$|=)?="?([^"\]]+)"?\]/.exec(text);
+      if (!parsed) return null;
+      const operator = parsed[1] === '=' || parsed[1] === undefined ? '=' : parsed[1];
+      const needle = parsed[2];
+      if (operator === '=') return projectHref === needle ? sidebarLink : null;
+      if (operator === '^') return projectHref.startsWith(needle) ? sidebarLink : null;
+      return projectHref.endsWith(needle) ? sidebarLink : null;
+    },
+    querySelectorAll: () => [],
+  };
+
+  const previousLocation = global.location;
+  global.location = { pathname: projectHref };
+  try {
+    const title = parser.extractConversationTitle(doc);
+    assert.equal(title, 'Перевод i18n JSON для сайта');
+    // Specifically NOT the document-title fallback, which carries the project.
+    assert.doesNotMatch(title, /Qoople/, 'the project name must not enter the title');
+  } finally {
+    global.location = previousLocation;
+  }
+});
+
+test('lists conversations that live inside a Project', () => {
+  // Verified on production: a Project conversation is linked as
+  // /g/g-p-{projectId}/c/{convId}. Matching only /c/{id} found ZERO of them, so
+  // a batch started on a Project exported the global recents instead — a
+  // different set, reported as success.
+  // Modelled on the measured row: the visible `.truncate` holds the BARE title
+  // while aria-label appends a localized description. The old fixture gave the
+  // row no `.truncate` at all and set textContent to the full label, so it could
+  // only ever exercise the English-regex path that broke under a Russian UI.
+  const makeLink = (href, visibleTitle, ariaLabel) => ({
+    getAttribute(name) {
+      if (name === 'href') return href;
+      if (name === 'aria-label') return ariaLabel;
+      return null;
+    },
+    querySelector(sel) {
+      return sel === '.truncate' ? { textContent: visibleTitle } : null;
+    },
+    textContent: visibleTitle,
+  });
+  const projectId = 'g-p-6954db053ec481919faff2151c140cb6';
+  const links = [
+    // The ru-RU suffix, measured on production. An English-literal strip leaves
+    // it in place and bakes the project name into the folder name.
+    makeLink('/g/' + projectId + '/c/69847c8d-e3b0',
+      'Перевод i18n JSON для сайта',
+      'Перевод i18n JSON для сайта, чат в проекте Qoople'),
+    makeLink('/c/plain001', 'A global chat', 'A global chat'),
+  ];
+  const doc = {
+    // Honours CSS attribute semantics: `[href^="/c/"]` is a PREFIX match and
+    // `[href*="/c/"]` a substring one. A fixture that ignores the difference
+    // returns project links to the narrow selector too, and so cannot detect the
+    // very narrowing that lost every project conversation in production.
+    querySelectorAll(selector) {
+      const parsed = /\[href(\^|\*)="([^"]+)"\]/.exec(String(selector || ''));
+      if (!parsed) return [];
+      const [, operator, needle] = parsed;
+      return links.filter((link) => {
+        const href = link.getAttribute('href') || '';
+        return operator === '^' ? href.startsWith(needle) : href.indexOf(needle) !== -1;
+      });
+    },
+  };
+
+  const listed = parser.listSidebarConversations(doc);
+  assert.deepEqual(listed.map((c) => c.id), ['69847c8d-e3b0', 'plain001']);
+  assert.equal(listed[0].projectId, projectId);
+  // The href must be the one the PAGE uses: reaching a project conversation
+  // through a bare /c/{id} loses its project context.
+  assert.equal(listed[0].href, '/g/' + projectId + '/c/69847c8d-e3b0');
+  // The accessibility suffix is not part of the title, and would otherwise be
+  // baked into the filename and folder name.
+  assert.equal(listed[0].title, 'Перевод i18n JSON для сайта');
+  assert.equal(listed[0].slug, 'Перевод-i18n-JSON-для-сайта');
+  assert.equal(listed[1].projectId, null);
+});
+
+test('waitForConversationReady resolves when message content mounts', async () => {
+  assert.equal(typeof parser.waitForConversationReady, 'function');
+  const previousDocument = global.document;
+  const previousLocation = global.location;
+  global.location = { pathname: '/c/conv123' };
+  global.document = {
+    querySelector(selector) {
+      if (selector === '[data-turn-id]') return { turnId: 'turn-1' };
+      return null;
+    },
+  };
+  try {
+    const result = await parser.waitForConversationReady({
+      conversationId: 'conv123',
+      timeoutMs: 500,
+      pollMs: 10,
+    });
+    assert.equal(result.ready, true);
+  } finally {
+    global.document = previousDocument;
+    global.location = previousLocation;
+  }
+});
+
+test('waitForConversationReady times out when navigation never arrives', async () => {
+  const previousDocument = global.document;
+  const previousLocation = global.location;
+  global.location = { pathname: '/g/g-p-project' };
+  global.document = { querySelector: () => null };
+  try {
+    const result = await parser.waitForConversationReady({
+      conversationId: 'conv123',
+      timeoutMs: 40,
+      pollMs: 10,
+    });
+    assert.equal(result.ready, false);
+    assert.match(result.error, /Navigation/);
+  } finally {
+    global.document = previousDocument;
+    global.location = previousLocation;
+  }
+});
+
+test('a title is not truncated at a coincidental prefix', () => {
+  // The suffix is removed structurally (aria-label startsWith visible text), so
+  // the separator is what distinguishes "title + description" from "the visible
+  // text is merely an abbreviation of the label". A sidebar row truncates long
+  // titles with an ellipsis while aria-label carries the full one:
+  //
+  //   visible : "Проектирование хранилища"
+  //   label   : "Проектирование хранилища секретов"
+  //
+  // Without the separator requirement the title silently becomes the truncated
+  // visible text and the folder is named after a clipped title. A mutation that
+  // dropped that requirement survived every other test.
+  const clipped = {
+    getAttribute(name) {
+      if (name === 'href') return '/c/abc123';
+      if (name === 'aria-label') return 'Проектирование хранилища секретов';
+      return null;
+    },
+    querySelector(sel) {
+      return sel === '.truncate' ? { textContent: 'Проектирование хранилища' } : null;
+    },
+    textContent: 'Проектирование хранилища',
+  };
+  assert.equal(
+    parser.titleFromSidebarLink(clipped),
+    'Проектирование хранилища секретов',
+    'a word-boundary-less remainder is part of the title, not a suffix'
+  );
+
+  // The measured project suffix still strips: the remainder starts with ", ".
+  const inProject = {
+    getAttribute(name) {
+      if (name === 'href') return '/g/g-p-abc/c/def456';
+      if (name === 'aria-label') return 'Перезапуск nginx, чат в проекте Aether';
+      return null;
+    },
+    querySelector(sel) {
+      return sel === '.truncate' ? { textContent: 'Перезапуск nginx' } : null;
+    },
+    textContent: 'Перезапуск nginx',
+  };
+  assert.equal(parser.titleFromSidebarLink(inProject), 'Перезапуск nginx');
+});
+
+test('a label that does not begin with the visible text is left alone', () => {
+  // The structural strip is only valid when aria-label is "visible + suffix".
+  // Two guards enforce that: the label must START WITH the visible text, and the
+  // remainder must begin with punctuation. They overlap for most inputs, which is
+  // why a mutation removing the startsWith guard first survived — the punctuation
+  // check still rejected the mid-word slice.
+  //
+  // This input separates them. visible "Отчёт" is 5 characters and label[5] is a
+  // comma, so a blind slice(5) yields ", черновик отчёта" — punctuation-led, and
+  // therefore accepted by the second guard alone. Only startsWith can reject it.
+  // Without that guard the title becomes "Отчёт", a string the row never showed.
+  const unrelatedLabel = {
+    getAttribute(name) {
+      if (name === 'href') return '/c/xyz789';
+      if (name === 'aria-label') return 'Итоги, черновик отчёта';
+      return null;
+    },
+    querySelector(sel) {
+      return sel === '.truncate' ? { textContent: 'Отчёт' } : null;
+    },
+    textContent: 'Отчёт',
+  };
+  assert.equal(
+    parser.titleFromSidebarLink(unrelatedLabel),
+    'Итоги, черновик отчёта',
+    'a label not prefixed by the visible text must not be cut by length'
+  );
+});
+
+/* ------------------------------------------------------------------------- *
+ * Artefacts that render no chip.
+ *
+ * Measured on production: a conversation with five generated PDF/DOCX files
+ * returned ZERO matches for all six ATTACHMENT_CHIP_SELECTORS, no <a href>, no
+ * [download], and no data-testid. The API path exists because the DOM cannot
+ * express the file->message link at all, not as an optimisation.
+ * ------------------------------------------------------------------------- */
+
+/** A fetch stub that answers only the URLs it is given, so an unexpected
+ *  request fails loudly instead of silently returning empty data. */
+function stubFetch(routes) {
+  const calls = [];
+  const impl = async (url, init) => {
+    calls.push({ url: String(url), init: init || null });
+    for (const [pattern, responder] of routes) {
+      if (String(url).indexOf(pattern) !== -1) return responder(String(url), init);
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+  impl.calls = calls;
+  return impl;
+}
+const jsonOk = (body) => () => ({ ok: true, status: 200, json: async () => body });
+
+test('artefacts are enumerated from the conversation API, with message ids', async () => {
+  // Shape copied from the live 200 response: uploaded files live in
+  // metadata.attachments, generated ones in content.parts[].asset_pointer.
+  const fetchImpl = stubFetch([
+    ['/api/auth/session', jsonOk({ accessToken: 'tok-123' })],
+    ['/backend-api/conversation/conv-1', jsonOk({
+      mapping: {
+        n1: { message: { id: 'msg-a', metadata: { attachments: [
+          { id: 'file_up1', name: 'brief.pdf', mime_type: 'application/pdf', size: 4096 },
+        ] }, content: { parts: ['hello'] } } },
+        n2: { message: { id: 'msg-b', metadata: {}, content: { parts: [
+          { asset_pointer: 'sediment://file_gen9', mime_type: 'image/png' },
+        ] } } },
+      },
+    })],
+  ]);
+
+  const found = await parser.fetchConversationArtifacts('conv-1', { fetchImpl });
+  assert.equal(found.length, 2);
+  const upload = found.find((a) => a.kind === 'attachment');
+  assert.equal(upload.name, 'brief.pdf');
+  assert.equal(upload.messageId, 'msg-a');
+  assert.equal(upload.fileId, 'file_up1');
+  const asset = found.find((a) => a.kind === 'asset');
+  assert.equal(asset.messageId, 'msg-b');
+  assert.equal(asset.fileId, 'file_gen9', 'the file id is parsed out of the asset pointer');
+});
+
+test('an unreadable API returns null, never an empty artefact list', async () => {
+  // "No artefacts" and "could not tell" must not collapse into the same value:
+  // a 401 that reads as an empty list turns a failed export into a clean one.
+  const unauthorized = stubFetch([
+    ['/api/auth/session', jsonOk({ accessToken: 'tok-123' })],
+    ['/backend-api/conversation/conv-1', () => ({ ok: false, status: 401, json: async () => ({}) })],
+  ]);
+  assert.equal(await parser.fetchConversationArtifacts('conv-1', { fetchImpl: unauthorized }), null);
+
+  // No token at all (signed out, or the session shape changed).
+  const noToken = stubFetch([['/api/auth/session', jsonOk({})]]);
+  assert.equal(await parser.fetchConversationArtifacts('conv-1', { fetchImpl: noToken }), null);
+
+  // A conversation with genuinely no files is an EMPTY LIST, which is different.
+  const empty = stubFetch([
+    ['/api/auth/session', jsonOk({ accessToken: 'tok-123' })],
+    ['/backend-api/conversation/conv-1', jsonOk({ mapping: {
+      n1: { message: { id: 'msg-a', metadata: {}, content: { parts: ['just text'] } } },
+    } })],
+  ]);
+  assert.deepEqual(await parser.fetchConversationArtifacts('conv-1', { fetchImpl: empty }), []);
+});
+
+test('a sandbox artefact resolves to a host-checked download url', async () => {
+  const fetchImpl = stubFetch([
+    ['/interpreter/download', jsonOk({
+      download_url: 'https://chatgpt.com/backend-api/estuary/content?id=file_x&fn=report.pdf',
+      file_name: 'report.pdf', mime_type: 'application/pdf', file_size_bytes: 900,
+    })],
+  ]);
+  const got = await parser.resolveSandboxDownloadUrl(
+    'conv-1', 'msg-a', '/mnt/data/report.pdf', { fetchImpl, token: 'tok' });
+  assert.equal(got.fileName, 'report.pdf');
+  assert.equal(got.size, 900);
+  assert.ok(fetchImpl.calls[0].url.indexOf('message_id=msg-a') !== -1,
+    'message_id is mandatory: omitting it returns 422 on production');
+  assert.ok(fetchImpl.calls[0].url.indexOf(encodeURIComponent('/mnt/data/report.pdf')) !== -1);
+
+  // A url on a host that merely CONTAINS the real one must be refused, because
+  // the popup fetches whatever comes back.
+  const hostile = stubFetch([
+    ['/interpreter/download', jsonOk({
+      download_url: 'https://chatgpt.com.attacker.net/backend-api/estuary/content?id=file_x',
+      file_name: 'report.pdf',
+    })],
+  ]);
+  assert.equal(await parser.resolveSandboxDownloadUrl(
+    'conv-1', 'msg-a', '/mnt/data/report.pdf', { fetchImpl: hostile, token: 'tok' }), null);
+});
+
+test('the artefact panel yields file names, not the translated download button', () => {
+  // Measured under ru-RU: each artifact row holds an open-file button whose
+  // aria-label is the FILE NAME, plus a sibling button labelled "Скачать файл"
+  // ("Download file" in English). Matching the button by its label would break
+  // in every other locale; the file name is user data and carries an extension.
+  const buttons = [
+    { getAttribute: (n) => (n === 'aria-label' ? 'Talomnia_RU_v0.5.pdf' : null) },
+    { getAttribute: (n) => (n === 'aria-label' ? 'Скачать файл' : null) },
+    { getAttribute: (n) => (n === 'aria-label' ? 'Talomnia_EN_v0.5.docx' : null) },
+    { getAttribute: (n) => (n === 'aria-label' ? 'Download file' : null) },
+    { getAttribute: (n) => (n === 'aria-label' ? 'Кадры решают всё' : null) },
+  ];
+  const doc = {
+    querySelectorAll(sel) {
+      return /open-file|artifact-row/.test(sel) ? buttons : [];
+    },
+  };
+  const files = parser.listArtifactPanelFiles(doc);
+  assert.deepEqual(files.map((f) => f.name),
+    ['Talomnia_RU_v0.5.pdf', 'Talomnia_EN_v0.5.docx']);
+  assert.equal(files[0].sandboxPath, '/mnt/data/Talomnia_RU_v0.5.pdf');
+});
+
+test('one working message id is reused across every panel file', async () => {
+  // Measured: 12 different message ids all resolved the SAME sandbox_path to the
+  // same file id, so the id is required context and not a selector. Retrying the
+  // candidate list per file would multiply requests against the user's account.
+  let downloadCalls = 0;
+  const fetchImpl = stubFetch([
+    ['/interpreter/download', (url) => {
+      downloadCalls += 1;
+      // Only the second candidate id is accepted, to prove the search happens
+      // once and its result is carried forward.
+      if (url.indexOf('message_id=good') === -1) {
+        return { ok: false, status: 422, json: async () => ({}) };
+      }
+      return { ok: true, status: 200, json: async () => ({
+        download_url: 'https://chatgpt.com/backend-api/estuary/content?id=file_q',
+        file_name: 'x.pdf',
+      }) };
+    }],
+  ]);
+
+  const files = [
+    { name: 'a.pdf', sandboxPath: '/mnt/data/a.pdf' },
+    { name: 'b.pdf', sandboxPath: '/mnt/data/b.pdf' },
+    { name: 'c.pdf', sandboxPath: '/mnt/data/c.pdf' },
+  ];
+  const out = await parser.resolveArtifactPanelFiles('conv-1', {
+    files, fetchImpl, token: 'tok', messageIds: ['bad', 'good'],
+  });
+
+  assert.equal(out.length, 3);
+  assert.ok(out.every((r) => r.resolved !== null), 'every file must resolve');
+  // File 1: 'bad' then 'good' = 2 calls. Files 2 and 3: 'good' directly = 1 each.
+  assert.equal(downloadCalls, 4, 'the working id must not be re-discovered per file');
+});
+
+test('panel artefacts are appended to the markdown as downloadable links', async () => {
+  // The popup's downloader reads artefacts out of the finished markdown
+  // (parseArtifactRefs), so a file that never appears there is never fetched.
+  const doc = {
+    querySelectorAll(sel) {
+      if (!/open-file|artifact-row/.test(sel)) return [];
+      return [
+        { getAttribute: (n) => (n === 'aria-label' ? 'report.pdf' : null) },
+        { getAttribute: (n) => (n === 'aria-label' ? 'Скачать файл' : null) },
+      ];
+    },
+  };
+  const fetchImpl = stubFetch([
+    ['/interpreter/download', jsonOk({
+      download_url: 'https://chatgpt.com/backend-api/estuary/content?id=file_r&fn=report.pdf',
+      file_name: 'report.pdf',
+    })],
+  ]);
+
+  const out = await parser.appendPanelArtifacts('# Chat\n\nbody', {
+    doc,
+    conversationId: 'conv-1',
+    artifacts: [{ kind: 'asset', messageId: 'msg-a' }],
+    fetchImpl,
+    token: 'tok',
+  });
+
+  assert.ok(out.indexOf('## Files') !== -1, 'a Files section must be added');
+  assert.ok(out.indexOf('[report.pdf](https://chatgpt.com/backend-api/estuary/content') !== -1,
+    'the link must be in the markdown link form the popup parses');
+  assert.ok(out.indexOf('body') !== -1, 'the conversation body must survive');
+});
+
+test('an artefact that cannot be resolved is disclosed, not dropped', async () => {
+  // Silently omitting a file presents a partial export as a complete one.
+  const doc = {
+    querySelectorAll(sel) {
+      return /open-file|artifact-row/.test(sel)
+        ? [{ getAttribute: (n) => (n === 'aria-label' ? 'secret.docx' : null) }]
+        : [];
+    },
+  };
+  const failing = stubFetch([
+    ['/interpreter/download', () => ({ ok: false, status: 500, json: async () => ({}) })],
+  ]);
+
+  const out = await parser.appendPanelArtifacts('body', {
+    doc,
+    conversationId: 'conv-1',
+    artifacts: null,            // the API itself was unreadable
+    fetchImpl: failing,
+    token: 'tok',
+  });
+
+  assert.ok(out.indexOf('secret.docx') !== -1, 'the file must still be named');
+  assert.ok(out.indexOf('Could not retrieve') !== -1, 'the failure must be visible');
+  assert.ok(out.indexOf('conversation API was unreachable') !== -1,
+    'an unreadable API must be distinguished from a failed single file');
+});
+
+test('a conversation with no panel artefacts is left byte-identical', async () => {
+  const doc = { querySelectorAll() { return []; } };
+  const md = '# Chat\n\nbody';
+  assert.equal(await parser.appendPanelArtifacts(md, { doc, conversationId: 'c' }), md);
+});
+
+test('the capture path itself appends panel artefacts', async () => {
+  // Testing appendPanelArtifacts in isolation proved nothing about whether the
+  // export pipeline calls it: a mutation deleting the call from
+  // getConversationMarkdown left every other test green. This test exercises the
+  // wiring, which is the part that ships.
+  const turn = userTurn('user-1', 1, 'Make me a PDF');
+
+  const panelButtons = [
+    { getAttribute: (n) => (n === 'aria-label' ? 'report.pdf' : null) },
+    { getAttribute: (n) => (n === 'aria-label' ? 'Скачать файл' : null) },
+  ];
+
+  const container = createVirtualizedFixture([[turn]], 0);
+  container.overflowY = 'auto';
+  turn.parentElement = container;
+
+  const previousDocument = global.document;
+  const previousStyle = global.getComputedStyle;
+  const previousLocation = global.location;
+  const previousFetch = global.fetch;
+
+  global.document = {
+    title: 'ChatGPT',
+    querySelector: (sel) => (sel === '[data-turn-id]' ? turn : null),
+    querySelectorAll(sel) {
+      if (/open-file|artifact-row/.test(sel)) return panelButtons;
+      // The real page carries message ids on the turns; the download endpoint
+      // needs one and the artefact panel does not supply it.
+      if (sel === '[data-message-id]') {
+        return [{ getAttribute: (n) => (n === 'data-message-id' ? 'msg-1' : null) }];
+      }
+      return container.querySelectorAll('[data-turn-id]');
+    },
+  };
+  global.getComputedStyle = (node) => ({ overflowY: node.overflowY || 'visible' });
+  global.location = { pathname: '/c/conv-77', href: 'https://chatgpt.com/' };
+  global.fetch = async (url) => {
+    const target = String(url);
+    if (target.indexOf('/api/auth/session') !== -1) {
+      return { ok: true, status: 200, json: async () => ({ accessToken: 'tok' }) };
+    }
+    if (target.indexOf('/backend-api/conversation/conv-77/interpreter/download') !== -1) {
+      return { ok: true, status: 200, json: async () => ({
+        download_url: 'https://chatgpt.com/backend-api/estuary/content?id=file_z&fn=report.pdf',
+        file_name: 'report.pdf',
+      }) };
+    }
+    if (target.indexOf('/backend-api/conversation/conv-77') !== -1) {
+      return { ok: true, status: 200, json: async () => ({
+        mapping: { n1: { message: { id: 'msg-1', metadata: {}, content: { parts: ['hi'] } } } },
+      }) };
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+
+  try {
+    const result = await parser.getConversationMarkdown({ downloadFiles: true });
+    assert.equal(result.ok, true, 'capture failed: ' + result.error);
+    assert.ok(result.md.indexOf('## Files') !== -1,
+      'the shipped capture path must include panel artefacts');
+    assert.ok(
+      result.md.indexOf('[report.pdf](https://chatgpt.com/backend-api/estuary/content') !== -1,
+      'the artefact must be a markdown link the popup can parse'
+    );
+  } finally {
+    global.document = previousDocument;
+    global.getComputedStyle = previousStyle;
+    global.location = previousLocation;
+    if (previousFetch === undefined) delete global.fetch; else global.fetch = previousFetch;
+  }
+});
+
+test('a plain copy makes no network request at all', async () => {
+  // PRIVACY.md states that saving files is the ONLY mode in which the extension
+  // makes network requests. Retrieving generated artefacts needs the conversation
+  // API, so that lookup must stay behind the save option — otherwise a plain
+  // "Copy as Markdown" silently starts calling out and the shipped privacy
+  // promise becomes false.
+  const turn = userTurn('user-1', 1, 'Make me a PDF');
+  const panelButtons = [
+    { getAttribute: (n) => (n === 'aria-label' ? 'report.pdf' : null) },
+  ];
+  const container = createVirtualizedFixture([[turn]], 0);
+  container.overflowY = 'auto';
+  turn.parentElement = container;
+
+  const previousDocument = global.document;
+  const previousStyle = global.getComputedStyle;
+  const previousLocation = global.location;
+  const previousFetch = global.fetch;
+
+  const requests = [];
+  global.document = {
+    title: 'ChatGPT',
+    querySelector: (sel) => (sel === '[data-turn-id]' ? turn : null),
+    querySelectorAll(sel) {
+      if (/open-file|artifact-row/.test(sel)) return panelButtons;
+      if (sel === '[data-message-id]') {
+        return [{ getAttribute: (n) => (n === 'data-message-id' ? 'msg-1' : null) }];
+      }
+      return container.querySelectorAll('[data-turn-id]');
+    },
+  };
+  global.getComputedStyle = (node) => ({ overflowY: node.overflowY || 'visible' });
+  global.location = { pathname: '/c/conv-77', href: 'https://chatgpt.com/' };
+  global.fetch = async (url) => {
+    requests.push(String(url));
+    return { ok: false, status: 500, json: async () => ({}) };
+  };
+
+  try {
+    const result = await parser.getConversationMarkdown();
+    assert.equal(result.ok, true);
+    assert.deepEqual(requests, [], 'a plain copy must not touch the network');
+    assert.ok(result.md.indexOf('## Files') === -1,
+      'no Files section is added when file saving was not requested');
+  } finally {
+    global.document = previousDocument;
+    global.getComputedStyle = previousStyle;
+    global.location = previousLocation;
+    if (previousFetch === undefined) delete global.fetch; else global.fetch = previousFetch;
+  }
+});
+
+test('a late-mounting artefact panel is waited for', async () => {
+  // Measured on production: after navigation, turns mounted at ~9s and the
+  // artefact rows only at ~12s. A single-frame read at 11s found nothing, so an
+  // export triggered right after opening a conversation dropped all five of its
+  // generated documents in silence.
+  let ticks = 0;
+  const doc = {
+    querySelectorAll(sel) {
+      if (!/open-file|artifact-row/.test(sel)) return [];
+      // The panel appears only on the third poll.
+      return ticks >= 3
+        ? [{ getAttribute: (n) => (n === 'aria-label' ? 'late.pdf' : null) }]
+        : [];
+    },
+  };
+  const sleep = async () => { ticks += 1; };
+  let clock = 0;
+  const now = () => (clock += 100);
+
+  const files = await parser.waitForArtifactPanel(doc, { sleep, now, panelWaitMs: 5000 });
+  assert.deepEqual(files.map((f) => f.name), ['late.pdf']);
+  assert.ok(ticks >= 3, 'the wait must actually poll');
+});
+
+test('the panel wait gives up quietly instead of hanging', async () => {
+  const doc = { querySelectorAll() { return []; } };
+  let clock = 0;
+  const files = await parser.waitForArtifactPanel(doc, {
+    sleep: async () => {},
+    now: () => (clock += 400),
+    panelWaitMs: 1000,
+  });
+  assert.deepEqual(files, [], 'absence is absence, not an error');
+});
+
+test('a conversation the API says has no files does not pay the panel wait', async () => {
+  // Most conversations have no generated files. Waiting the full budget for each
+  // of them would slow every export, so the API result gates the wait.
+  let slept = 0;
+  const doc = { querySelectorAll() { return []; } };
+  const out = await parser.appendPanelArtifacts('body', {
+    doc,
+    conversationId: 'conv-1',
+    artifacts: [],                 // the API answered: nothing here
+    sleep: async () => { slept += 1; },
+    now: () => Date.now(),
+  });
+  assert.equal(out, 'body');
+  assert.equal(slept, 0, 'an empty conversation must not wait for a panel');
+});
+
+test('appendPanelArtifacts waits for a panel that has not mounted yet', async () => {
+  // Testing waitForArtifactPanel alone proved nothing about whether the export
+  // uses it: a mutant replacing the call with a single-frame read survived —
+  // and that single-frame read IS the production bug (panel at ~12s, read at
+  // ~11s, five documents lost silently).
+  let polls = 0;
+  const doc = {
+    querySelectorAll(sel) {
+      if (!/open-file|artifact-row/.test(sel)) return [];
+      return polls >= 2
+        ? [{ getAttribute: (n) => (n === 'aria-label' ? 'slow.pdf' : null) }]
+        : [];
+    },
+  };
+  const fetchImpl = stubFetch([
+    ['/interpreter/download', jsonOk({
+      download_url: 'https://chatgpt.com/backend-api/estuary/content?id=file_s',
+      file_name: 'slow.pdf',
+    })],
+  ]);
+
+  const out = await parser.appendPanelArtifacts('body', {
+    doc,
+    conversationId: 'conv-1',
+    artifacts: [{ kind: 'asset', messageId: 'msg-1' }],  // API says files exist
+    fetchImpl,
+    token: 'tok',
+    sleep: async () => { polls += 1; },
+    now: () => Date.now(),
+    panelWaitMs: 5000,
+  });
+
+  assert.ok(out.indexOf('slow.pdf') !== -1,
+    'a panel that mounts late must still be exported');
+});
+
+test('an unreadable API still waits for the panel', async () => {
+  // artifacts === null means "could not tell". Skipping the wait there would
+  // turn a transient API failure into a silently file-less export, which is the
+  // same collapse of "no files" and "could not tell" the null return exists to
+  // prevent.
+  let polls = 0;
+  const doc = {
+    querySelectorAll(sel) {
+      if (!/open-file|artifact-row/.test(sel)) return [];
+      return polls >= 2
+        ? [{ getAttribute: (n) => (n === 'aria-label' ? 'orphan.pdf' : null) }]
+        : [];
+    },
+  };
+  const failing = stubFetch([
+    ['/interpreter/download', () => ({ ok: false, status: 500, json: async () => ({}) })],
+  ]);
+
+  const out = await parser.appendPanelArtifacts('body', {
+    doc,
+    conversationId: 'conv-1',
+    artifacts: null,
+    fetchImpl: failing,
+    token: 'tok',
+    sleep: async () => { polls += 1; },
+    now: () => Date.now(),
+    panelWaitMs: 5000,
+  });
+
+  assert.ok(out.indexOf('orphan.pdf') !== -1,
+    'the file must be named even though its link could not be resolved');
+  assert.ok(out.indexOf('Could not retrieve') !== -1);
+});
+
+test('a title Chrome cannot put in a filename is sanitised, not passed through', () => {
+  // Measured on production during a full-account export: a conversation titled
+  // with a Private Use Area codepoint produced a slug that chrome.downloads
+  // rejected with "Invalid filename". The run reported progress while that
+  // conversation saved nothing — the same silent-loss shape as ".." before it.
+  const puaPlane = 'Обзор репозитория ' + String.fromCodePoint(0x7FFFF);
+  assert.equal(parser.slugifyTitle(puaPlane), 'Обзор-репозитория');
+
+  assert.equal(parser.slugifyTitle('Chat ' + String.fromCharCode(0xE123) + ' name'), 'Chat-name');
+  assert.equal(parser.slugifyTitle('Chat' + String.fromCharCode(0x07) + 'name'), 'Chat-name');
+  assert.equal(parser.slugifyTitle('Chat' + String.fromCharCode(0xFFFE) + 'x'), 'Chat-x');
+  // A lone surrogate is not a character and cannot survive into a filename.
+  assert.equal(parser.slugifyTitle('Chat' + String.fromCharCode(0xD83D) + 'x'), 'Chat-x');
+});
+
+test('sanitising a title does not strip legitimate characters', () => {
+  // The first version of the fix swept the whole D800-DFFF range and so split
+  // every emoji into two spaces. Cyrillic and emoji are ordinary title content
+  // and both are valid in a filename.
+  assert.equal(parser.slugifyTitle('Кадры решают всё'), 'Кадры-решают-всё');
+  assert.equal(parser.slugifyTitle('План 🚀 запуска'), 'План-🚀-запуска');
+  assert.equal(parser.slugifyTitle('日本語のタイトル'), '日本語のタイトル');
+});
+
+/** A conversation whose turns mount in a band NARROWER than the viewport.
+ *
+ *  createVirtualizedFixture cannot express this: it derives the mounted page
+ *  from `scrollTop / clientHeight`, so a step of 0.75 viewports always lands on
+ *  the same page or the next one and can never jump over a page. Real
+ *  virtualization does not work that way — it mounts a band of DOM around the
+ *  scroll position, and a heavy conversation (long turns, images, code blocks)
+ *  mounts fewer pixels of it. Turns are therefore placed at absolute offsets
+ *  and reported through getBoundingClientRect, which is how the real DOM says
+ *  how much is mounted.
+ */
+function createBandedFixture(bandHeight, turnSpacing, turnCount, viewportHeight) {
+  const clientHeight = viewportHeight || 800;
+  let container;
+  const turns = [];
+  for (let i = 0; i < turnCount; i += 1) {
+    const turn = userTurn('t' + i, i + 1, 'turn ' + i);
+    turn.top = i * turnSpacing;
+    turn.getBoundingClientRect = function () {
+      return {
+        top: this.top - container.scrollTop,
+        bottom: this.top - container.scrollTop + 80,
+      };
+    };
+    turns.push(turn);
+  }
+  container = {
+    scrollTop: 0,
+    clientHeight: clientHeight,
+    scrollHeight: turnCount * turnSpacing + clientHeight,
+    scrollTo(options) { this.scrollTop = options.top; },
+    querySelectorAll() {
+      const low = this.scrollTop - bandHeight / 2;
+      const high = this.scrollTop + bandHeight / 2;
+      return turns.filter((turn) => turn.top >= low && turn.top <= high);
+    },
+  };
+  return container;
+}
+
+test('THE INVARIANT: a turn is never stepped over because the mounted band is narrow', async () => {
+  // Reproduced before it was fixed: with a 400px band in an 800px viewport the
+  // scan captured 30 of 60 turns — every second one — and returned them as a
+  // COMPLETE export with no partial notice. The scroll step was a fixed 0.75 of
+  // the viewport, so it advanced past turns the virtualizer had never mounted.
+  //
+  // The sidebar walk already had this right, and says why in its own comment:
+  // "never step further than the band of rows currently mounted (a virtualizer
+  // may mount less than a viewport, and the excess is stepped over unseen)".
+  // The conversation scan simply did not carry the same rule.
+  //
+  // Every band here is physically possible: at least as tall as the gap between
+  // two turns, so no band leaves a visible hole in the viewport.
+  const geometries = [
+    { band: 1600, spacing: 300 },
+    { band: 800, spacing: 300 },
+    { band: 400, spacing: 300 },
+    { band: 300, spacing: 300 },
+    { band: 200, spacing: 150 },
+    { band: 900, spacing: 800 },
+  ];
+
+  for (const geometry of geometries) {
+    const meta = {};
+    const container = createBandedFixture(geometry.band, geometry.spacing, 40);
+    const turns = await parser.scanTurns(container, {
+      readSections: (target) => target.querySelectorAll('[data-turn-id]'),
+      settle: async () => {},
+      stablePasses: 2,
+      scanMeta: meta,
+    });
+    const captured = new Set(turns.map((turn) => turn.turnId));
+    const missing = [];
+    for (let i = 0; i < 40; i += 1) if (!captured.has('t' + i)) missing.push('t' + i);
+    assert.deepEqual(
+      missing, [],
+      `band ${geometry.band}px / spacing ${geometry.spacing}px lost ${missing.length} turns`,
+    );
+    assert.equal(meta.partial, undefined, `band ${geometry.band}px reported a partial scan`);
+  }
+});
+
+test('a narrow band is measured from the DOM, not assumed from the viewport', async () => {
+  // Positive control for the test above. It must be able to FAIL: if the
+  // fixture's geometry were unreachable, or the band were always wide enough,
+  // the invariant would pass without the fix and prove nothing. Here the band
+  // is deliberately narrower than the viewport, and the assertion is that the
+  // scan's own step never exceeds what was mounted.
+  const container = createBandedFixture(400, 300, 12);
+  const tops = [];
+  const originalScrollTo = container.scrollTo;
+  container.scrollTo = function (options) {
+    tops.push(options.top);
+    originalScrollTo.call(this, options);
+  };
+
+  await parser.scanTurns(container, {
+    readSections: (target) => target.querySelectorAll('[data-turn-id]'),
+    settle: async () => {},
+    stablePasses: 2,
+  });
+
+  // The mounted band is 400px tall at most, so no forward step may advance by a
+  // full viewport (800 * 0.75 = 600). Proves the cap is real rather than the
+  // turns merely happening to be caught.
+  let widest = 0;
+  for (let i = 1; i < tops.length; i += 1) {
+    const delta = tops[i] - tops[i - 1];
+    if (delta > widest) widest = delta;
+  }
+  assert.ok(widest > 0, 'the scan must actually move down the document');
+  assert.ok(widest <= 400, `a step of ${widest}px exceeded the ${400}px mounted band`);
+});
+
+test('a scan that reached the bottom blind reports a gap, not a complete export', async () => {
+  // Reaching the bottom is not a coverage proof. With a mounted band narrower
+  // than the gap between two turns, only the first turn can ever mount: the scan
+  // then crawls the remaining 11 860px of the document with nothing in the DOM
+  // and used to return 1 turn of 40 as a finished export, with no notice.
+  //
+  // This geometry is not one ChatGPT is known to produce — a virtualizer that
+  // mounted less than the gap between turns would leave visible blank space. It
+  // is tested because "complete" must be a claim the code can support, and a
+  // silent hole is the one failure a re-run cannot repair.
+  const meta = {};
+  const container = createBandedFixture(200, 300, 40);
+  const turns = await parser.scanTurns(container, {
+    readSections: (target) => target.querySelectorAll('[data-turn-id]'),
+    settle: async () => {},
+    stablePasses: 2,
+    scanMeta: meta,
+  });
+
+  assert.ok(turns.length < 40, 'the fixture must genuinely lose turns for this to mean anything');
+  assert.equal(meta.partial, true);
+  assert.equal(meta.reason, 'coverage gap');
+});
+
+test('a complete scan is never reported as a coverage gap', async () => {
+  // The counter-assertion, and the one that took two attempts to get right.
+  // A first version credited an empty band as a viewport of coverage, and a
+  // second judged the stretch past the final turn: both reported "partial
+  // export" on exports that had captured every single turn. A false partial is
+  // a worse user experience than no notice at all, because it tells the user
+  // their complete file is untrustworthy.
+  const geometries = [
+    { band: 1600, spacing: 300 },
+    { band: 800, spacing: 300 },
+    { band: 400, spacing: 300 },
+    { band: 300, spacing: 300 },
+    { band: 200, spacing: 150 },
+    { band: 900, spacing: 800 },
+  ];
+
+  for (const geometry of geometries) {
+    const meta = {};
+    const container = createBandedFixture(geometry.band, geometry.spacing, 40);
+    const turns = await parser.scanTurns(container, {
+      readSections: (target) => target.querySelectorAll('[data-turn-id]'),
+      settle: async () => {},
+      stablePasses: 2,
+      scanMeta: meta,
+    });
+    assert.equal(turns.length, 40, `band ${geometry.band}px did not capture every turn`);
+    assert.notEqual(
+      meta.reason, 'coverage gap',
+      `band ${geometry.band}px / spacing ${geometry.spacing}px falsely reported a coverage gap`,
+    );
+  }
+});
+
+test('coverage gaps are measured between read positions, not guessed', () => {
+  assert.equal(typeof parser.largestCoverageGap, 'function');
+  // [scrollTop, heightOfBandMountedThere]
+  // Contiguous coverage: each band reaches the next position.
+  assert.equal(parser.largestCoverageGap([[0, 100], [100, 100], [200, 100]], 800).width, 0);
+  // A hole between two productive positions is the gap that matters.
+  assert.equal(parser.largestCoverageGap([[0, 100], [500, 100]], 800).width, 400);
+  // The stretch past the LAST turn is bottom padding, not a hole: the scan
+  // always runs a little beyond the final turn.
+  assert.equal(parser.largestCoverageGap([[0, 100], [100, 100], [900, 0]], 800).width, 0);
+  // Unless it is beyond a whole viewport of blind travel.
+  assert.ok(parser.largestCoverageGap([[0, 100], [5000, 0]], 800).width > 800);
+  // Nothing mounted anywhere: no claim either way, and no false gap.
+  assert.equal(parser.largestCoverageGap([[0, 0], [800, 0]], 800).width, 0);
+  assert.equal(parser.largestCoverageGap([], 800).width, 0);
+  // Sub-pixel seams from a zoomed or high-DPI viewport are not missing turns.
+  assert.equal(parser.largestCoverageGap([[0, 100], [100.5, 100]], 800).width, 0);
+});
+
+test('conversation metadata is read for a skip decision without scrolling', async () => {
+  // Measured on a real 1146-message thread: walking it to find out whether it
+  // grew took 282 seconds and did not finish. The same question is answered by
+  // one request to the endpoint the page itself uses, which returns the
+  // conversation's update_time, the id of its newest message and its message
+  // count. This is what makes "skip unchanged conversations" cheap.
+  assert.equal(typeof parser.fetchConversationMetadata, 'function');
+
+  const calls = [];
+  const fakeFetch = async (url) => {
+    calls.push(url);
+    if (url === '/api/auth/session') {
+      return { ok: true, json: async () => ({ accessToken: 'token-abc' }) };
+    }
+    return {
+      ok: true,
+      json: async () => ({
+        title: 'Кадры решают всё',
+        update_time: 1787047506.810519,
+        create_time: 1786725126.086031,
+        current_node: 'node-newest',
+        mapping: {
+          a: { message: { id: 'a' } },
+          b: { message: { id: 'b' } },
+          c: { message: null },
+        },
+      }),
+    };
+  };
+
+  const meta = await parser.fetchConversationMetadata('conv-1', { fetchImpl: fakeFetch });
+  assert.equal(meta.updateTime, 1787047506.810519);
+  assert.equal(meta.currentNode, 'node-newest');
+  // Nodes WITHOUT a message body are not messages. Counting raw mapping keys
+  // would compare a number against a differently-derived stored one, and the
+  // measured thread showed the two differ (1147 nodes, 1146 messages).
+  assert.equal(meta.messageCount, 2);
+  assert.ok(
+    calls.some((url) => url.indexOf('conv-1') !== -1),
+    'the conversation id must reach the request',
+  );
+  // The mapping itself must not be carried out of here: it was 4 661 057 bytes
+  // for the measured thread and has no place in a skip decision.
+  assert.equal(meta.mapping, undefined);
+});
+
+test('unreadable metadata returns null rather than a shape that reads as unchanged', async () => {
+  // The distinction the whole skip decision rests on. A conversation whose
+  // metadata could not be read is NOT an unchanged conversation, and returning
+  // zeros or an empty object here would make it look like one.
+  const noToken = await parser.fetchConversationMetadata('conv-1', {
+    fetchImpl: async () => ({ ok: true, json: async () => ({}) }),
+  });
+  assert.equal(noToken, null, 'no session token means no answer');
+
+  const httpError = await parser.fetchConversationMetadata('conv-1', {
+    fetchImpl: async (url) => (url === '/api/auth/session'
+      ? { ok: true, json: async () => ({ accessToken: 't' }) }
+      : { ok: false, status: 404 }),
+  });
+  assert.equal(httpError, null, 'an HTTP error means no answer');
+
+  const threw = await parser.fetchConversationMetadata('conv-1', {
+    fetchImpl: async () => { throw new Error('offline'); },
+  });
+  assert.equal(threw, null, 'a network failure means no answer');
+
+  const noId = await parser.fetchConversationMetadata('', {
+    fetchImpl: async () => ({ ok: true, json: async () => ({ accessToken: 't' }) }),
+  });
+  assert.equal(noId, null, 'no conversation id means no answer');
 });

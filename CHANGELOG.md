@@ -5,14 +5,40 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.3.0] — 2026-08-19
+## [1.4.0] — 2026-09-10
+
+**The Web Store goes from 1.1.8 straight to 1.4.0.** Versions 1.2.0 and 1.3.0
+were tagged in the repository and never published, so no update is missing: this
+release carries everything they contained plus the fix below. 1.2.0 held the
+`data:` URL defect that broke saving for exactly the long Russian conversations
+it was built for; 1.3.0 repaired that, and while it waited, batch Project export
+and generated-file downloads landed on top of it.
+
+A user on 1.1.8 receives, in one update: batch export of an entire Project, all
+attachment types including files ChatGPT generates, resume without re-downloading,
+reliable saving of long Cyrillic conversations, and the coverage fix below.
+
+### Fixed
+
+- **An 8-turn conversation exported 4 turns and called itself complete.** The
+  turn list is virtualized: while the scan sits near the top, the turns below it
+  are not mounted and `scrollHeight` is short. The scan reached the bottom of
+  that short height, saw three stable passes and stopped — at the last turn it
+  had read. Neither coverage check could see it. There was no later band to
+  leave a hole against, and the travelled-but-unseen tail measured
+  `2400 - 3200 = -800px`: negative, so the one-viewport threshold could never
+  fire. The scan's furthest position is now compared against the document's
+  final height, and a stretch wider than one viewport below it is reported.
+  Measured on the export that prompted this: 4 of 8 turns, no notice.
+
+  The turn that carried a generated `.zip` was in the half that was dropped —
+  the file was never missing from the download path, it was missing from the
+  export.
+
+## [1.3.0] — 2026-08-19 (tagged, never published)
 
 Repairs three defects that lost a real export, and settles the popup's options
 into two that mean what they say.
-
-**1.2.0 was tagged but never published to the Web Store.** It contains the
-`data:` URL defect below, which fails the save path for exactly the long Russian
-conversations it was built for. 1.3.0 replaces it; users go from 1.1.8 to 1.3.0.
 
 ### Fixed
 

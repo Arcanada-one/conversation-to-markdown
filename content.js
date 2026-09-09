@@ -1047,7 +1047,7 @@ function nextScrollTop(container, atBottom, mountedBand) {
  *  Reaching the bottom is not a coverage proof — this is what turns "I arrived"
  *  into "I saw".
  */
-function largestCoverageGap(bands, viewportHeight) {
+function largestCoverageGap(bands, viewportHeight, documentHeight) {
   if (!bands || bands.length === 0) return { width: 0, at: 0 };
   const sorted = bands.slice().sort(function(a, b) { return a[0] - b[0]; });
 
@@ -1094,6 +1094,29 @@ function largestCoverageGap(bands, viewportHeight) {
   const blind = traversedTo - seenTo;
   if (viewportHeight > 0 && blind > viewportHeight) {
     if (blind > widest) { widest = blind; at = seenTo; }
+  }
+
+  // The case both comparisons above are blind to: the scan STOPPED at the last
+  // turn it read, so there is neither a later band to leave a hole against nor
+  // any travelled-but-unseen tail. `blind` is then zero or negative and the
+  // check above can never fire.
+  //
+  // That is exactly what a virtualized list produces. While the scan is near the
+  // top, ChatGPT has not mounted the turns below, so `scrollHeight` is short;
+  // the scan reaches the bottom OF THAT HEIGHT, sees three stable passes and
+  // stops — at the last turn it read. Measured on the export that prompted this:
+  // 4 of 8 turns, `blind` = -800px, reported complete with no notice.
+  //
+  // This function cannot see the defect on its own: `bands` says where the scan
+  // looked, never how tall the document turned out to be. The caller compares
+  // the two and passes `documentHeight`; without it the tail check is unchanged,
+  // which keeps every existing caller and test honest.
+  if (viewportHeight > 0 && documentHeight > 0) {
+    const unreached = documentHeight - traversedTo - viewportHeight;
+    if (unreached > viewportHeight && unreached > widest) {
+      widest = unreached;
+      at = traversedTo;
+    }
   }
   return { width: widest, at: at };
 }
@@ -1205,7 +1228,12 @@ async function scanTurns(container, options) {
         lastHeight === container.scrollHeight
         ? stablePasses + 1 : 0;
       if (stablePasses >= settings.stablePasses) {
-        const gap = largestCoverageGap(readBands, container.clientHeight || 0);
+        // `scrollHeight` is read HERE, at the end of the scan, when the
+        // virtualizer has mounted everything it is going to mount. Comparing it
+        // against the furthest position the scan actually visited is what
+        // catches a scan that stopped at a bottom which later grew.
+        const gap = largestCoverageGap(
+          readBands, container.clientHeight || 0, container.scrollHeight || 0);
         // A gap wider than the band that should have covered it means turns
         // existed in a stretch of the document the scan never mounted. Say so in
         // the artifact rather than presenting a hole as a complete conversation.

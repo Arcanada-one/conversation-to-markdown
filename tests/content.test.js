@@ -2451,6 +2451,43 @@ test('coverage gaps are measured between read positions, not guessed', () => {
   assert.equal(parser.largestCoverageGap([[0, 100], [100.5, 100]], 800).width, 0);
 });
 
+test('a scan that stopped at a bottom which later grew is a coverage gap', () => {
+  // The defect this covers, measured on a real export: an 8-turn conversation
+  // saved 4 turns and carried NO partial notice. While the scan sat near the
+  // top, the virtualizer had not mounted the lower turns, so scrollHeight was
+  // short; the scan reached the bottom of that short height, went stable and
+  // stopped — at the last turn it read.
+  //
+  // Both older checks are structurally blind to it. There is no later band to
+  // leave a hole against, and the travelled-but-unseen tail is
+  // `traversedTo - seenTo` = 2400 - 3200 = -800px: negative, so `blind >
+  // viewportHeight` can never fire. The gap is only visible by comparing the
+  // furthest position visited against the document's FINAL height.
+  const readTop = [[0, 800], [800, 800], [1600, 800], [2400, 800]];
+  const gap = parser.largestCoverageGap(readTop, 800, 6400);
+  assert.ok(
+    gap.width > 0,
+    'half the conversation below the scan must be reported, not presented as complete',
+  );
+  assert.equal(gap.at, 2400, 'the gap starts at the furthest position visited');
+
+  // Positive control for the assertion above: the SAME bands and viewport, with
+  // the document ending where the scan stopped, must stay silent. Without this
+  // the test would also pass if the new branch fired unconditionally.
+  assert.equal(
+    parser.largestCoverageGap(readTop, 800, 3200).width, 0,
+    'a scan that truly reached the bottom is complete',
+  );
+  // A false "partial export" on a good file is a real cost, so the ordinary
+  // overshoot past the final turn stays under the one-viewport threshold.
+  assert.equal(
+    parser.largestCoverageGap(readTop, 800, 3500).width, 0,
+    '300px of unreached document is ordinary, not a hole',
+  );
+  // Omitting documentHeight leaves every existing caller's behaviour unchanged.
+  assert.equal(parser.largestCoverageGap(readTop, 800).width, 0);
+});
+
 test('conversation metadata is read for a skip decision without scrolling', async () => {
   // Measured on a real 1146-message thread: walking it to find out whether it
   // grew took 282 seconds and did not finish. The same question is answered by

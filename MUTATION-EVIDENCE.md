@@ -1564,3 +1564,34 @@ the defect was shipping.
 so the handler threw on its own first line. Twelve pre-existing tests went red
 immediately. Worth recording because it is the reverse of this file's usual
 lesson: the suite caught what review did not.
+
+## Wave 4 — a bottom that grows (1.4.0)
+
+The defect that prompted this wave shipped inside 1.3.0's own coverage guard.
+An 8-turn conversation exported 4 turns with no partial notice, and the `.zip`
+the user came looking for was attached to one of the dropped turns.
+
+`largestCoverageGap` judges two things: holes between read positions, and a
+travelled-but-unseen tail measured as `traversedTo - seenTo`. A scan that stops
+AT its last productive position defeats both. There is no later band to leave a
+hole against, and the tail arithmetic goes negative — on the failing export,
+`2400 - 3200 = -800px`, so `blind > viewportHeight` could never fire.
+
+The measurement the function was missing is not in `bands` at all: bands record
+where the scan looked, never how tall the document turned out to be. The caller
+now reads `scrollHeight` after the scan settles and passes it in.
+
+| id | mutation | verdict |
+|----|----------|---------|
+| G1 | delete the `documentHeight` branch entirely (revert to 1.3.0) | **DIED** — the new test goes red |
+| G2 | `unreached > viewportHeight` → `unreached > 0` | **DIED** — false-positive controls go red |
+
+G2 matters as much as G1. Without a threshold the guard fires on the ordinary
+overshoot past the final turn, and a "partial export" notice on a complete file
+tells the user their good data is untrustworthy. The three controls in the test
+pin both directions: the same bands and viewport report a gap at
+`documentHeight` 6400, and stay silent at 3200 (a true bottom) and 3500 (300px
+of ordinary slack).
+
+Omitting the third argument leaves the old behaviour byte-for-byte, so every
+pre-existing caller and assertion still measures what it measured before.

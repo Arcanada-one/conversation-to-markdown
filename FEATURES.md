@@ -95,6 +95,15 @@ mounted reports a partial export rather than presenting a hole as a complete
 conversation. Verify that a normal complete export is **not** flagged — a false
 "partial" is worse than none.
 
+**A bottom that grows is not the bottom.** Because the lower turns are not
+mounted while the scan is near the top, the document reports a short height; a
+scan that stops there has read only the top of the conversation. The furthest
+position visited is checked against the document's final height, and more than
+one viewport left below it is reported as partial. Verify on a conversation of
+8+ turns that every turn arrives, and that the file carries no partial notice
+when it does: before 1.4.0 an 8-turn conversation saved 4 turns silently, and
+the generated file attached to a dropped turn went with it.
+
 **Markdown fidelity.** Paragraphs, headings, lists, blockquotes, links, code,
 tables and visible generated images survive. Multiple segments of one turn are
 combined rather than only the first paragraph.
@@ -251,7 +260,7 @@ match the CHANGELOG's top entry, and users must never see a gap. The last entry
 below is the version being shipped; a test checks this line against the CHANGELOG
 so a release cannot be added without revisiting this file.
 
-Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.3.0
+Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0
 
 **Changelog coupling.** A version bump with no dated CHANGELOG entry fails the
 build, because releases 1.1.6 and 1.1.7 reached the store leaving no record of

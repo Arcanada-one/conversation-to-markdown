@@ -1,11 +1,42 @@
 /**
- * ChatGPT → Markdown v1.3.0
+ * ChatGPT → Markdown
  * Content script: parses the live ChatGPT conversation and returns clean Markdown.
  *
  * Iterates [data-turn-id] sections (not just [data-message-author-role]) so that
  * generated images — which live outside the message div but inside the turn section —
  * are correctly captured. Strips query parameters from exported URLs (privacy).
+ *
+ * NO VERSION NUMBER IN THIS HEADER. It carried a stale one for two releases
+ * while manifest.json had moved on, because a header comment is the one place
+ * the version-coupling tests cannot see. A number that only some releases
+ * remember to bump is worse than no number: it reads as authoritative and is
+ * silently wrong. A test now keeps this header free of one.
+ *
+ * DOUBLE INJECTION IS EXPECTED, and this file must survive it.
+ *
+ * The manifest declares this script on every chatgpt.com page, AND popup.js
+ * re-injects it with `chrome.scripting.executeScript` after a batch navigation
+ * replaces the document. In a batch that navigation is real and the re-inject is
+ * required. For a single export on an already-loaded tab it is not: the script
+ * is already there, the second copy runs against the same window, and a
+ * top-level `const` throws
+ *
+ *   Uncaught SyntaxError: Identifier 'ATTACHMENT_CHIP_SELECTORS' has already
+ *   been declared
+ *
+ * — thrown at PARSE time, so nothing in the second copy runs at all. The first
+ * copy's listener still answers, which is why the export still produced a file
+ * and the only symptom was an error page most users never open.
+ *
+ * Hence `var`, not `const`, for every top-level binding in this file: a repeated
+ * `var` is a no-op where a repeated `const` is a fatal parse error. Wrapping the
+ * file in a guard block was tried first and is WRONG — it moves the declarations
+ * into a block scope, and popup.js calls these functions by name through
+ * `executeScript`, which can only see globals. A test asserts both halves: that
+ * a second injection does not throw, and that the first one really did define
+ * the binding the second would collide with.
  */
+if (typeof globalThis !== 'undefined') globalThis.__c2mContentScriptLoaded = true;
 
 /** Convert an HTML element's content to plain Markdown text. */
 function stripUrlQuery(url, allowedQueryNames) {
@@ -269,7 +300,7 @@ function extractImages(section) {
  *  attachment in every conversation disappears while the export still reports
  *  success. The fallbacks are shape-based (a link to a file host) so a rename
  *  degrades coverage instead of zeroing it. */
-const ATTACHMENT_CHIP_SELECTORS = [
+var ATTACHMENT_CHIP_SELECTORS = [
   '[data-testid="file-chip"]',
   '[data-testid*="file-chip"]',
   '[data-testid*="attachment"]',
@@ -912,7 +943,7 @@ function createScanSettings(options) {
 
 // Chrome a re-mounted turn shows while its real content is still coming back.
 // These are not answers, however long they run.
-const PLACEHOLDER_MARKDOWN = /^(thinking|reasoning|searching|analyzing|analysing|gathering|expanding|loading|generating|working)\b|^(думаю|размышляю|ищу|загружаю|генерирую)\b/i;
+var PLACEHOLDER_MARKDOWN = /^(thinking|reasoning|searching|analyzing|analysing|gathering|expanding|loading|generating|working)\b|^(думаю|размышляю|ищу|загружаю|генерирую)\b/i;
 
 function looksLikePlaceholder(markdown) {
   return PLACEHOLDER_MARKDOWN.test(markdown.trim());
@@ -2417,3 +2448,4 @@ if (typeof module !== 'undefined' && module.exports) {
     waitForConversationReady: waitForConversationReady,
   };
 }
+

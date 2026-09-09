@@ -95,6 +95,13 @@ mounted reports a partial export rather than presenting a hole as a complete
 conversation. Verify that a normal complete export is **not** flagged — a false
 "partial" is worse than none.
 
+**No errors on the extension's own page.** The content script is injected both
+declaratively and by the popup, so it must tolerate running twice in one
+document. After any export, open `chrome://extensions` and confirm the card
+shows no **Errors** button: before 1.4.0 every ordinary export left an
+`already been declared` SyntaxError there while still producing a file, so the
+extension looked healthy from the outside.
+
 **A bottom that grows is not the bottom.** Because the lower turns are not
 mounted while the scan is near the top, the document reports a short height; a
 scan that stops there has read only the top of the conversation. The furthest

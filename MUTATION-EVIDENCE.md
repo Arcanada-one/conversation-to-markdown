@@ -1595,3 +1595,40 @@ of ordinary slack).
 
 Omitting the third argument leaves the old behaviour byte-for-byte, so every
 pre-existing caller and assertion still measures what it measured before.
+
+## Wave 5 — the second injection (1.4.0)
+
+Reported from `chrome://extensions` against a live conversation, not by any
+test:
+
+```
+Uncaught SyntaxError: Identifier 'ATTACHMENT_CHIP_SELECTORS'
+has already been declared          content.js:1
+```
+
+The manifest declares `content.js` on every chatgpt.com page and `popup.js`
+re-injects it after a batch navigation. On an already-loaded tab both copies run
+in the same window; the second dies at PARSE time on a top-level `const`, so
+none of its code executes. The first copy's listener still answers, so an export
+still produced a file — the whole failure lived on an error page nobody opens.
+
+Fix: every top-level binding is `var`. A repeated `var` is a no-op; a repeated
+`const` is fatal.
+
+| id | mutation | verdict |
+|----|----------|---------|
+| G3 | `var ATTACHMENT_CHIP_SELECTORS` → `const` | **DIED** |
+| G4 | wrap the file in an `if (!loaded) { … }` guard instead of using `var` | **DIED** — the positive control fails |
+
+G4 is worth recording because it was the first fix attempted and it is wrong.
+Wrapping moves every declaration into a block scope, and `popup.js` calls these
+functions **by name** through `executeScript`, which can only reach globals. The
+suite caught it through the test's positive control — the assertion that the
+first injection really did define the binding the second would collide with.
+Without that control the wrapper would have passed as a fix and broken the popup
+on every page.
+
+A note on measurement: G3 first appeared to SURVIVE. The mutation had been
+applied by line number, the line had moved, and the edit landed in a comment.
+An unapplied mutation reads exactly like a surviving one — mutate by pattern,
+and confirm the mutated line is the line you meant.

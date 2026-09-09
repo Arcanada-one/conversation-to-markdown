@@ -1,18 +1,43 @@
 const btn = document.getElementById('btn-copy');
 const btnCancel = document.getElementById('btn-cancel');
+const btnPause = document.getElementById('btn-pause');
 const status = document.getElementById('status');
 const chkImages = document.getElementById('chk-images');
+const chkBatch = document.getElementById('chk-batch');
+const batchWarning = document.getElementById('batch-warning');
+
+/** Keep the two options consistent, and show the caveat while it is still a choice.
+ *
+ *  A batch WITHOUT file saving archives signed, short-lived links rather than the
+ *  files themselves: the export looks complete the day it runs and is empty a few
+ *  hours later. That used to be a paragraph of warning text the user could read
+ *  past — and a warning that can be ignored into data loss is the wrong mechanism.
+ *  Choosing a batch now switches saving on and holds it there, so the archive
+ *  cannot be built out of links that expire.
+ *
+ *  Unchecking the batch hands the option back rather than leaving it stuck on. */
+function syncBatchOptions() {
+  var batchOn = !!(chkBatch && chkBatch.checked);
+  if (batchWarning) batchWarning.classList.toggle('visible', batchOn);
+  if (!chkImages) return;
+  if (batchOn) chkImages.checked = true;
+  chkImages.disabled = batchOn;
+}
+
+if (chkBatch) chkBatch.addEventListener('change', syncBatchOptions);
 
 // Id of the tab currently being scanned, so Stop knows where to send the flag.
 var scanningTabId = null;
 var progressTimer = null;
+var batchCancelled = false;
+var batchPaused = false;
 
 function showStatus(type, message) {
   status.className = type;
   status.textContent = message;
 }
 
-/** Parse ![](url) references from Markdown, return {url, alt} pairs. */
+/** Parse ![](url) references from Markdown, return {url, label, kind} pairs. */
 function parseImageRefs(md) {
   const seen = new Set();
   const refs = [];
@@ -21,10 +46,42 @@ function parseImageRefs(md) {
   while ((m = re.exec(md)) !== null) {
     if (!seen.has(m[2])) {
       seen.add(m[2]);
-      refs.push({ url: m[2], alt: m[1] });
+      refs.push({ url: m[2], label: m[1], kind: 'image' });
     }
   }
   return refs;
+}
+
+/** Parse [label](url) file links for downloadable artifacts (not images). */
+function parseFileRefs(md) {
+  const seen = new Set();
+  const refs = [];
+  const re = /(?<!!)\[([^\]]*)\]\((https?:\/\/[^)]+)\)/g;
+  let m;
+  while ((m = re.exec(md)) !== null) {
+    if (!seen.has(m[2]) && isDownloadableFileUrl(m[2])) {
+      seen.add(m[2]);
+      refs.push({ url: m[2], label: m[1], kind: 'file' });
+    }
+  }
+  return refs;
+}
+
+function parseArtifactRefs(md) {
+  return parseImageRefs(md).concat(parseFileRefs(md));
+}
+
+function isDownloadableFileUrl(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname === 'files.oaiusercontent.com') return true;
+    if (parsed.hostname === 'chatgpt.com' || parsed.hostname === 'chat.openai.com') {
+      return parsed.pathname.includes('/files/') || parsed.pathname.includes('/estuary/');
+    }
+    return false;
+  } catch (_e) {
+    return false;
+  }
 }
 
 /** Build the chatgpt-export/ sub-path for one exported conversation.
@@ -41,23 +98,673 @@ function exportPath(slug, filename) {
  *  two conversations both starting at image_001 would otherwise collide in the
  *  flat legacy folder, and Chrome would suffix them "image_001 (1).png". */
 function imageFilename(url, alt, index, slug) {
-  // Try to infer extension from the alt text first (e.g. "photo.jpg")
-  var ext = 'png';
-  var altMatch = alt && alt.match(/\.(png|jpe?g|gif|webp|svg|bmp)(\?|$)/i);
-  if (altMatch) {
-    ext = altMatch[1].toLowerCase().replace('jpeg', 'jpg');
+  return artifactFilename(url, alt, index, slug, 'image');
+}
+
+/** Sanitize one path segment for the Downloads folder: no separators, no
+ *  traversal, no reserved characters. Returns '' when nothing usable remains. */
+function sanitizeFilenamePart(value) {
+  if (!value) return '';
+  var cleaned = String(value)
+    .replace(/[\\/]+/g, '-')
+    .replace(/[\x00-\x1f<>:"|?*]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^\.+/, '')
+    .replace(/\.+$/, '');
+  return cleaned.slice(0, 80);
+}
+
+/** Split a filename into stem and extension.
+ *
+ *  A compound extension such as `.tar.gz` needs no special case here: the stem
+ *  keeps everything before the LAST dot, so `archive.tar` + `.gz` recombines to
+ *  `archive.tar.gz` unchanged. An earlier version carried an explicit
+ *  `(?:\.(?:tar|user))?` branch; a mutation proved it changed no observable
+ *  output, so it was removed rather than left as untestable complexity. */
+function splitFilenameExtension(name) {
+  var match = String(name || '').match(/^(.*?)(\.[A-Za-z0-9]{1,8})$/);
+  if (!match) return { stem: String(name || ''), ext: '' };
+  return { stem: match[1], ext: match[2].toLowerCase() };
+}
+
+/** Derive a filename from an artifact URL or label text.
+ *
+ *  Documents keep their ORIGINAL name when the link carries one: a Word file
+ *  offered as `Договор.docx` is worth more on disk under that name than as
+ *  `file_003.docx`, and a batch export of many conversations is unreadable
+ *  when every attachment is a numbered stub. Images stay numbered — their
+ *  labels are alt text, not filenames — and any name collision is still
+ *  disambiguated by the index prefix. */
+function artifactFilename(url, label, index, slug, kind) {
+  var ext = kind === 'image' ? 'png' : 'bin';
+  var originalStem = '';
+
+  var fromLabel = splitFilenameExtension(sanitizeFilenamePart(label));
+  if (fromLabel.ext) {
+    ext = fromLabel.ext.replace(/^\./, '');
+    originalStem = fromLabel.stem;
   } else {
     try {
-      var pathMatch = new URL(url).pathname.match(/\.(png|jpe?g|gif|webp|svg|bmp)(\?|$)/i);
-      if (pathMatch) ext = pathMatch[1].toLowerCase().replace('jpeg', 'jpg');
+      var segments = new URL(url).pathname.split('/');
+      var last = sanitizeFilenamePart(decodeURIComponent(segments[segments.length - 1] || ''));
+      var fromPath = splitFilenameExtension(last);
+      if (fromPath.ext) {
+        ext = fromPath.ext.replace(/^\./, '');
+        originalStem = fromPath.stem;
+      }
     } catch (_e) {}
   }
+
+  if (kind === 'image') {
+    ext = ext.replace(/^jpe?g$/i, 'jpg');
+    if (!/^(png|jpg|gif|webp|svg|bmp)$/i.test(ext)) ext = 'png';
+    originalStem = '';
+  }
+
   var prefix = slug ? slug + '-' : '';
-  return prefix + 'image_' + String(index + 1).padStart(3, '0') + '.' + ext;
+  var counter = String(index + 1).padStart(3, '0');
+  if (originalStem) {
+    return prefix + counter + '-' + originalStem + '.' + ext;
+  }
+  var stem = kind === 'image' ? 'image' : 'file';
+  return prefix + stem + '_' + counter + '.' + ext;
+}
+
+/** Marker introducing the conversation id in a batch export filename.
+ *
+ *  `slugifyTitle` strips this character from every title, so a slug can never contain
+ *  it. That makes the current name format (`slug[--stamp]~id`) and the older,
+ *  id-less format (`slug[--stamp]`) structurally NON-OVERLAPPING: no name written by
+ *  an older version can be read as a current one. Every earlier scheme separated the
+ *  id with `--`, which a title may legally contain, and each of the resulting five
+ *  defects skipped a conversation that had never been saved. */
+var ID_MARKER = '~';
+
+/** Case-fold a candidate key up to the id marker, leaving the id itself untouched.
+ *
+ *  Two different rules for two different jobs: the path part must follow the
+ *  filesystem (macOS and Windows treat `Budget/` and `budget/` as one directory), while
+ *  the id must be compared exactly, because it is what makes a name attributable to
+ *  one conversation. Both sides of the comparison call this, so they cannot drift. */
+function foldExceptId(key) {
+  var at = String(key).indexOf(ID_MARKER);
+  if (at < 0) return String(key).toLowerCase();
+  return String(key).slice(0, at).toLowerCase() + String(key).slice(at);
+}
+
+/** Format a date as YYYYMMDD-HHMM for timestamped re-exports. */
+function formatExportTimestamp(date) {
+  var d = date || new Date();
+  var pad = function(n) { return String(n).padStart(2, '0'); };
+  return String(d.getFullYear()) + pad(d.getMonth() + 1) + pad(d.getDate()) +
+    '-' + pad(d.getHours()) + pad(d.getMinutes());
+}
+
+/** Build the .md filename; timestamp suffix implements re-export without uniquify suffixes. */
+function buildMdFilename(slug, useTimestamp, now, fixedStamp) {
+  var base = slug || 'conversation';
+  if (useTimestamp) {
+    var stamp = fixedStamp || formatExportTimestamp(now);
+    return base + '--' + stamp + '.md';
+  }
+  return base + '.md';
+}
+
+/** Progress label for a batch export: "3 of 12 — Conversation title". */
+function formatBatchProgress(index, total, title) {
+  var position = index + 1;
+  var label = title ? ' — ' + title : '';
+  return position + ' of ' + total + label;
+}
+
+/** Root folder for a project batch under Downloads/chatgpt-export/. */
+function batchRootPath(projectSlug) {
+  return projectSlug ? 'chatgpt-export/' + projectSlug : 'chatgpt-export';
+}
+
+/** Per-conversation folder inside a batch export. */
+function conversationFolderPath(convSlug, projectSlug) {
+  var root = batchRootPath(projectSlug);
+  return convSlug ? root + '/' + convSlug : root;
+}
+
+/** Build the .md filename for a conversation inside a BATCH export.
+ *
+ *  The conversation id is appended because titles collide — duplicates and
+ *  "Untitled" are ordinary inside a Project — and a resumed run has nothing but
+ *  the download paths to identify what already landed. A single export keeps the
+ *  clean, title-only name from `buildMdFilename`; only the batch pays the id. */
+function batchMdFilename(convSlug, convId, useTimestamp, stamp, isPartial) {
+  var base = convSlug || convId || 'conversation';
+  // A truncated export is marked IN THE NAME, not only inside the file. Resume can
+  // only see filenames, so an incomplete file under the complete name is
+  // indistinguishable from a finished one and the next run skips the conversation —
+  // refusing the one action that could repair it. The suffix goes before the stamp
+  // and id so those keep their positions.
+  if (isPartial) base += '-partial';
+  var parts = base;
+  if (useTimestamp) parts += '--' + (stamp || formatExportTimestamp());
+  // The id is introduced by a marker `slugifyTitle` removes from every title, so no
+  // title can forge an id boundary. That is the invariant the whole resume mechanism
+  // rests on: without it the current and older name formats share an alphabet, and a
+  // stamped older export is character-for-character a valid current name belonging to
+  // some other conversation — which silently skipped that conversation.
+  if (convId) parts += ID_MARKER + convId;
+  return parts + '.md';
+}
+
+/** Full download path for a conversation's markdown file in a batch. */
+function mdDownloadPath(convSlug, projectSlug, useTimestamp, stamp, convId) {
+  var mdName = batchMdFilename(convSlug, convId, useTimestamp, stamp);
+  return conversationFolderPath(convSlug, projectSlug) + '/' + mdName;
+}
+
+
+
+/** Filename stem with the `.md` extension removed. */
+function mdStem(downloadPath) {
+  var normalized = String(downloadPath || '').replace(/\\/g, '/');
+  var file = normalized.split('/').filter(Boolean).pop() || '';
+  return file.replace(/\.md$/i, '');
+}
+
+
+/** The conversation folder a download path sits in, relative to the export root.
+ *  Folds to lower case because macOS and Windows treat `Budget/` and `budget/` as
+ *  the same directory — the comparison must follow the filesystem, not the string. */
+function conversationFolderFromPath(downloadPath) {
+  var normalized = String(downloadPath || '').replace(/\\/g, '/');
+  var anchor = normalized.indexOf('chatgpt-export/');
+  if (anchor > 0) normalized = normalized.slice(anchor);
+  var segments = normalized.split('/').filter(Boolean);
+  segments.pop();                                   // drop the filename
+  return segments.join('/');
+}
+
+/** Every name this conversation could have written, as folder-qualified keys.
+ *
+ *  `owned` names embed the conversation id and so belong to it alone. `legacy`
+ *  names — written before ids were recorded — are shared by every namesake, so the
+ *  caller must check for a single claimant before trusting one.
+ *
+ *  A stamp records when a past run happened and so cannot be reproduced from
+ *  scratch. Rather than pattern-matching it out of a name (the inference that failed
+ *  five times), the stamps actually present on disk are passed in and each is tried
+ *  as a candidate. Generating `slug--<stamp>--<id>` and asking whether that exact
+ *  name landed is an exact test of ownership. */
+function candidateExportNames(conv, projectSlug, stamps) {
+  var slug = conv.slug || conv.id || 'conversation';
+  var folder = conversationFolderPath(slug, projectSlug).toLowerCase();
+  var prefix = folder + '/' + String(slug).toLowerCase();
+  var owned = [];
+  var legacy = [prefix];
+  var list = stamps || [];
+
+  if (conv.id) {
+    // The id keeps its case. Folder and slug are folded because macOS and Windows
+    // fold them — that follows the filesystem. The id is different in kind: it is the
+    // one field the whole design relies on to be unforgeable, and folding it would
+    // collapse two distinct identities onto one name, so a conversation could be
+    // excused by a file belonging to another. Not reachable while ChatGPT ids are
+    // lowercase hex, but "this name can only mean one thing" is the assumption that
+    // produced every silent-loss defect in this file's history.
+    var id = String(conv.id);
+    owned.push(prefix + ID_MARKER + id);
+    for (var s = 0; s < list.length; s++) {
+      owned.push(prefix + '--' + list[s] + ID_MARKER + id);
+    }
+  }
+  // A STAMPED legacy name is deliberately NOT generated. `slug--20260817-1200` is
+  // simultaneously "an older export of `slug`, stamped" and "an export of the
+  // conversation whose id is `20260817-1200`" — the two name spaces overlap exactly
+  // there, and nothing in the name resolves it. Treating such a file as proof let it
+  // excuse a conversation that had never been written. The cost is that a stamped
+  // export from an older version is re-exported once; the alternative is losing a
+  // conversation, so the trade is not close.
+  return { owned: owned, legacy: legacy };
+}
+
+/** The `YYYYMMDD-HHMM` stamps that appear in these download names.
+ *
+ *  Collected so `candidateExportNames` can generate the stamped names that could
+ *  exist, instead of trying to recognise a stamp inside a name it did not build. A
+ *  stamp is a fixed, unambiguous shape — unlike an id or a title — so reading one
+ *  here is safe: a false positive only adds a candidate name that nothing matches. */
+function stampsInPaths(paths) {
+  var stamps = new Set();
+  for (var i = 0; i < paths.length; i++) {
+    // Split on the id marker as well as the separator: in `slug--<stamp>~<id>` the
+    // stamp is followed by the marker, not by another separator.
+    var fields = mdStem(paths[i]).split(/--|~/);
+    for (var f = 0; f < fields.length; f++) {
+      if (/^\d{8}-\d{4}$/.test(fields[f])) stamps.add(fields[f]);
+    }
+  }
+  return Array.from(stamps);
+}
+
+
+/** Skip conversations whose markdown already landed in a prior partial run.
+ *
+ *  Identity is the conversation ID, never the title. Titles are derived into
+ *  slugs, and slugs collide: duplicate titles are ordinary inside a Project,
+ *  "Untitled" is common, and titles differing only by case fold onto one key.
+ *  Every such collision used to make the first export skip the others FOREVER
+ *  while reporting success — a silent loss that re-running could not repair.
+ *  Conversations with no id fall back to the slug key, which is the old
+ *  behaviour and still better than exporting nothing. */
+function filterPendingConversations(conversations, completedPaths, projectSlug) {
+  var paths = [];
+  if (completedPaths && typeof completedPaths.forEach === 'function') {
+    completedPaths.forEach(function(item) { paths.push(item); });
+  }
+
+  // GENERATE, DON'T PARSE. Five rounds of defects here all had one cause: reading a
+  // filename to work out which conversation wrote it. Every attempt — matching the
+  // whole stem, counting files per title, checking the trailing field against known
+  // ids — was a different inference, and each one silently lost a conversation,
+  // because a title can contain anything a separator or an id can contain.
+  // `slugifyTitle('Budget - draft')` is `Budget---draft`, whose trailing field is a
+  // legal ChatGPT id.
+  //
+  // The format is ours, so the question is answered forwards instead: for each
+  // conversation, build the exact names it COULD have written, and look for those.
+  // Nothing about an unrecognised name is inferred — it simply matches nothing.
+  //
+  // Legacy names (no id) stay ambiguous by nature: two conversations sharing a
+  // title generate the same legacy name, and which one wrote the file is unknowable.
+  // Such a name is trusted only when a single conversation claims it; otherwise both
+  // re-export. Re-exporting costs bandwidth, a false skip loses a conversation
+  // permanently and re-running cannot repair it, so ambiguity resolves to the cheap
+  // direction.
+  var landed = new Set();
+  for (var i = 0; i < paths.length; i++) {
+    var name = mdStem(paths[i]);
+    // Keyed with the conversation folder so a name is only credited inside the folder
+    // it belongs to. Everything up to the id marker is folded, matching the
+    // filesystem's own case rules on macOS and Windows; the id after the marker keeps
+    // its case, because it identifies the conversation rather than the file's place on
+    // disk. See `candidateExportNames`, which must fold exactly the same way.
+    var folder = conversationFolderFromPath(paths[i]);
+    if (name) landed.add(foldExceptId(folder + '/' + name));
+  }
+
+  // How many conversations would generate each legacy name.
+  var stamps = stampsInPaths(paths);
+
+  // How many conversations could have written each candidate name. Counted across
+  // owned AND legacy candidates together, because the two spaces overlap: a stamped
+  // legacy name `Budget--20260817-1200` is also the id-bearing name of a
+  // conversation whose id happens to be `20260817-1200`. A name more than one
+  // conversation could have written is evidence about none of them.
+  var claimants = Object.create(null);
+  for (var c = 0; c < conversations.length; c++) {
+    var all = candidateExportNames(conversations[c], projectSlug, stamps);
+    var every = all.owned.concat(all.legacy);
+    // Count each conversation once per distinct name, so a conversation cannot
+    // inflate a name's count by generating it twice.
+    var seen = new Set();
+    for (var n = 0; n < every.length; n++) {
+      if (seen.has(every[n])) continue;
+      seen.add(every[n]);
+      claimants[every[n]] = (claimants[every[n]] || 0) + 1;
+    }
+  }
+
+  return conversations.filter(function(conv) {
+    var names = candidateExportNames(conv, projectSlug, stamps);
+    var every = names.owned.concat(names.legacy);
+    for (var a = 0; a < every.length; a++) {
+      // A landed name excuses this conversation only when no other conversation
+      // could have produced the same name.
+      if (landed.has(every[a]) && claimants[every[a]] === 1) return false;
+    }
+    return true;
+  });
+}
+
+
+/** Classify a per-conversation failure so the run can react instead of
+ *  burning through the remaining list.
+ *
+ *  A dropped network is NOT a property of the conversation being exported: on
+ *  a 40-conversation run it would otherwise fail 39 more times and report 39
+ *  broken conversations. Offline and unreachable are therefore HOLD conditions,
+ *  while a genuine per-conversation problem is RETRY then SKIP. */
+function classifyBatchFailure(message) {
+  var text = String(message || '').toLowerCase();
+  if (typeof navigator !== 'undefined' && navigator && navigator.onLine === false) return 'offline';
+  if (/failed to fetch|network ?error|net::|err_internet|err_network|err_name_not_resolved|err_connection/.test(text)) return 'offline';
+  if (/\b(?:502|503|504)\b|bad gateway|service unavailable|gateway timeout|too many requests|\b429\b/.test(text)) return 'unreachable';
+  if (/did not load|timed out|timeout/.test(text)) return 'transient';
+  return 'conversation';
+}
+
+/** Exponential backoff with a finite budget: 1s, 2s, 4s, capped. */
+function backoffDelayMs(attempt) {
+  return Math.min(1000 * Math.pow(2, Math.max(0, attempt - 1)), 8000);
+}
+
+function sleep(ms) {
+  return new Promise(function(resolve) { setTimeout(resolve, ms); });
+}
+
+/** Block while the operator has paused, and report cancellation. */
+async function waitWhilePaused(controls) {
+  while (controls && controls.isPaused && controls.isPaused()) {
+    if (controls.isCancelled && controls.isCancelled()) return false;
+    await sleep(250);
+  }
+  return !(controls && controls.isCancelled && controls.isCancelled());
+}
+
+/* ---------------------------------------------------------------------------
+ * The export index.
+ *
+ * What a previous run accomplished used to be inferred from Chrome's download
+ * history, and that inference cannot answer the question that matters: a
+ * filename cannot say whether the conversation has MORE MESSAGES than when it
+ * was saved. So a re-run either skipped a conversation that had grown, or
+ * re-exported everything.
+ *
+ * The index answers it directly. Per conversation it keeps five scalars — the
+ * conversation's own `update_time`, the id of its newest message, its message
+ * count, the bytes written and the file count — and nothing else. Measured
+ * before it was designed (see the commit message): 800 conversations is 210 743
+ * bytes, 2% of the 10MB quota, written in 15ms; it survives a browser restart;
+ * and the conversation mapping it is deliberately NOT caching is 4 661 057 bytes
+ * for a single thread.
+ *
+ * Three properties are load-bearing and each has a test:
+ *   - absence of the API reads as "no index", never as a throw (without the
+ *     `storage` permission `chrome.storage` is undefined, not a failing call);
+ *   - a write is only reported as stored if it actually stored, because quota
+ *     failure arrives through `runtime.lastError` and an unchecked write looks
+ *     exactly like success;
+ *   - an unreadable answer is never grounds for skipping a conversation.
+ * ------------------------------------------------------------------------- */
+
+var INDEX_KEY = 'c2mExportIndex';
+/** Deliberately far below the 10MB quota. The index is a convenience; the files
+ *  on disk remain the source of truth, so it may be trimmed but must never grow
+ *  until Chrome refuses writes for the whole extension. */
+var INDEX_BYTE_BUDGET = 1048576;
+
+/** The storage area, or null when the permission is absent. Never throws. */
+function storageArea() {
+  if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) return null;
+  return chrome.storage.local;
+}
+
+/** Read the whole index. An unreadable or corrupt store reads as empty, which
+ *  costs a re-export and never a silent skip. */
+function readExportIndex() {
+  return new Promise(function(resolve) {
+    var area = storageArea();
+    if (!area) { resolve({}); return; }
+    try {
+      area.get([INDEX_KEY], function(items) {
+        var value = items && items[INDEX_KEY];
+        if (!value || typeof value !== 'object') { resolve({}); return; }
+        resolve(value);
+      });
+    } catch (_e) {
+      resolve({});
+    }
+  });
+}
+
+/** Record one conversation. Resolves true only when the write actually landed.
+ *
+ *  Only the decision inputs are kept: passing a mapping, markdown or title here
+ *  stores none of them. That is asserted by a test, because "store just the
+ *  scalars" is a rule that erodes the moment someone adds a convenient field.
+ */
+function recordExportedConversation(conversationId, record) {
+  return new Promise(function(resolve) {
+    var area = storageArea();
+    if (!area || !conversationId) { resolve(false); return; }
+    readExportIndex().then(function(index) {
+      var next = Object.assign({}, index);
+      var row = {
+        updateTime: typeof record.updateTime === 'number' ? record.updateTime : null,
+        currentNode: record.currentNode ? String(record.currentNode) : null,
+        messageCount: typeof record.messageCount === 'number' ? record.messageCount : null,
+        bytes: typeof record.bytes === 'number' ? record.bytes : null,
+        files: typeof record.files === 'number' ? record.files : 0,
+        at: typeof record.at === 'number' ? record.at : null,
+      };
+      next[String(conversationId)] = row;
+
+      var payload = {};
+      payload[INDEX_KEY] = next;
+      var size = 0;
+      try {
+        size = new TextEncoder().encode(JSON.stringify(payload)).length;
+      } catch (_e) {
+        size = 0;
+      }
+      if (size > INDEX_BYTE_BUDGET) { resolve(false); return; }
+
+      try {
+        area.set(payload, function() {
+          // The quota is reported HERE, not thrown. Reading it is the difference
+          // between an index that stops recording loudly and one that stops
+          // recording silently.
+          var failed = typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.lastError;
+          resolve(!failed);
+        });
+      } catch (_e) {
+        resolve(false);
+      }
+    });
+  });
+}
+
+/** Compare a conversation's live metadata against what the index remembers.
+ *
+ *  Verdicts: 'new' (never exported), 'unchanged' (skip), 'grown' (re-export),
+ *  'unknown' (metadata unreadable — export, because an unreadable answer is not
+ *  an unchanged conversation).
+ *
+ *  A message count that went DOWN also returns 'grown': a switched branch or a
+ *  deleted turn means the saved file no longer matches the conversation, and
+ *  "changed" is the useful distinction, not the direction of the change.
+ */
+function classifyAgainstIndex(index, conversationId, live) {
+  var row = index ? index[String(conversationId)] : null;
+  if (!row) return { verdict: 'new', stored: null };
+  if (!live) return { verdict: 'unknown', stored: row };
+
+  var sameNode = row.currentNode != null && live.currentNode != null
+    ? String(row.currentNode) === String(live.currentNode)
+    : row.currentNode == null && live.currentNode == null;
+  var sameTime = row.updateTime != null && live.updateTime != null
+    ? Number(row.updateTime) === Number(live.updateTime)
+    : row.updateTime == null && live.updateTime == null;
+  var sameCount = row.messageCount != null && live.messageCount != null
+    ? Number(row.messageCount) === Number(live.messageCount)
+    : true;
+
+  if (sameNode && sameTime && sameCount) return { verdict: 'unchanged', stored: row };
+  return { verdict: 'grown', stored: row };
+}
+
+/** Resume a batch by reading prior download paths — the fallback when no index
+ *  is available, and still a cross-check on the files actually present. */
+function searchCompletedDownloadPaths(projectSlug) {
+  return new Promise(function(resolve) {
+    if (typeof chrome === 'undefined' || !chrome.downloads || !chrome.downloads.search) {
+      resolve(new Set());
+      return;
+    }
+    var escaped = (projectSlug || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    var pattern = projectSlug
+      ? 'chatgpt-export/' + escaped + '/.+/.*\\.md$'
+      : 'chatgpt-export/.+/.*\\.md$';
+    chrome.downloads.search({ filenameRegex: pattern }, function(items) {
+      var paths = new Set();
+      if (items) {
+        for (var i = 0; i < items.length; i++) {
+          var item = items[i];
+          if (!item || !item.filename) continue;
+          // A history ROW is not a file. Chrome keeps the record after the user
+          // deletes, moves or renames the download, and keeps rows for transfers
+          // that were interrupted. Trusting those makes resume skip a
+          // conversation that is not on disk — a false skip is the one failure
+          // re-running cannot repair, so both fields are checked when present.
+          if (item.exists === false) continue;
+          if (item.state && item.state !== 'complete') continue;
+          paths.add(item.filename);
+          // Remember the size so a LATER run can tell a conversation that grew
+          // from one that did not; the filename alone cannot express that.
+          if (typeof item.fileSize === 'number' && item.fileSize > 0) {
+            paths.__sizes = paths.__sizes || Object.create(null);
+            paths.__sizes[item.filename] = item.fileSize;
+          }
+        }
+      }
+      resolve(paths);
+    });
+  });
+}
+
+/** Base64 fallback for when Blob/createObjectURL are unavailable.
+ *
+ *  Delegates to zip.js rather than carrying a second implementation. The first
+ *  version of this function appended one character at a time, which is the same
+ *  defect measured at 40.9x the payload in memory (1510.8MB for a 40MB export)
+ *  and fixed in `bytesToDataUrl`. Fixing one and not the other left the worst
+ *  case — this path encodes the ZIP, the largest payload in the product —
+ *  unfixed, so the two now share one implementation and cannot drift apart. */
+function bytesToBase64DataUrl(bytes, mimeType) {
+  var type = mimeType || 'application/octet-stream';
+  if (typeof bytesToDataUrl === 'function') return bytesToDataUrl(bytes, type);
+  // zip.js absent (it is loaded by popup.html before this file, so this is only
+  // reachable in a stripped build). Chunked here too: a fallback that reproduces
+  // the defect is not a fallback worth having.
+  var encoded = '';
+  for (var start = 0; start < bytes.length; start += 3072) {
+    var end = Math.min(start + 3072, bytes.length);
+    var binary = '';
+    for (var i = start; i < end; i++) binary += String.fromCharCode(bytes[i]);
+    encoded += btoa(binary);
+  }
+  return 'data:' + type + ';base64,' + encoded;
+}
+
+/** A URL for bytes that chrome.downloads can accept at ANY size.
+ *
+ *  A `data:` URL cannot carry a project archive: Chrome caps URL length at a
+ *  couple of megabytes, so the one workload the zip exists for is the one that
+ *  would fail — and base64 inflates the payload by a third on the way. A blob
+ *  URL is a handle rather than a payload, so size stops mattering. The popup is a
+ *  real document, so `URL.createObjectURL` is available here; the `data:` helper
+ *  stays for the small in-page artifacts where it is already proven. */
+function bytesToDownloadUrl(bytes, mimeType) {
+  if (typeof Blob === 'function' && typeof URL !== 'undefined' && URL.createObjectURL) {
+    return {
+      url: URL.createObjectURL(new Blob([bytes], { type: mimeType || 'application/octet-stream' })),
+      revoke: function(url) { try { URL.revokeObjectURL(url); } catch (_e) {} },
+    };
+  }
+  return { url: bytesToBase64DataUrl(bytes, mimeType), revoke: function() {} };
+}
+
+function textToUtf8Bytes(text) {
+  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(text);
+  var out = new Uint8Array(text.length);
+  for (var i = 0; i < text.length; i++) out[i] = text.charCodeAt(i) & 0xff;
+  return out;
+}
+
+/** How many bytes of archive content may be held in memory at once.
+ *
+ *  The zip is assembled in the page's memory from entries kept for the WHOLE
+ *  run, so its cost grows with the export and is bounded by nothing on a
+ *  full-account run. Measured: the archive step alone allocated 125.7MB of RSS
+ *  for a 40MB payload. A renderer killed for memory takes the popup's document
+ *  with it, which means no `catch` runs and no status is written — the run stops
+ *  having reported nothing at all.
+ *
+ *  64MB is chosen to sit well below that failure while still archiving an
+ *  ordinary project in one file. The files are on disk regardless; the archive
+ *  is a convenience, so refusing to grow it is always better than losing the run.
+ */
+var ZIP_BYTE_BUDGET = 64 * 1024 * 1024;
+
+/** Add one file to the pending archive. Returns false when the budget refuses it.
+ *
+ *  A refusal is COUNTED on the list (`dropped`), because an archive missing files
+ *  it does not mention is worse than no archive: it looks complete. */
+function addZipEntry(zipEntries, projectSlug, convSlug, filename, content) {
+  var prefix = conversationFolderPath(convSlug, projectSlug) + '/';
+  var data = typeof content === 'string' ? textToUtf8Bytes(content) : content;
+  var budget = typeof zipEntries.budget === 'number' ? zipEntries.budget : ZIP_BYTE_BUDGET;
+  var used = typeof zipEntries.bytes === 'number' ? zipEntries.bytes : 0;
+  var incoming = (data && data.length) || 0;
+  if (used + incoming > budget) {
+    zipEntries.dropped = (zipEntries.dropped || 0) + 1;
+    return false;
+  }
+  zipEntries.bytes = used + incoming;
+  zipEntries.push({ name: prefix + filename, data: data });
+  return true;
+}
+
+/** How long a project archive may take to be accepted AND written. A batch zip is
+ *  orders of magnitude larger than a single conversation, so it does not share the
+ *  per-file budget: `downloadOne`'s default would give up while Chrome was still
+ *  reading the blob, and the caller would then revoke the URL mid-write. */
+var ZIP_WRITE_TIMEOUT_MS = 120000;
+
+/** The same budget for a single conversation's markdown, and for the same reason.
+ *  A long export is megabytes of text; `downloadOne`'s 12s default is sized for a
+ *  per-file attachment, and giving up early would revoke the blob URL while Chrome
+ *  was still reading it — writing a truncated .md that looks complete. */
+var MD_WRITE_TIMEOUT_MS = 120000;
+
+/** Wait until Chrome has finished writing a download, so a blob URL backing it
+ *  is not revoked out from under a write still in progress.
+ *
+ *  `chrome.downloads.download` reports acceptance, not completion: its callback
+ *  fires with a download id while the bytes are still being written. Revoking the
+ *  URL at that point truncates exactly the large archive a blob URL exists to
+ *  carry.
+ *
+ *  Returns whether the file is known to have been written. A timeout resolves
+ *  `false` — not because the write certainly failed, but because it is not known
+ *  to have succeeded, and on a backup tool an unverified file must not be reported
+ *  as saved. The run continues either way; a stuck download must not wedge it. */
+function waitForDownloadComplete(downloadId, timeoutMs) {
+  return new Promise(function(resolve) {
+    if (downloadId === undefined || downloadId === null ||
+        typeof chrome === 'undefined' || !chrome.downloads || !chrome.downloads.onChanged) {
+      resolve(false);
+      return;
+    }
+    var settled = false;
+    var finish = function(done) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { chrome.downloads.onChanged.removeListener(listener); } catch (_e) {}
+      resolve(done);
+    };
+    var listener = function(delta) {
+      if (!delta || delta.id !== downloadId || !delta.state) return;
+      if (delta.state.current === 'complete' || delta.state.current === 'interrupted') {
+        finish(delta.state.current === 'complete');
+      }
+    };
+    var timer = setTimeout(function() { finish(false); }, timeoutMs || 120000);
+    chrome.downloads.onChanged.addListener(listener);
+  });
 }
 
 /** Download one file via chrome.downloads. Returns {url, filename, ok, error}. */
-function downloadOne(url, filename, targetPath, timeoutMs) {
+function downloadOne(url, filename, targetPath, timeoutMs, conflictAction) {
   return new Promise(function(resolve) {
     var settled = false;
     var timer = setTimeout(function() {
@@ -67,6 +774,7 @@ function downloadOne(url, filename, targetPath, timeoutMs) {
       url: url,
       filename: targetPath || ('chatgpt-export/' + filename),
       saveAs: false,
+      conflictAction: conflictAction || 'overwrite',
     }, function(downloadId) {
       if (settled) return;
       settled = true;
@@ -76,6 +784,9 @@ function downloadOne(url, filename, targetPath, timeoutMs) {
         url: url,
         filename: filename,
         ok: ok,
+        // Returned so a caller holding a revocable blob URL can wait for the
+        // write to finish before releasing it.
+        downloadId: ok ? downloadId : null,
         error: ok ? null : (chrome.runtime.lastError && chrome.runtime.lastError.message || 'download rejected'),
       });
     });
@@ -107,8 +818,654 @@ function stopProgressPolling() {
   if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
 }
 
+/** Save one scanned conversation to disk and optionally collect zip entries. */
+async function saveConversationExport(tabId, result, options) {
+  var downloadImages = options.downloadImages;
+  var useTimestamp = options.useTimestamp;
+  var batchStamp = options.batchStamp;
+  var projectSlug = options.projectSlug;
+  var zipEntries = options.zipEntries;
+  var slug = result.slug || null;
+  var convSlug = slug || 'conversation';
+  // A batch supplies the conversation id so the file carries its own identity;
+  // a single export keeps the clean, title-only name.
+  var conversationId = options.conversationId || null;
+  var mdName = conversationId
+    ? batchMdFilename(slug, conversationId, useTimestamp, batchStamp, result.partial)
+    : buildMdFilename(slug, useTimestamp, null, batchStamp);
+  var folderPath = projectSlug
+    ? conversationFolderPath(convSlug, projectSlug)
+    : exportPath(slug, '').replace(/\/$/, '');
+  var md = result.md;
+  var partialSuffix = result.partial ? ' (partial export)' : '';
+  var dlOk = 0;
+  var dlTotal = 0;
+  var dlErrors = [];
+  var mdFinal = md;
+
+  if (downloadImages && typeof chrome.downloads !== 'undefined') {
+    var refs = parseArtifactRefs(md);
+    dlTotal = refs.length;
+    var extracted = [];
+    if (refs.length > 0) {
+      var urls = refs.map(function(r) { return r.url; });
+      // Guarded because this runs BEFORE the .md write, and its failure used to
+      // take the conversation with it: a navigated tab, a content script that
+      // went away, or an oversized payload threw straight past the write, so a
+      // scan that had already spent minutes capturing several hundred turns
+      // produced no file at all. The turns are the expensive, unrepeatable part;
+      // attachments are cheap and can be fetched again by re-running.
+      try {
+        var extractResult = await chrome.scripting.executeScript({
+          target: { tabId: tabId },
+          func: async function(urls) {
+            if (typeof fetchImageDataUrls === 'function') return await fetchImageDataUrls(urls);
+            if (typeof extractImageDataUrls === 'function') return await extractImageDataUrls(urls);
+            return urls.map(function() { return null; });
+          },
+          args: [urls],
+        });
+        extracted = extractResult?.[0]?.result || [];
+      } catch (fetchErr) {
+        // Named, not swallowed: the .md then keeps the original links, and those
+        // expire. An export that looks complete today and is empty next month is
+        // the failure this message exists to prevent.
+        dlErrors.push('attachments unavailable (' + ((fetchErr && fetchErr.message) || fetchErr) + ')');
+      }
+    }
+
+    mdFinal = md;
+    for (var i = 0; i < extracted.length; i++) {
+      var ex = extracted[i];
+      if (ex && ex.dataUrl) {
+        var ref = refs[i] || {};
+        var fname = artifactFilename(ex.url, ref.label || '', i, slug, ref.kind || 'image');
+        var targetPath = folderPath + '/' + fname;
+        var r = await downloadOne(ex.dataUrl, fname, targetPath);
+        if (r.ok) {
+          dlOk++;
+          mdFinal = mdFinal.split(ex.url).join('./' + r.filename);
+          if (zipEntries) {
+            var dataPart = ex.dataUrl.split(',')[1] || '';
+            var bin = Uint8Array.from(atob(dataPart), function(c) { return c.charCodeAt(0); });
+            addZipEntry(zipEntries, projectSlug, convSlug, fname, bin);
+          }
+        } else {
+          dlErrors.push(r.error || 'unknown');
+        }
+      }
+    }
+  }
+
+  // The markdown IS the export. Chrome can refuse the write (an invalid filename,
+  // a full disk, a user-cancelled prompt), so the outcome is returned rather than
+  // discarded: a caller that counts a refused write as a saved conversation
+  // reports success for an empty folder.
+  //
+  // Written through a BLOB, never a `data:` URL. `encodeURIComponent` leaves ASCII
+  // alone but expands every Cyrillic character to six bytes (`П` -> `%D0%9F`), so a
+  // Russian conversation inflates 4.99x on the way into the URL. Measured on the
+  // export that exposed this: 877,000 characters became a 4.17 MB URL against
+  // Chrome's ~2 MB ceiling, and the write was refused — silently, because the
+  // caller did not read mdOk either. The threshold lands near 300 turns in Russian
+  // and past 1,500 in English, which is why every English test stayed green.
+  // bytesToDownloadUrl already existed for the zip; the .md is the larger payload.
+  var mdHandle = bytesToDownloadUrl(textToUtf8Bytes(mdFinal), 'text/markdown;charset=utf-8');
+  var mdWrite = await downloadOne(
+    mdHandle.url,
+    mdName,
+    folderPath + '/' + mdName,
+    MD_WRITE_TIMEOUT_MS
+  );
+  // Chrome accepted the download; the bytes are still being written. Revoking the
+  // blob URL now truncates the file — the same trap the zip path documents.
+  //
+  // Only when completion is OBSERVABLE. `waitForDownloadComplete` answers false
+  // both for "the write was interrupted" and for "there is no onChanged to listen
+  // to", and those must not be treated alike here: Chrome accepted the download,
+  // so reporting "nothing was written — run it again" on the strength of a missing
+  // API is a false alarm over a file that is on disk. A false warning costs the
+  // user their trust in a good export, which is a real cost in the other
+  // direction. The zip resolves this the opposite way on purpose — an archive is
+  // a convenience, and an unverified one is better left unclaimed.
+  var canObserveCompletion = typeof chrome !== 'undefined' &&
+    chrome.downloads && chrome.downloads.onChanged;
+  if (mdWrite.ok && canObserveCompletion) {
+    var mdWritten = await waitForDownloadComplete(mdWrite.downloadId, MD_WRITE_TIMEOUT_MS);
+    if (!mdWritten) {
+      mdWrite.ok = false;
+      mdWrite.error = mdWrite.error || 'the write did not complete';
+    }
+  }
+  mdHandle.revoke(mdHandle.url);
+  if (zipEntries) addZipEntry(zipEntries, projectSlug, convSlug, mdName, mdFinal);
+
+  return {
+    mdFinal: mdFinal,
+    partialSuffix: partialSuffix,
+    dlOk: dlOk,
+    dlTotal: dlTotal,
+    dlErrors: dlErrors,
+    mdName: mdName,
+    mdOk: mdWrite.ok,
+    mdError: mdWrite.error || null,
+  };
+}
+
+/** Where the last failure is kept so it outlives the popup. */
+var LAST_ERROR_KEY = 'c2mLastError';
+
+/** Report a failure so it can be investigated afterwards.
+ *
+ *  The operator hit a failure on a ~600-turn conversation and had nothing to look
+ *  at: this product shipped with ZERO console calls in any of its three scripts,
+ *  and the only channel was `err.message` in a popup element that dies with the
+ *  popup. "I have no logs" was an accurate description of the code.
+ *
+ *  Three channels, because each fails differently. The status element is the one
+ *  the user reads and the one that disappears. The console survives as long as
+ *  DevTools is attached and carries the STACK, which the status never showed.
+ *  chrome.storage survives the popup closing entirely, which is the case that
+ *  left the operator with nothing. */
+function reportFailure(phase, err, extra) {
+  var message = (err && err.message) || String(err) || 'unknown error';
+  showStatus('error', message);
+
+  var detail = Object.assign({
+    phase: phase,
+    message: message,
+    stack: (err && err.stack) || null,
+    at: new Date().toISOString(),
+  }, extra || {});
+
+  // eslint-disable-next-line no-console
+  if (typeof console !== 'undefined' && console.error) {
+    console.error('[conversation-to-markdown] ' + phase + ' failed:', detail, err);
+  }
+
+  // Best effort by design: a failure to record a failure must not replace it.
+  try {
+    var area = storageArea();
+    if (area) area.set({ [LAST_ERROR_KEY]: detail }, function() { void chrome.runtime.lastError; });
+  } catch (_e) { /* the report is a courtesy; the error above is the message */ }
+}
+
+/** The status line for a save-to-disk export: what landed, what did not, and why.
+ *
+ *  Extracted from the click handler so it can be tested. It was inline, and the
+ *  consequence was not cosmetic: `saved.mdOk` went unread for the whole life of
+ *  the feature, so Chrome refusing the .md write produced "✓ Copied!" over an
+ *  empty folder. The helper had always returned the flag; nothing consumed it.
+ *
+ *  Returns {type, text} rather than calling showStatus, so a test can read the
+ *  words the user gets instead of asserting that a function was called. */
+function buildSaveStatus(parts) {
+  var saved = parts.saved || {};
+  var refs = parts.refs || [];
+  var counts = parts.lines + ' lines · ' + parts.words + ' words';
+
+  // THE FILE IS THE EXPORT. Its refusal is the headline, above any attachment
+  // count: a run that saved nine images and no conversation saved nothing.
+  if (!saved.mdOk) {
+    return {
+      type: 'error',
+      text: 'Not saved: ' + (saved.mdError || 'the browser refused the write') + '\n' +
+        (refs.length > 0 ? saved.dlOk + '/' + refs.length + ' files were fetched. ' : '') +
+        'Nothing was written for this conversation — run it again.',
+    };
+  }
+
+  var head = '✓ Saved' + parts.partialSuffix + ' ' + counts + '\n' + saved.mdName;
+  if (refs.length === 0) return { type: 'success', text: head };
+  if (saved.dlOk > 0) {
+    return { type: 'success', text: head + ' + ' + saved.dlOk + '/' + refs.length + ' files' };
+  }
+  // Files were referenced and none arrived. Said plainly, because the .md then
+  // holds URLs that expire: the export looks complete today and is empty later.
+  var reason = (saved.dlErrors && saved.dlErrors.length > 0) ? ' (' + saved.dlErrors[0] + ')' : '';
+  return {
+    type: 'success',
+    text: head + '\n0/' + refs.length + ' files fetched' + reason +
+      ' — the .md keeps their original links, which expire.',
+  };
+}
+
+/** Walk the sidebar conversation list in the active tab, export each in turn. */
+async function runBatchExport(tab, options) {
+  var downloadImages = options.downloadImages;
+  var useTimestamp = options.useTimestamp;
+  var projectSlug = options.projectSlug;
+  var batchStamp = options.batchStamp;
+  var onProgress = options.onProgress;
+  var zipEntries = options.buildZip ? [] : null;
+  if (zipEntries && typeof options.zipByteBudget === 'number') {
+    zipEntries.budget = options.zipByteBudget;
+  }
+  var completedPaths = await searchCompletedDownloadPaths(projectSlug);
+  var listResult = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: async function() {
+      // Scroll the virtualized sidebar so every row mounts. The one-frame
+      // reader is the fallback only: it can return a subset, and a subset
+      // exported as "the whole Project" is invisible to the user.
+      if (typeof collectSidebarConversations === 'function') {
+        return await collectSidebarConversations();
+      }
+      if (typeof listSidebarConversations === 'function') {
+        return { conversations: listSidebarConversations(), complete: false, reason: 'no-collector' };
+      }
+      return { conversations: [], complete: false, reason: 'no-collector' };
+    },
+  });
+  var listed = listResult?.[0]?.result || {};
+  var conversations = (listed && listed.conversations) || [];
+  var listComplete = !!(listed && listed.complete);
+  var listReason = (listed && listed.reason) || 'unknown';
+  if (!conversations.length) {
+    return { ok: false, error: 'No conversations found in the sidebar. Open a ChatGPT Project page first.' };
+  }
+
+  var pending = filterPendingConversations(conversations, completedPaths, projectSlug);
+  var skipped = conversations.length - pending.length;
+  var exported = 0;
+  var errors = [];
+  // Null when the storage permission is absent, which makes every index check a
+  // no-op and leaves the download-history path in charge — the pre-1.2.0
+  // behaviour, unchanged.
+  var exportIndex = await readExportIndex();
+  var indexSkipped = 0;
+  var grown = 0;
+
+  var retried = 0;
+  var held = 0;
+  var partial = 0;
+  var maxAttempts = options.maxAttempts || 3;
+  var maxHoldRounds = options.maxHoldRounds || 20;
+  var controls = {
+    isPaused: options.isPaused || function() { return batchPaused; },
+    isCancelled: options.isCancelled || function() { return batchCancelled; },
+  };
+
+  /** Fetch one conversation. Returns {ok, result} or {ok:false, error}. */
+  /** Wait for the tab to finish navigating before scripting it again.
+   *
+   *  Measured during a full-account export: every conversation reported progress
+   *  and NOTHING reached the disk — 60 conversations in, zero files. The cause is
+   *  here. `executeScript` issued immediately after `location.href` targets the
+   *  document the navigation is destroying, so the injected promise never
+   *  settles and the call resolves with `undefined` — not an error, just null.
+   *  `attemptConversation` then read that as "did not load", retried twice, and
+   *  moved on. The counter advanced; nothing was ever exported.
+   */
+  function waitForTabNavigation(tabId, conversationId, timeoutMs) {
+    var budget = timeoutMs || 30000;
+    // Without chrome.tabs.get there is no way to observe the navigation. Resolve
+    // true rather than hanging: the readiness check that follows is the real
+    // gate, and a missing optional API must not wedge the run.
+    if (typeof chrome === 'undefined' || !chrome.tabs || !chrome.tabs.get) {
+      return Promise.resolve(true);
+    }
+    return new Promise(function(resolve) {
+      var startedAt = Date.now();
+      function poll() {
+        chrome.tabs.get(tabId, function(t) {
+          if (chrome.runtime.lastError || !t) return resolve(false);
+          var onConversation = !conversationId ||
+            String(t.url || '').indexOf('/c/' + conversationId) !== -1;
+          if (t.status === 'complete' && onConversation) return resolve(true);
+          if (Date.now() - startedAt >= budget) return resolve(false);
+          setTimeout(poll, 300);
+        });
+      }
+      poll();
+    });
+  }
+
+  /** Read a conversation's metadata from the page, for the skip decision.
+   *
+   *  Runs in the tab rather than the popup because the request needs the
+   *  session the user is already signed in with, and that session belongs to the
+   *  page. Requires navigating there first, which is why this is called after
+   *  the tab has arrived — the saving is in not SCANNING an unchanged
+   *  conversation, which is where the minutes go, not in avoiding the visit.
+   *
+   *  Any failure returns null, which classifies as 'unknown' and exports. */
+  async function readConversationMetadata(tabId, conv) {
+    try {
+      var navigated = await (async function() {
+        await chrome.scripting.executeScript({
+          target: { tabId: tabId },
+          func: function(href) { window.location.href = href; },
+          args: [conv.href],
+        });
+        return await waitForTabNavigation(tabId, conv.id, 30000);
+      })();
+      if (!navigated) return null;
+      await chrome.scripting.executeScript({ target: { tabId: tabId }, files: ['content.js'] });
+      var out = await chrome.scripting.executeScript({
+        target: { tabId: tabId },
+        func: async function(conversationId) {
+          if (typeof fetchConversationMetadata !== 'function') return null;
+          return await fetchConversationMetadata(conversationId, {});
+        },
+        args: [conv.id],
+      });
+      return (out && out[0] && out[0].result) || null;
+    } catch (_e) {
+      return null;
+    }
+  }
+
+  async function attemptConversation(conv) {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: function(href) { window.location.href = href; },
+      args: [conv.href],
+    });
+
+    // The navigation replaces the document, taking the content script with it.
+    var navigated = await waitForTabNavigation(tab.id, conv.id, 30000);
+    if (!navigated) return { ok: false, error: 'did not load' };
+    // Re-inject into the NEW document; the helpers below live in content.js.
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['content.js'],
+    });
+
+    var readyResult = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: async function(conversationId) {
+        if (typeof waitForConversationReady === 'function') {
+          return await waitForConversationReady({ conversationId: conversationId, timeoutMs: 30000 });
+        }
+        return { ready: false, error: 'waitForConversationReady is unavailable.' };
+      },
+      args: [conv.id],
+    });
+    var ready = readyResult?.[0]?.result;
+    if (!ready || !ready.ready) {
+      return { ok: false, error: (ready && ready.error) || 'did not load' };
+    }
+
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['content.js'],
+    });
+
+    scanningTabId = tab.id;
+    startProgressPolling(tab.id);
+    var results;
+    try {
+      results = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: async function(wantFiles) { return getConversationMarkdown({ downloadFiles: wantFiles }); },
+        args: [!!downloadImages],
+      });
+    } finally {
+      stopProgressPolling();
+    }
+
+    var scanned = results?.[0]?.result;
+    if (!scanned || !scanned.ok) {
+      return { ok: false, error: (scanned && scanned.error) || 'scan failed' };
+    }
+    return { ok: true, result: scanned };
+  }
+
+  for (var index = 0; index < pending.length; index++) {
+    if (controls.isCancelled()) break;
+    // Pause is honoured BETWEEN conversations and inside the retry wait below,
+    // so a long run can be held without losing the conversations already done.
+    if (!(await waitWhilePaused(controls))) break;
+    var conv = pending[index];
+    var progressTitle = conv.title || conv.slug || conv.id;
+    if (onProgress) onProgress(index, pending.length, progressTitle);
+
+    // Ask the cheap question first. `filterPendingConversations` can only reason
+    // about filenames, and a filename cannot say whether a conversation gained
+    // messages since it was saved — so a conversation already on disk arrives
+    // here either way. One metadata request decides it: unchanged conversations
+    // cost milliseconds instead of the minutes a full walk takes.
+    //
+    // Every uncertain answer resolves towards exporting. 'unknown' (metadata
+    // unreadable) and a missing index both export, because the cost of an
+    // unnecessary export is bandwidth while the cost of a wrong skip is a
+    // conversation that never lands and cannot be recovered by re-running.
+    var liveMeta = null;
+    var grewThisRound = false;
+    if (exportIndex) {
+      liveMeta = await readConversationMetadata(tab.id, conv);
+      var verdict = classifyAgainstIndex(exportIndex, conv.id, liveMeta).verdict;
+      if (verdict === 'unchanged') {
+        indexSkipped += 1;
+        continue;
+      }
+      if (verdict === 'grown') {
+        grewThisRound = true;
+        // The conversation changed since the last export. Chrome cannot append
+        // to a file, so the previous export is left exactly as it is and this
+        // one lands beside it under its own stamp.
+        grown += 1;
+      }
+    }
+
+    var attempt = 0;
+    var outcome = null;
+    var lastError = '';
+    while (attempt < maxAttempts) {
+      attempt += 1;
+      try {
+        outcome = await attemptConversation(conv);
+      } catch (err) {
+        outcome = { ok: false, error: (err && err.message) || String(err) };
+      }
+      if (outcome.ok) break;
+
+      lastError = outcome.error;
+      var kind = classifyBatchFailure(lastError);
+      if (kind === 'conversation') break;          // a real per-conversation problem: do not retry
+      if (controls.isCancelled()) break;
+
+      if (kind === 'offline' || kind === 'unreachable') {
+        // The network, not this conversation. HOLD rather than spending the
+        // remaining list: a 40-conversation export must not fail 39 times
+        // because the connection dropped for a minute.
+        if (held >= maxHoldRounds) {
+          lastError = 'network unavailable after ' + held + ' waits: ' + lastError;
+          break;
+        }
+        held += 1;
+        if (onProgress) onProgress(index, pending.length, progressTitle + ' — waiting for the network (' + held + ')');
+        attempt -= 1;                               // a hold is not an attempt against this conversation
+        await sleep(backoffDelayMs(Math.min(held, 4)));
+        if (!(await waitWhilePaused(controls))) break;
+        continue;
+      }
+
+      // transient: retry with backoff inside this conversation's budget
+      if (attempt < maxAttempts) {
+        retried += 1;
+        if (onProgress) onProgress(index, pending.length, progressTitle + ' — retry ' + attempt + '/' + (maxAttempts - 1));
+        await sleep(backoffDelayMs(attempt));
+        if (!(await waitWhilePaused(controls))) break;
+      }
+    }
+
+    if (controls.isCancelled()) break;
+    if (!outcome || !outcome.ok) {
+      errors.push((conv.title || conv.id) + ': ' + (lastError || 'failed'));
+      continue;
+    }
+    var result = outcome.result;
+
+    var writeOk = false;
+    var writeError = null;
+    // A conversation that GREW is stamped whether or not the option is ticked.
+    // Chrome cannot append to a file and overwriting would destroy the earlier
+    // export, so the new copy must carry a name of its own. This is the whole
+    // reason the stamp exists; it is not a user preference in this case.
+    // ALWAYS stamped. Every export records the moment it was taken, so a folder of
+    // backups is readable at a glance and no file silently replaces another.
+    //
+    // This is only safe because the skip decision moved to the export index. A
+    // stamped name is unique by construction, so rebuilding it to look for it in
+    // the download history can never match — a stamp-always build that still
+    // relied on filename matching would re-export the whole project every run.
+    // `filterPendingConversations` remains as the fallback for the case where the
+    // index is unavailable, where it still recognises unstamped legacy exports.
+    var stampThis = true;
+    void useTimestamp;
+    void grewThisRound;
+    if (downloadImages) {
+      var saved = await saveConversationExport(tab.id, result, {
+        downloadImages: true,
+        useTimestamp: stampThis,
+        batchStamp: batchStamp,
+        projectSlug: projectSlug,
+        zipEntries: zipEntries,
+        conversationId: conv.id,
+      });
+      writeOk = saved.mdOk;
+      writeError = saved.mdError;
+    } else {
+      var slug = result.slug || conv.slug || conv.id;
+      var mdName = batchMdFilename(slug, conv.id, stampThis, batchStamp, result.partial);
+      var folder = conversationFolderPath(slug, projectSlug);
+      var write = await downloadOne(
+        'data:text/markdown;charset=utf-8,' + encodeURIComponent(result.md),
+        mdName,
+        folder + '/' + mdName
+      );
+      writeOk = write.ok;
+      writeError = write.error;
+      if (writeOk && zipEntries) addZipEntry(zipEntries, projectSlug, slug, mdName, result.md);
+    }
+
+    // A refused write is a failure, not an export. Counting it made a run whose
+    // every write Chrome rejected report the whole project as saved.
+    if (!writeOk) {
+      errors.push((conv.title || conv.id) + ': not saved (' + (writeError || 'download rejected') + ')');
+      continue;
+    }
+
+    exported += 1;
+    var exportSlug = result.slug || conv.slug || conv.id;
+    if (result.partial) {
+      // A stall-truncated export must NOT be banked as done. Banking it made the
+      // next run skip the conversation as "already exported", so the one action
+      // that could repair a truncated file was the one action refused — while the
+      // popup reported success. Counted and reported instead.
+      partial += 1;
+      errors.push((conv.title || conv.id) + ': saved incompletely (scan did not reach the end) — re-run to finish it');
+    } else {
+      completedPaths.add(mdDownloadPath(exportSlug, projectSlug, stampThis, batchStamp, conv.id));
+      // Record only a COMPLETE export. A partial one is deliberately not banked,
+      // for the same reason it is not added to completedPaths: the next run must
+      // be free to finish it rather than skip it as done.
+      if (liveMeta) {
+        await recordExportedConversation(conv.id, {
+          updateTime: liveMeta.updateTime,
+          currentNode: liveMeta.currentNode,
+          messageCount: liveMeta.messageCount,
+          bytes: result.md ? result.md.length : null,
+          files: 0,
+        });
+      }
+    }
+  }
+
+  var zipName = null;
+  if (zipEntries && zipEntries.dropped > 0) {
+    // Stated as an error, not a note: an archive that silently omits files reads
+    // as a complete backup. The files themselves are on disk either way.
+    errors.push('archive incomplete: ' + zipEntries.dropped
+      + ' file(s) left out to stay within the memory budget — the saved files on disk are complete');
+  }
+  if (zipEntries && zipEntries.length > 0 && typeof buildStoreZip === 'function') {
+    // The zip is a convenience on top of files that are ALREADY on disk. If it
+    // fails — too many entries for the format, a refused write — the run must
+    // still report the conversations it exported, so the failure is recorded as
+    // an error rather than thrown away or allowed to reject the whole export.
+    var stamp = batchStamp || formatExportTimestamp();
+    var candidateName = (projectSlug || 'project') + '-export--' + stamp + '.zip';
+    var handle = null;
+    try {
+      var zipBytes = buildStoreZip(zipEntries);
+      handle = bytesToDownloadUrl(zipBytes, 'application/zip');
+      // The archive is a large blob, so Chrome may take longer to ACCEPT it than
+      // a small data: URL — and if `downloadOne` gave up first, the `finally`
+      // below would revoke the URL while Chrome was still reading it. The accept
+      // budget is therefore aligned with the write budget rather than left at the
+      // 12s default meant for per-conversation files.
+      var zipWrite = await downloadOne(
+        handle.url, candidateName, batchRootPath(projectSlug) + '/' + candidateName, ZIP_WRITE_TIMEOUT_MS);
+      if (zipWrite.ok) {
+        // Chrome accepted the download; the bytes are still being written. Wait
+        // before the `finally` below revokes the blob URL backing them — and
+        // believe the ANSWER, not the acceptance: an interrupted write leaves no
+        // archive, so reporting its name would be another silent success.
+        var written = await waitForDownloadComplete(zipWrite.downloadId, ZIP_WRITE_TIMEOUT_MS);
+        if (written) {
+          zipName = candidateName;
+        } else {
+          errors.push('archive not completed — the exported files are still on disk');
+        }
+      } else {
+        errors.push('archive not saved (' + (zipWrite.error || 'download rejected') + ') — the exported files are still on disk');
+      }
+    } catch (zipErr) {
+      errors.push('archive not created (' + ((zipErr && zipErr.message) || zipErr) + ') — the exported files are still on disk');
+    } finally {
+      if (handle) handle.revoke(handle.url);
+    }
+  }
+
+  return {
+    ok: true,
+    total: conversations.length,
+    exported: exported,
+    // Reported explicitly: a conversation skipped because it was already on
+    // disk is not a failure, but silence about it reads as success.
+    skipped: skipped,
+    // Skipped because the index proved the conversation had not changed since it
+    // was exported. Counted separately from `skipped`, which is a filename
+    // match: this one is a content decision and the user is entitled to see
+    // that the run examined the conversation rather than merely recognised a name.
+    unchanged: indexSkipped,
+    // Conversations that gained messages since the last export and were written
+    // beside the earlier file under their own stamp, not over it.
+    grown: grown,
+    retried: retried,
+    // Conversations written but truncated. Reported so "complete" cannot mean
+    // "some files are cut short", and deliberately NOT banked as done so a
+    // re-run repairs them.
+    partial: partial,
+    networkWaits: held,
+    cancelled: controls.isCancelled(),
+    // False when the sidebar walk could not prove it reached the end of the
+    // list. The export is then a SUBSET of the Project, and saying so is the
+    // whole point: the user cannot detect a missing conversation themselves.
+    listComplete: listComplete,
+    listReason: listReason,
+    errors: errors,
+    zipName: zipName,
+  };
+}
+
+/** Hold the run without losing it. A long export over a network the extension
+ *  does not control needs a hold that is not a cancel: cancelling keeps what
+ *  landed but ends the run, while pausing resumes exactly where it stopped. */
+if (btnPause) {
+  btnPause.addEventListener('click', () => {
+    batchPaused = !batchPaused;
+    btnPause.textContent = batchPaused ? 'Resume' : 'Pause';
+    if (batchPaused) showStatus('', 'Paused — press Resume to continue.');
+  });
+}
+
 btnCancel.addEventListener('click', async () => {
   if (scanningTabId === null) return;
+  batchCancelled = true;
   btnCancel.disabled = true;
   btnCancel.textContent = 'Stopping…';
   try {
@@ -123,18 +1480,104 @@ btnCancel.addEventListener('click', async () => {
 
 btn.addEventListener('click', async () => {
   btn.disabled = true;
-  btn.textContent = 'Scanning conversation…';
+  batchCancelled = false;
+  const batchMode = chkBatch && chkBatch.checked;
+  btn.textContent = batchMode ? 'Preparing batch export…' : 'Scanning conversation…';
   btnCancel.classList.add('visible');
   btnCancel.disabled = false;
-  btnCancel.textContent = 'Stop scanning';
+  if (btnPause) {
+    batchPaused = false;
+    btnPause.textContent = 'Pause';
+    btnPause.classList.add('visible');
+  }
+  btnCancel.textContent = batchMode ? 'Stop export' : 'Stop scanning';
   status.className = '';
   status.textContent = '';
+  syncBatchOptions();
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
     if (!tab?.url?.match(/https:\/\/(chatgpt\.com|chat\.openai\.com)\//)) {
       showStatus('error', 'Open a ChatGPT conversation page first.');
+      return;
+    }
+
+    // Every export is stamped. The stamp is part of what a backup file IS — the
+    // moment it was taken — not an option, so there is nothing here to read.
+    const downloadImages = chkImages && chkImages.checked;
+
+    if (batchMode) {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        files: ['content.js'],
+      });
+
+      var projectInfo = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: function() {
+          var title = typeof extractConversationTitle === 'function' ? extractConversationTitle() : null;
+          var slug = title && typeof slugifyTitle === 'function' ? slugifyTitle(title) : null;
+          return { title: title, slug: slug || 'project-batch' };
+        },
+      });
+      var projectSlug = projectInfo?.[0]?.result?.slug || 'project-batch';
+      // One stamp for the whole run, so every file from a single batch carries the
+      // same moment rather than drifting minute by minute as the run progresses.
+      var batchStamp = formatExportTimestamp();
+      scanningTabId = tab.id;
+
+      var batchResult = await runBatchExport(tab, {
+        downloadImages: downloadImages,
+        projectSlug: projectSlug,
+        batchStamp: batchStamp,
+        buildZip: true,
+        onProgress: function(index, total, title) {
+          btn.textContent = 'Exporting ' + formatBatchProgress(index, total, title);
+        },
+      });
+
+      if (!batchResult.ok) {
+        showStatus('error', batchResult.error || 'Batch export failed.');
+        return;
+      }
+
+      // "Complete" is claimed ONLY when the sidebar walk proved it reached the
+      // end of the list. Otherwise the run covered the conversations it could
+      // see, which may be a subset — and the user cannot notice a conversation
+      // that was never listed, so the wording has to carry the doubt.
+      var summary = batchResult.listComplete
+        ? '✓ Batch export complete: ' + batchResult.exported + ' saved'
+        : '⚠ Exported ' + batchResult.exported + ' of the conversations the sidebar listed'
+          + ' — the full list could not be confirmed';
+      if (batchResult.skipped > 0) {
+        // Never "already exported" on an unconfirmed list: that phrasing reads as
+        // verified coverage and argues the user out of checking.
+        summary += batchResult.listComplete
+          ? ', ' + batchResult.skipped + ' skipped (already exported)'
+          : ', ' + batchResult.skipped + ' skipped (files already on disk)';
+      }
+      if (batchResult.unchanged > 0) {
+        summary += ', ' + batchResult.unchanged + ' unchanged';
+      }
+      if (batchResult.grown > 0) {
+        // Say that a NEW file was written rather than the old one updated: the
+        // user will find two files for one conversation and should know why
+        // before wondering whether the export duplicated itself.
+        summary += ', ' + batchResult.grown
+          + (batchResult.grown === 1 ? ' updated (saved as a new dated copy)'
+                                     : ' updated (saved as new dated copies)');
+      }
+      if (batchResult.partial > 0) {
+        summary += ', ' + batchResult.partial + ' incomplete (re-run to repair)';
+      }
+      if (batchResult.cancelled) summary += ' — stopped early';
+      if (!batchResult.listComplete) {
+        summary += '\nScroll the sidebar to the end and re-run to pick up anything missing.';
+      }
+      if (batchResult.zipName) summary += '\nZip: ' + batchResult.zipName;
+      if (batchResult.errors.length) summary += '\nErrors: ' + batchResult.errors.join('; ');
+      showStatus(batchResult.listComplete ? 'success' : 'warning', summary);
       return;
     }
 
@@ -148,11 +1591,13 @@ btn.addEventListener('click', async () => {
 
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: async () => getConversationMarkdown(),
+      func: async (wantFiles) => getConversationMarkdown({ downloadFiles: wantFiles }),
+      args: [!!downloadImages],
     });
 
     stopProgressPolling();
     btnCancel.classList.remove('visible');
+    if (batchWarning) batchWarning.classList.remove('visible');
 
     const result = results?.[0]?.result;
 
@@ -167,96 +1612,109 @@ btn.addEventListener('click', async () => {
     }
 
     let md = result.md;
-    const downloadImages = chkImages && chkImages.checked;
     // Conversation title drives both the .md filename and its export folder.
     const slug = result.slug || null;
-    const mdName = (slug || 'conversation') + '.md';
+    const mdName = buildMdFilename(slug, true);
+    const partialSuffix = result.partial ? ' (partial export)' : '';
 
     if (downloadImages && typeof chrome.downloads !== 'undefined') {
-      // Fetch images via content script (has host_permissions for CDN CORS bypass).
-      // Falls back to canvas extraction if old content.js is still cached.
-      var refs = parseImageRefs(md);
-      var extracted = [];
-      if (refs.length > 0) {
-        btn.textContent = 'Downloading ' + refs.length + ' images…';
-        var urls = refs.map(function(r) { return r.url; });
-        var extractResult = await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          func: async function(urls) {
-            if (typeof fetchImageDataUrls === 'function') return await fetchImageDataUrls(urls);
-            // Fallback for old content.js cache — canvas extraction (usually fails on CORS)
-            if (typeof extractImageDataUrls === 'function') return await extractImageDataUrls(urls);
-            return urls.map(function() { return null; });
-          },
-          args: [urls],
-        });
-        extracted = extractResult?.[0]?.result || [];
-      }
+      var saved = await saveConversationExport(tab.id, result, {
+        downloadImages: true,
+        useTimestamp: true,
+        projectSlug: null,
+        zipEntries: null,
+      });
+      // NOT named `status`: that is the module-level status ELEMENT, and a `var`
+      // of the same name hoists to the top of this handler and shadows it for the
+      // whole function — including `status.className = ''` at its very first line,
+      // which then throws on undefined before the run even starts.
+      var saveStatus = buildSaveStatus({
+        saved: saved,
+        refs: parseArtifactRefs(md),
+        lines: result.lines,
+        words: result.words,
+        partialSuffix: partialSuffix,
+      });
+      showStatus(saveStatus.type, saveStatus.text);
 
-      // Download extracted data URLs + save .md file
-      btn.textContent = 'Saving files…';
-      var mdChanged = md;
-      var dlOk = 0;
-      var dlErrors = [];
-      for (var i = 0; i < extracted.length; i++) {
-        var ex = extracted[i];
-        if (ex && ex.dataUrl) {
-          var fname = imageFilename(ex.url, refs[i] ? refs[i].alt : '', i, slug);
-          var r = await downloadOne(ex.dataUrl, fname, exportPath(slug, fname));
-          if (r.ok) {
-            dlOk++;
-            mdChanged = mdChanged.split(ex.url).join('./' + r.filename);
-          } else {
-            dlErrors.push(r.error || 'unknown');
-          }
-        }
-      }
-
-      // Save .md with local paths for successfully extracted images
-      var mdFinal = dlOk > 0 ? mdChanged : md;
-      downloadOne(
-        'data:text/markdown;charset=utf-8,' + encodeURIComponent(mdFinal),
-        mdName,
-        exportPath(slug, mdName)
-      );
-
-      if (dlOk > 0) {
-        showStatus('success',
-          '✓ Copied! ' + result.lines + ' lines · ' + result.words + ' words\n' +
-          'Images: ' + dlOk + '/' + refs.length + ' downloaded + ' + mdName
-        );
-      } else if (refs.length > 0) {
-        var hint = dlErrors.length > 0 ? ' (' + dlErrors[0] + ')' : '';
-        showStatus('success',
-          '✓ Copied! ' + result.lines + ' lines · ' + result.words + ' words\n' +
-          'Images: 0/' + refs.length + ' fetched' + hint + ' — original URLs kept in .md'
-        );
-      } else {
-        showStatus('success',
-          '✓ Copied! ' + result.lines + ' lines · ' + result.words + ' words\n' +
-          mdName + ' saved'
-        );
-      }
-
-      await navigator.clipboard.writeText(mdFinal);
+      // NOT copied to the clipboard. With the save option on, the file is the
+      // deliverable and the clipboard is a second copy nobody asked for — and it
+      // used to be the run's most dangerous step: `writeText` rejects with
+      // "Document is not focused" the moment the popup loses focus, which a
+      // multi-minute scan invites, and the rejection landed in the catch below
+      // and REPLACED an already-displayed success with a red error. The file was
+      // on disk the whole time.
       btn.disabled = false;
       btn.textContent = 'Copy as Markdown';
       return;
     }
 
+    // No save option: the clipboard IS the delivery, so its failure is the run's
+    // failure and belongs in the catch.
     await navigator.clipboard.writeText(md);
 
     showStatus(
       'success',
-      '✓ Copied! ' + result.lines + ' lines · ' + result.words + ' words'
+      '✓ Copied!' + partialSuffix + ' ' + result.lines + ' lines · ' + result.words + ' words'
     );
   } catch (err) {
-    showStatus('error', err.message || String(err));
+    reportFailure('single export', err);
   } finally {
     stopProgressPolling();
     scanningTabId = null;
     btnCancel.classList.remove('visible');
+    if (batchWarning) batchWarning.classList.remove('visible');
     btn.disabled = false;
     btn.textContent = 'Copy as Markdown';
   }
 });
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    addZipEntry: addZipEntry,
+    ZIP_BYTE_BUDGET: ZIP_BYTE_BUDGET,
+    artifactFilename: artifactFilename,
+    sanitizeFilenamePart: sanitizeFilenamePart,
+    splitFilenameExtension: splitFilenameExtension,
+    batchRootPath: batchRootPath,
+    buildMdFilename: buildMdFilename,
+    batchMdFilename: batchMdFilename,
+    bytesToDownloadUrl: bytesToDownloadUrl,
+    bytesToBase64DataUrl: bytesToBase64DataUrl,
+    waitForDownloadComplete: waitForDownloadComplete,
+    ZIP_WRITE_TIMEOUT_MS: ZIP_WRITE_TIMEOUT_MS,
+    ID_MARKER: ID_MARKER,
+    foldExceptId: foldExceptId,
+    candidateExportNames: candidateExportNames,
+    conversationFolderFromPath: conversationFolderFromPath,
+    mdStem: mdStem,
+    stampsInPaths: stampsInPaths,
+    conversationFolderPath: conversationFolderPath,
+    downloadOne: downloadOne,
+    saveConversationExport: saveConversationExport,
+    buildSaveStatus: buildSaveStatus,
+    syncBatchOptions: syncBatchOptions,
+    reportFailure: reportFailure,
+    LAST_ERROR_KEY: LAST_ERROR_KEY,
+    MD_WRITE_TIMEOUT_MS: MD_WRITE_TIMEOUT_MS,
+    filterPendingConversations: filterPendingConversations,
+    classifyBatchFailure: classifyBatchFailure,
+    backoffDelayMs: backoffDelayMs,
+    waitWhilePaused: waitWhilePaused,
+    formatBatchProgress: formatBatchProgress,
+    formatExportTimestamp: formatExportTimestamp,
+    exportPath: exportPath,
+    isDownloadableFileUrl: isDownloadableFileUrl,
+    mdDownloadPath: mdDownloadPath,
+    parseArtifactRefs: parseArtifactRefs,
+    parseFileRefs: parseFileRefs,
+    parseImageRefs: parseImageRefs,
+    runBatchExport: runBatchExport,
+    searchCompletedDownloadPaths: searchCompletedDownloadPaths,
+    readExportIndex: readExportIndex,
+    recordExportedConversation: recordExportedConversation,
+    classifyAgainstIndex: classifyAgainstIndex,
+    INDEX_KEY: INDEX_KEY,
+    INDEX_BYTE_BUDGET: INDEX_BYTE_BUDGET,
+  };
+}

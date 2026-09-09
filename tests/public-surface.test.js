@@ -46,10 +46,39 @@ test('uses a neutral public identity throughout the extension', () => {
   const manifest = JSON.parse(read('manifest.json'));
   const popup = read('popup.html');
   assert.equal(manifest.name, 'Conversation to Markdown');
-  assert.equal(manifest.version, '1.1.8');
+  // Read from the CHANGELOG rather than restated here: a hardcoded literal turns
+  // every release into a test edit, and an edited assertion is not a check.
+  const topChangelogVersion = (read('CHANGELOG.md').match(/^## \[(\d+\.\d+\.\d+)\]/m) || [])[1];
+  assert.equal(manifest.version, topChangelogVersion);
   assert.match(popup, /Conversation to Markdown/);
   assert.doesNotMatch(popup, /ChatGPT\s*→\s*Markdown/);
-  assert.deepEqual([...manifest.permissions].sort(), ['activeTab', 'clipboardWrite', 'downloads', 'scripting']);
+  // An exact-set lock, not a subset check: a permission added without a
+  // deliberate edit here is a permission nobody reviewed.
+  //
+  // `activeTab` was REMOVED in 1.6.0. It was never load-bearing — `scripting` is
+  // authorised by `host_permissions`, and `tab.url` is readable from host
+  // permission alone — and it was actively misleading, because an `activeTab`
+  // grant is revoked on navigation while the batch deliberately navigates the
+  // tab. A declared-but-unused permission is also an over-broad-permission
+  // finding in Web Store review.
+  //
+  // `storage` was ADDED in 1.2.0, deliberately and with a cost. Resume used to
+  // read Chrome's download HISTORY to work out what a previous run had saved,
+  // which is a worse privacy position than keeping a small index of our own: the
+  // history answer includes unrelated downloads, and a filename cannot express
+  // that a conversation has grown since it was exported. Measured before it was
+  // designed: an index of 800 conversations is 210 743 bytes — 2% of the 10MB
+  // quota — written in 15ms and read in 6ms, and it survives a browser restart.
+  //
+  // Two consequences are load-bearing elsewhere. The API is entirely ABSENT
+  // without this permission (`chrome.storage === undefined`, not a throwing
+  // call), so every access is guarded; and PRIVACY.md previously promised the
+  // extension "deliberately stores no state of its own", which this makes false
+  // and which was rewritten in the same change rather than left to drift.
+  assert.deepEqual(
+    [...manifest.permissions].sort(),
+    ['clipboardWrite', 'downloads', 'scripting', 'storage'],
+  );
 });
 
 test('README states independence and non-affiliation', () => {
@@ -163,7 +192,6 @@ test('shipped JavaScript has no network, storage, or analytics calls', () => {
   const forbidden = [
     /\bXMLHttpRequest\b/,
     /\bWebSocket\b/,
-    /\bchrome\.storage\b/,
     /\b(?:gtag|ga|mixpanel|amplitude|analytics)\s*\(/,
   ];
 
@@ -171,6 +199,21 @@ test('shipped JavaScript has no network, storage, or analytics calls', () => {
     assert.doesNotMatch(popupJs, pattern, `popup.js matches ${pattern}`);
     assert.doesNotMatch(contentJs, pattern, `content.js matches ${pattern}`);
   }
+
+  // `chrome.storage` is permitted in popup.js from 1.2.0 — the export index —
+  // and stays banned in content.js. That split is the point, not an oversight:
+  // content.js runs inside the ChatGPT page, on the user's conversations, and
+  // nothing there needs to persist. Keeping the ban where the conversation
+  // content lives means a future edit cannot quietly start retaining it.
+  assert.doesNotMatch(contentJs, /\bchrome\.storage\b/, 'content.js must not use chrome.storage');
+  // The index lives behind named helpers rather than scattered calls, so the
+  // whole storage surface is auditable in one place.
+  assert.match(popupJs, /function readExportIndex\b/);
+  assert.match(popupJs, /function recordExportedConversation\b/);
+  // Only `local` — `sync` would copy a record of the user's conversations to
+  // their Google account, which is a different privacy promise entirely.
+  assert.doesNotMatch(popupJs, /chrome\.storage\.sync\b/, 'the index must never sync');
+  assert.doesNotMatch(popupJs, /chrome\.storage\.managed\b/);
 
   // fetch() is allowed in content.js only — used by fetchImageDataUrls
   // for image downloading via declared host_permissions.
@@ -187,4 +230,122 @@ test('CI is read-only and pins every action by full commit SHA', () => {
   const uses = [...workflow.matchAll(/^\s*uses:\s*([^\s#]+)/gm)].map((match) => match[1]);
   assert.ok(uses.length > 0, 'workflow must use at least one action');
   for (const action of uses) assert.match(action, /@[a-f0-9]{40}$/);
+});
+
+test('PRIVACY.md describes every permission the manifest declares', () => {
+  // The document said the extension "deliberately stores no state of its own"
+  // while a change was adding the `storage` permission. A privacy policy that
+  // contradicts the manifest is worse than a vague one: it is a promise the
+  // build cannot keep, and nothing failed when it stopped being true.
+  const manifest = JSON.parse(read('manifest.json'));
+  const privacy = read('PRIVACY.md');
+
+  const readme = read('README.md');
+  for (const permission of manifest.permissions) {
+    assert.match(
+      privacy, new RegExp('`' + permission + '`'),
+      `PRIVACY.md must account for the ${permission} permission`,
+    );
+    // The README's permission list is what most users actually read, and it had
+    // gone stale in exactly the same way: `storage` was declared and undescribed.
+    assert.match(
+      readme, new RegExp('`' + permission + '`'),
+      `README.md must account for the ${permission} permission`,
+    );
+  }
+
+  // The retracted sentence must not come back while the permission is declared.
+  if (manifest.permissions.includes('storage')) {
+    assert.doesNotMatch(
+      privacy, /deliberately stores no state of its own/,
+      'the no-state promise cannot stand alongside the storage permission',
+    );
+    // And the two properties the index rests on are stated, not implied.
+    assert.match(privacy, /chrome\.storage\.local/);
+    assert.match(privacy, /No conversation content is stored/);
+    assert.match(privacy, /does not use `chrome\.storage\.sync`/);
+  }
+});
+
+test('a release cannot add a version without touching the feature checklist', () => {
+  // The checklist is only useful if it is current, and a document nobody is
+  // forced to update drifts within one release. This couples the two: the number
+  // of dated CHANGELOG versions is recorded here, so adding a release without
+  // revisiting FEATURES.md fails the build.
+  //
+  // Deliberately a count rather than content matching. Anything cleverer would be
+  // guessing which paragraph belongs to which release, and a wrong guess makes
+  // the gate either unfailable or permanently red.
+  const changelog = read('CHANGELOG.md');
+  const features = read('FEATURES.md');
+  const releases = [...changelog.matchAll(/^## \[(\d+\.\d+\.\d+)\] — \d{4}-\d{2}-\d{2}$/gm)];
+
+  const declared = (features.match(/^Published history:.*$/m) || [])[0]
+    || (features.match(/^Published so far:.*$/m) || [])[0]
+    || '';
+  const listedVersions = [...declared.matchAll(/\d+\.\d+\.\d+/g)].map((m) => m[0]);
+
+  assert.ok(
+    listedVersions.length > 0,
+    'FEATURES.md must record the published version history under "Published history:"',
+  );
+  assert.equal(
+    listedVersions.length, releases.length,
+    `FEATURES.md lists ${listedVersions.length} released versions and CHANGELOG.md has ${releases.length}; `
+    + 'update FEATURES.md in the same change as the release',
+  );
+  // The version being shipped must be the newest one named there.
+  const manifest = JSON.parse(read('manifest.json'));
+  assert.equal(
+    listedVersions[listedVersions.length - 1], manifest.version,
+    'the version being shipped must be the last entry of FEATURES.md\'s published history',
+  );
+});
+
+test('the feature checklist covers every option the popup offers', () => {
+  // A checkbox with no checklist paragraph is a feature nobody re-tests before a
+  // release. The mapping is explicit rather than inferred from label text, so
+  // renaming a label cannot quietly drop an item from the checklist.
+  const popupHtml = read('popup.html');
+  const features = read('FEATURES.md');
+  const options = [
+    ['chk-images', /All attachment types|Files are opt-in/],
+    ['chk-batch', /Whole-Project export/],
+  ];
+
+  for (const [id, expected] of options) {
+    assert.match(popupHtml, new RegExp('id="' + id + '"'), `popup.html must still offer ${id}`);
+    assert.match(features, expected, `FEATURES.md must describe the ${id} option`);
+  }
+
+  // The stamp is no longer an option, so the checklist must not describe one —
+  // otherwise the list grows stale in the direction nothing detects: an item that
+  // cannot be tested because the control it names does not exist.
+  assert.doesNotMatch(
+    popupHtml, /id="chk-timestamp"/,
+    'the timestamp checkbox was removed in 1.3.0; it changed only the filename',
+  );
+  assert.doesNotMatch(
+    features, /Optional timestamp/,
+    'FEATURES.md still lists the removed timestamp option',
+  );
+
+  // Every section the checklist promises, so a wholesale rewrite cannot drop one.
+  for (const heading of ['## Capture', '## Files and artifacts', '## Batch export',
+    '## Privacy and permissions', '## Release mechanics']) {
+    assert.ok(features.indexOf(heading) !== -1, `FEATURES.md must keep the "${heading}" section`);
+  }
+});
+
+test('the repository rules and the checklist ship with the extension', () => {
+  // Both are part of the public surface: CLAUDE.md records why the rules exist,
+  // and a rule whose reason is lost gets removed by the next person who finds it
+  // inconvenient.
+  assert.ok(fs.existsSync(path.join(root, 'CLAUDE.md')), 'CLAUDE.md must exist');
+  assert.ok(fs.existsSync(path.join(root, 'FEATURES.md')), 'FEATURES.md must exist');
+  const rules = read('CLAUDE.md');
+  // The version rule is the one the operator asked for by name; it must not be
+  // softened into a suggestion.
+  assert.match(rules, /one bump per release/i);
+  assert.match(rules, /1\.1\.8/, 'the rule must cite the published version it protects');
 });

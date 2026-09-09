@@ -75,6 +75,20 @@
 
     #btn-cancel:hover { color: #e05252; border-color: #e0525266; }
     #btn-cancel.visible { display: block; }
+    #btn-pause {
+      display: none;
+      width: 100%;
+      margin-top: 6px;
+      padding: 6px;
+      font-size: 12px;
+      background: none;
+      border: 1px solid #ffffff33;
+      border-radius: 6px;
+      color: #cfcfcf;
+      cursor: pointer;
+    }
+    #btn-pause:hover { color: #ffffff; border-color: #ffffff66; }
+    #btn-pause.visible { display: block; }
 
     #status {
       margin-top: 14px;
@@ -100,6 +114,16 @@
       border: 1px solid #e0525233;
     }
 
+    /* The run finished, but its coverage could not be confirmed. Deliberately
+       not green: an unconfirmed list must not look like a clean success. */
+    #status.warning {
+      display: block;
+      background: #2a230d;
+      color: #e0b152;
+      border: 1px solid #e0b15233;
+      white-space: pre-line;
+    }
+
     .toggle {
       display: flex;
       align-items: center;
@@ -120,6 +144,20 @@
       line-height: 1.5;
       text-align: center;
     }
+
+    .batch-warning {
+      display: none;
+      margin-top: 12px;
+      font-size: 11px;
+      color: #c9a227;
+      line-height: 1.5;
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid #c9a22744;
+      background: #2a220d;
+    }
+
+    .batch-warning.visible { display: block; }
   </style>
 </head>
 <body>
@@ -132,17 +170,29 @@
   </div>
 
   <button id="btn-copy">Copy as Markdown</button>
+  <button id="btn-pause">Pause</button>
   <button id="btn-cancel">Stop scanning</button>
 
+  <!-- Two options, not three. "Re-export with a date-time stamp" was removed in
+       1.3.0: it changed the FILENAME and nothing else, which read as if it made
+       re-exporting work somehow differently. Every export is stamped now. -->
   <label class="toggle">
     <input type="checkbox" id="chk-images" />
-    <span>Save .md + images to chatgpt-export/</span>
+    <span>Save .md + files to chatgpt-export/</span>
   </label>
+
+  <label class="toggle">
+    <input type="checkbox" id="chk-batch" />
+    <span>Export all sidebar conversations (project batch)</span>
+  </label>
+
+  <p id="batch-warning" class="batch-warning">Keep this popup open until the batch finishes. Closing it cancels the run; restart to resume — conversations already exported are skipped. Only conversations the sidebar lists can be exported, so scroll it to the end first.</p>
 
   <div id="status"></div>
 
-  <p class="hint">Open a ChatGPT conversation,<br>then click the button.</p>
+  <p class="hint">Open a ChatGPT conversation or project,<br>then click the button.</p>
 
+  <script src="zip.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

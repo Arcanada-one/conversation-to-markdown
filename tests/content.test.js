@@ -2614,3 +2614,71 @@ test('unreadable metadata returns null rather than a shape that reads as unchang
   });
   assert.equal(noId, null, 'no conversation id means no answer');
 });
+
+test('a sandbox: link in the message body is resolved and downloaded', async () => {
+  // The defect that cost four exports in a row. Measured from the live
+  // conversation the operator supplied: ChatGPT offers generated files as
+  // ORDINARY MARKDOWN LINKS inside the answer, not as artefact-panel rows —
+  //
+  //   [Скачать Canon Consilium Prompt Bundle v1](sandbox:/mnt/data/canon-consilium-prompt-bundle-v1.zip)
+  //
+  // `nodeToMarkdown` turned each one into a prose note ("> **Code Interpreter
+  // file:** `sandbox:/mnt/data/…`"), and popup.js's downloader only matches
+  // `[label](http…)`. Both the note and the original link yield ZERO matches
+  // for that pattern, so the file was named in the export and never fetched.
+  //
+  // The panel path could not save it either: a `.zip` is not opened by the
+  // built-in viewer, so it gets no panel row at all.
+  const conversationMd = [
+    'Готова версия 0.3.',
+    '',
+    '> **Code Interpreter file:** `sandbox:/mnt/data/Canon_Arcana_TZ_v0.3.md` (Скачать ТЗ)',
+    '',
+    '> **Code Interpreter file:** `sandbox:/mnt/data/canon-consilium-prompt-bundle-v1.zip` (Скачать бандл)',
+    '',
+    '> **Code Interpreter file:** `sandbox:/mnt/data/outputs/Canon_Arcana_v0.2_to_v0.3.diff` (diff)',
+  ].join('\n');
+
+  const fetchImpl = stubFetch([
+    ['/interpreter/download', (url) => {
+      const path = decodeURIComponent((url.match(/sandbox_path=([^&]+)/) || [])[1] || '');
+      const name = path.split('/').pop();
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          download_url: 'https://files.oaiusercontent.com/' + name,
+          file_name: name,
+        }),
+      };
+    }],
+  ]);
+
+  const out = await parser.appendPanelArtifacts(conversationMd, {
+    doc: { querySelectorAll: () => [] },   // no artefact panel at all
+    conversationId: 'conv-1',
+    artifacts: [],                          // the API reports nothing
+    messageIds: ['msg-1'],
+    fetchImpl,
+    token: 'tok',
+    panelWaitMs: 0,
+  });
+
+  assert.ok(
+    out.indexOf('https://files.oaiusercontent.com/canon-consilium-prompt-bundle-v1.zip') !== -1,
+    'the zip offered as a sandbox: link must reach the markdown as a fetchable URL',
+  );
+  assert.ok(
+    out.indexOf('https://files.oaiusercontent.com/Canon_Arcana_TZ_v0.3.md') !== -1,
+    'every sandbox: link in the body counts, not just the last one',
+  );
+  // A subdirectory path must survive: '/mnt/data/' + filename would have
+  // produced '/mnt/data/Canon_Arcana_v0.2_to_v0.3.diff' and resolved the wrong
+  // file, or nothing.
+  const diffCall = fetchImpl.calls.find((c) => c.url.indexOf('.diff') !== -1);
+  assert.ok(diffCall, 'the subdirectory file must be requested');
+  assert.ok(
+    decodeURIComponent(diffCall.url).indexOf('/mnt/data/outputs/') !== -1,
+    'the real sandbox path is read from the link, never rebuilt from the file name',
+  );
+});

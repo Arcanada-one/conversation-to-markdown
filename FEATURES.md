@@ -95,6 +95,12 @@ mounted reports a partial export rather than presenting a hole as a complete
 conversation. Verify that a normal complete export is **not** flagged — a false
 "partial" is worse than none.
 
+**Files offered as links in the answer.** ChatGPT often gives a generated file
+as a plain link in its reply rather than as an artefact-panel row — this is the
+only way a `.zip` arrives, since the panel lists what its viewer can open.
+Verify on a conversation whose answer links a generated archive: the file must
+land in the folder, not merely be named in the `.md`.
+
 **No errors on the extension's own page.** The content script is injected both
 declaratively and by the popup, so it must tolerate running twice in one
 document. After any export, open `chrome://extensions` and confirm the card
@@ -267,7 +273,7 @@ match the CHANGELOG's top entry, and users must never see a gap. The last entry
 below is the version being shipped; a test checks this line against the CHANGELOG
 so a release cannot be added without revisiting this file.
 
-Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0
+Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0
 
 **Changelog coupling.** A version bump with no dated CHANGELOG entry fails the
 build, because releases 1.1.6 and 1.1.7 reached the store leaving no record of

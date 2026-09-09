@@ -2,7 +2,61 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
 const parser = require('../content.js');
+
+test('content.js survives being injected twice into one document', () => {
+  // Reported from chrome://extensions against a live conversation:
+  //   Uncaught SyntaxError: Identifier 'ATTACHMENT_CHIP_SELECTORS' has already
+  //   been declared          content.js:1
+  //
+  // The manifest declares this script on every chatgpt.com page AND popup.js
+  // re-injects it after a batch navigation. On an already-loaded tab both run
+  // in the same window, and the second copy dies at PARSE time on the first
+  // top-level `const` — so none of its code executes. The export still produced
+  // a file, because the first copy's listener answered; the only symptom was an
+  // error page most users never open.
+  //
+  // Executing the real shipped file twice in one context is the only way to
+  // reach this. Requiring the module twice cannot: Node caches it, and the
+  // second require returns the same exports without re-parsing.
+  const source = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
+  const context = vm.createContext({
+    console,
+    setTimeout,
+    clearTimeout,
+    URL,
+    Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 },
+    module: undefined,
+  });
+
+  vm.runInContext(source, context, { filename: 'content.js#1' });
+  // Positive control: the first injection must actually define the binding the
+  // second one would collide with, or this test passes over an empty file.
+  assert.equal(
+    context.ATTACHMENT_CHIP_SELECTORS === undefined, false,
+    'the first injection must define the top-level bindings',
+  );
+
+  assert.doesNotThrow(
+    () => vm.runInContext(source, context, { filename: 'content.js#2' }),
+    're-injecting into a document that already has the script must be a no-op',
+  );
+});
+
+test('content.js carries no version number of its own', () => {
+  // The header said `v1.3.0` while manifest.json said 1.4.0. Every other place
+  // the version appears is coupled by a test; a comment is not, so it drifts
+  // and then lies with the authority of documentation.
+  const header = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8')
+    .slice(0, 2000);
+  assert.equal(
+    /v\d+\.\d+\.\d+/.test(header), false,
+    'content.js must not restate the version; manifest.json is the one source',
+  );
+});
 
 function createVirtualizedFixture(pages, originalScrollTop) {
   const calls = [];

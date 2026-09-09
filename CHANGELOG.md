@@ -35,6 +35,21 @@ reliable saving of long Cyrillic conversations, and the coverage fix below.
   the file was never missing from the download path, it was missing from the
   export.
 
+- **The content script threw on every ordinary export.** The manifest declares
+  it on each chatgpt.com page and the popup re-injects it after a batch
+  navigation; on an already-loaded tab both copies run in the same window and
+  the second one died at parse time — `Identifier 'ATTACHMENT_CHIP_SELECTORS'
+  has already been declared`. Because the failure is a parse error, none of the
+  second copy ran, while the first copy's listener kept answering: the export
+  still produced a file and the only evidence was an error page in
+  `chrome://extensions`. Top-level bindings are now `var`, where a repeat is a
+  no-op rather than fatal.
+
+- **The file header advertised a version it no longer was.** `content.js` said
+  `v1.3.0` while the manifest said 1.4.0 — the one place the version-coupling
+  tests could not see. The header no longer names a version, and a test keeps it
+  that way.
+
 ## [1.3.0] — 2026-08-19 (tagged, never published)
 
 Repairs three defects that lost a real export, and settles the popup's options

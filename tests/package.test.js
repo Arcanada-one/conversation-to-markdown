@@ -14,7 +14,28 @@ function commandPath(name) {
   }).trim();
 }
 
-test('the submission package builds when Info-ZIP is unavailable', () => {
+/** Locate a command, or null when it is not installed.
+ *
+ *  `command -v` exits non-zero for a missing command, which execFileSync turns
+ *  into a throw. Calling commandPath() on an optional tool therefore fails the
+ *  test on any machine that does not have it — which is how this suite went red
+ *  on a Mac with no 7z: a test ABOUT the 7z fallback made 7z mandatory. */
+function optionalCommandPath(name) {
+  try {
+    return commandPath(name) || null;
+  } catch (_e) {
+    return null;
+  }
+}
+
+test('the submission package builds when Info-ZIP is unavailable', (t) => {
+  // The fallback can only be exercised where the fallback tool exists. Skipping
+  // is honest here; asserting would report the host's toolchain as a defect in
+  // the packaging script. CI installs 7z, so the path stays covered there.
+  if (!optionalCommandPath('7z')) {
+    t.skip('7z is not installed on this host; the Info-ZIP fallback cannot be exercised');
+    return;
+  }
   const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'c2m-package-bin-'));
   const archive = path.join(root, 'dist', `conversation-to-markdown-v${version}.zip`);
   const checksum = `${archive}.sha256`;

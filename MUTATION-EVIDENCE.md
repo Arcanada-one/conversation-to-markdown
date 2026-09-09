@@ -1632,3 +1632,45 @@ A note on measurement: G3 first appeared to SURVIVE. The mutation had been
 applied by line number, the line had moved, and the edit landed in a comment.
 An unapplied mutation reads exactly like a surviving one — mutate by pattern,
 and confirm the mutated line is the line you meant.
+
+## Wave 6 — the link in the answer (1.5.0)
+
+Found by the operator pasting the assistant message itself, after four exports
+in a row produced the same file without the `.zip` in it. The message offered
+its files as ordinary links:
+
+```
+[Скачать Canon Consilium Prompt Bundle v1](sandbox:/mnt/data/canon-consilium-prompt-bundle-v1.zip)
+```
+
+Neither half of the export path could act on that. `nodeToMarkdown` rewrites the
+link into a prose note; popup.js's downloader matches `[label](http…)`. Measured
+on both strings: **zero** matches each. The artefact panel could not cover for
+it — a `.zip` has no built-in viewer, so it never gets a panel row.
+
+| id | mutation | verdict |
+|----|----------|---------|
+| M5 | drop the body-file merge into the panel list | **DIED** |
+| M6 | rebuild the path as `/mnt/data/` + filename instead of reading it | **DIED** |
+
+M6 is the one that matters for correctness beyond this conversation: a file
+written to `/mnt/data/outputs/` resolves only if the subdirectory survives, and
+the panel reader has to guess that path because the DOM does not carry it. A
+link does carry it.
+
+### A wrong diagnosis, recorded because it cost four release cycles
+
+Before this, two fixes shipped against two different theories of the same
+symptom, and neither addressed it:
+
+1. *The scan stops at a false bottom* (1.4.0). Real as an argument about the
+   code, never demonstrated on this conversation.
+2. *A growing scrollHeight defeats the coverage check.* Rested on two console
+   measurements of the "same" scroller reporting 1 580px and 53 527px. They
+   reported `clientHeight` **845** and **932** — two different elements. The
+   probe took the first scrollable node it found, and it found different ones at
+   different scroll positions. The 34x growth was an artefact of the probe.
+
+Both fixes were kept: they are guarded by their own tests and cost nothing. But
+the export kept losing the file, and the reason it kept losing it was never
+either of them. A measurement whose subject is not pinned is not a measurement.

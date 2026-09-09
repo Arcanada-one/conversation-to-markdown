@@ -5,6 +5,25 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] — 2026-09-10
+
+### Fixed
+
+- **A file offered as a link in the answer was named but never downloaded.**
+  ChatGPT hands generated files to the reader as ordinary markdown links —
+  `[Скачать bundle](sandbox:/mnt/data/canon-consilium-prompt-bundle-v1.zip)` —
+  and nothing in the export path could act on one. `nodeToMarkdown` rewrote the
+  link into a prose note, and the downloader matches only `[label](http…)`, so
+  the note and the original link both yielded zero matches. The artefact panel
+  was no help either: a `.zip` has no built-in viewer and so gets no panel row.
+  The file appeared in the export by name, and the bytes never arrived — four
+  exports in a row.
+
+  Sandbox links in the message body are now collected and resolved through the
+  same interpreter endpoint the panel already used, and the path is read from
+  the link rather than rebuilt as `/mnt/data/` + filename — a file written to a
+  subdirectory resolved to nothing before.
+
 ## [1.4.0] — 2026-09-10
 
 **The Web Store goes from 1.1.8 straight to 1.4.0.** Versions 1.2.0 and 1.3.0

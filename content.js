@@ -1311,6 +1311,37 @@ function extractConversation() {
  *  visible note when artefacts exist but could not be resolved — a silent drop
  *  would present a partial export as a complete one.
  */
+/** Collect generated files that the answer text offers as `sandbox:` links.
+ *
+ *  Two shapes reach the markdown, and both must be read:
+ *    - the note nodeToMarkdown writes for a chip or <a>:
+ *        > **Code Interpreter file:** `sandbox:/mnt/data/report.zip` (label)
+ *    - a raw link, when the export came from a path that did not rewrite it:
+ *        [label](sandbox:/mnt/data/report.zip)
+ *
+ *  The path is taken verbatim. `/mnt/data/` is where most interpreter output
+ *  lands, but not all of it — a file written to `/mnt/data/outputs/` resolves
+ *  only if the subdirectory survives, which is why this never rebuilds a path
+ *  from the file name the way the panel reader has to. */
+function sandboxFilesFromMarkdown(markdown) {
+  const text = String(markdown || '');
+  const files = [];
+  const seen = new Set();
+  // Stop at whitespace, a closing paren or a backtick: the path sits inside
+  // either `…` or (…), and a Cyrillic label may follow immediately after.
+  const pattern = /sandbox:(\/[^\s`)"'\\]+)/g;
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    const sandboxPath = match[1];
+    if (seen.has(sandboxPath)) continue;
+    seen.add(sandboxPath);
+    const name = sandboxPath.split('/').pop();
+    if (!name) continue;
+    files.push({ name: name, sandboxPath: sandboxPath, fromBody: true });
+  }
+  return files;
+}
+
 async function appendPanelArtifacts(markdown, options) {
   const opts = options || {};
   const doc = opts.doc || (typeof document !== 'undefined' ? document : null);
@@ -1333,13 +1364,39 @@ async function appendPanelArtifacts(markdown, options) {
   // on every one of them would slow every export for nothing. When the API says
   // there is nothing to find, a single-frame read is enough; when it reports
   // artefacts (or could not be read at all), wait for the panel to mount.
+  // Files offered as ordinary links in the answer text. Measured on the
+  // conversation that exposed this: ChatGPT wrote them as
+  //
+  //   [Скачать … bundle v1](sandbox:/mnt/data/canon-consilium-prompt-bundle-v1.zip)
+  //
+  // and four exports in a row named the file without ever fetching it. Neither
+  // existing path could reach it: `nodeToMarkdown` rewrites the link into a
+  // prose note, and the downloader only matches `[label](http…)`, so both the
+  // note and the original link give zero matches. The artefact panel does not
+  // rescue it either — a .zip has no built-in viewer, so it gets no panel row.
+  //
+  // This is also the only place a REAL sandbox path is available. The panel
+  // rebuilds one as '/mnt/data/' + label, which is a guess; a link carries the
+  // path the file actually has, subdirectory and all.
+  const bodyFiles = sandboxFilesFromMarkdown(markdown);
+
   let files = opts.files;
   if (!files) {
-    const mayHaveFiles = artifacts === null || artifacts.length > 0;
+    // A sandbox link in the body is proof a generated file exists — better
+    // proof than the API, which reports neither uploads nor interpreter output
+    // for such a conversation. Wait for the panel when either source says so.
+    const mayHaveFiles = artifacts === null || artifacts.length > 0 || bodyFiles.length > 0;
     files = mayHaveFiles
       ? await waitForArtifactPanel(doc, opts)
       : listArtifactPanelFiles(doc);
   }
+
+  // Merge, preferring the body's real path over the panel's reconstructed one.
+  const bySandboxPath = new Map();
+  for (const file of files) bySandboxPath.set(file.sandboxPath, file);
+  for (const file of bodyFiles) bySandboxPath.set(file.sandboxPath, file);
+  files = Array.from(bySandboxPath.values());
+
   if (!files.length) return markdown;
 
   // Candidate message ids for the download call. Measured: the endpoint requires
@@ -2428,6 +2485,7 @@ if (typeof module !== 'undefined' && module.exports) {
     listArtifactPanelFiles: listArtifactPanelFiles,
     resolveArtifactPanelFiles: resolveArtifactPanelFiles,
     appendPanelArtifacts: appendPanelArtifacts,
+    sandboxFilesFromMarkdown: sandboxFilesFromMarkdown,
     waitForArtifactPanel: waitForArtifactPanel,
     findCollapsedProjectRows: findCollapsedProjectRows,
     projectRowContainer: projectRowContainer,

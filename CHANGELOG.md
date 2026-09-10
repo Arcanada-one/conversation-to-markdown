@@ -50,6 +50,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   markup, and clicking those opens a viewer, navigating the page out from under
   a running scan.
 
+- **The buttons were searched for at the one moment they are not there.**
+  Measured on the 16:51 export: **zero** buttons found and **no `## Files`
+  section written at all**, on a conversation that demonstrably carries eight of
+  them. The cause was ordering, not selection. This pass runs after `scanTurns`,
+  whose `finally` restores the original scroll position, so ChatGPT's virtualizer
+  has unmounted every turn outside the viewport — an earlier probe measured 5 of
+  8 turns present in a static DOM for exactly this reason. The feature was dead
+  on any conversation longer than one screen, which is every conversation that
+  generates files. Buttons are now collected by scrolling the conversation, the
+  way the probe found them, and the scroll position is restored afterwards.
+
 - **The archive is fetched again, now that a wrong click costs nothing.**
   Measured on the live page: the markup cannot tell a download button from a
   viewer button. Both carry the same class, **the same `<svg>` icon** and the

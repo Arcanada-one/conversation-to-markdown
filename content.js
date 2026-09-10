@@ -1545,6 +1545,64 @@ function dismissViewerOverlay(doc, win, options) {
   return closed;
 }
 
+/** Find download buttons by scrolling the conversation, mounting them as it goes.
+ *
+ *  Required because this pass runs after `scanTurns` has restored the original
+ *  scroll position: the virtualizer keeps only the visible band mounted, so a
+ *  static query sees the buttons of one screen and misses the rest. Collects
+ *  across the whole conversation, de-duplicated by label, and leaves the
+ *  scroller where it found it. */
+async function findButtonsByScrolling(doc, win, options) {
+  const opts = options || {};
+  const root = doc || (typeof document !== 'undefined' ? document : null);
+  if (!root || !root.querySelectorAll) return [];
+  const sleep = opts.sleep || function(ms) {
+    return new Promise(function(resolve) { setTimeout(resolve, ms); });
+  };
+
+  let first = null;
+  try {
+    first = root.querySelector ? root.querySelector('[data-turn-id]') : null;
+  } catch (_e) { /* shim without querySelector */ }
+  const scroller = opts.scroller ||
+    (typeof findScrollContainer === 'function' && first ? findScrollContainer(first) : null);
+  if (!scroller) return downloadButtonsInPage(root, opts.panelNames);
+
+  const settleMs = opts.buttonScrollSettleMs === undefined ? 500 : opts.buttonScrollSettleMs;
+  const maxSteps = opts.buttonScrollMaxSteps === undefined ? 200 : opts.buttonScrollMaxSteps;
+  const originalTop = scroller.scrollTop;
+  const byLabel = new Map();
+
+  function harvest() {
+    for (const entry of downloadButtonsInPage(root, opts.panelNames)) {
+      if (!byLabel.has(entry.label)) byLabel.set(entry.label, entry);
+    }
+  }
+
+  try {
+    scroller.scrollTop = 0;
+    await sleep(settleMs);
+    harvest();
+    const maxTop = function() {
+      return Math.max(0, (scroller.scrollHeight || 0) - (scroller.clientHeight || 0));
+    };
+    const step = Math.max(200, Math.floor((scroller.clientHeight || 800) * 0.7));
+    for (let i = 0; i < maxSteps; i += 1) {
+      const before = scroller.scrollTop;
+      scroller.scrollTop = Math.min(before + step, maxTop());
+      await sleep(settleMs);
+      harvest();
+      if (scroller.scrollTop >= maxTop() - 1 && before >= maxTop() - 1) break;
+    }
+  } finally {
+    // A button captured while scrolled away is still clickable: the click path
+    // calls scrollIntoView on it first. Restoring the position keeps the page
+    // where the user left it.
+    try { scroller.scrollTop = originalTop; } catch (_e) { /* detached */ }
+  }
+  return Array.from(byLabel.values());
+}
+
 async function collectButtonDownloads(options) {
   const opts = options || {};
   const doc = opts.doc || (typeof document !== 'undefined' ? document : null);
@@ -1554,7 +1612,22 @@ async function collectButtonDownloads(options) {
   // emptying them left the whole suite green, making the regression guard
   // unverified wiring rather than a checked one.
   if (typeof opts.onSelectButtons === 'function') opts.onSelectButtons(opts.panelNames || []);
-  const buttons = opts.buttons || downloadButtonsInPage(doc, opts.panelNames);
+  let buttons = opts.buttons || downloadButtonsInPage(doc, opts.panelNames);
+
+  // MEASURED (2026-09-10, 16:51 export): zero buttons found, no `## Files`
+  // section written at all, while the same conversation demonstrably carries
+  // eight of them. The reason is ordering — this runs AFTER scanTurns, whose
+  // `finally` restores the original scroll position, so ChatGPT's virtualizer
+  // has unmounted every turn outside the viewport. A probe measured 5 turns of
+  // 8 present in a static DOM for exactly this reason.
+  //
+  // So the buttons are searched for the way the probe found them: scroll the
+  // conversation and collect what mounts. Without this the feature is dead on a
+  // conversation longer than one screen, which is every conversation that
+  // generates files.
+  if (!opts.buttons && !buttons.length && opts.scrollForButtons !== false) {
+    buttons = await findButtonsByScrolling(doc, win, opts);
+  }
   if (!buttons.length) return [];
 
   const sleep = opts.sleep || function(ms) {
@@ -2865,6 +2938,7 @@ if (typeof module !== 'undefined' && module.exports) {
     sandboxFilesFromMarkdown: sandboxFilesFromMarkdown,
     downloadButtonsInPage: downloadButtonsInPage,
     collectButtonDownloads: collectButtonDownloads,
+    findButtonsByScrolling: findButtonsByScrolling,
     downloadNameFromUrl: downloadNameFromUrl,
     dismissViewerOverlay: dismissViewerOverlay,
     escapeKeydownEvent: escapeKeydownEvent,

@@ -2682,3 +2682,388 @@ test('a sandbox: link in the message body is resolved and downloaded', async () 
     'the real sandbox path is read from the link, never rebuilt from the file name',
   );
 });
+
+/* ------------------------------------------------------------------------- *
+ * Files offered only as a button with a click handler.
+ *
+ * Measured on a production conversation (2026-09-10): the archive the user kept
+ * losing was offered as
+ *   <button class="behavior-btn">Скачать готовый Canon Consilium Prompt Bundle v1</button>
+ * with NO href, NO sandbox: link, NO panel row and NO data-* attributes, and a
+ * label that is prose rather than a file name. Every earlier source measured
+ * zero on that page, so these fixtures reproduce exactly that shape.
+ * ------------------------------------------------------------------------- */
+
+/** A button whose handler signs a URL and downloads it the way the page does. */
+function downloadButton(label, options) {
+  const opts = options || {};
+  const node = {
+    tagName: 'BUTTON',
+    textContent: label,
+    clicked: 0,
+    getAttribute: (n) => (n === 'class' ? 'behavior-btn' : null),
+    closest: () => (opts.insideAnchor ? { tagName: 'A' } : null),
+    scrollIntoView() {},
+    click() {
+      this.clicked += 1;
+      if (opts.onClick) opts.onClick();
+    },
+  };
+  return node;
+}
+
+/** Minimal window shim carrying the three routes the interceptor patches. */
+function makeWin() {
+  const anchorClicks = [];
+  const win = {
+    HTMLAnchorElement: { prototype: { click() { anchorClicks.push(this); } } },
+    open() { return 'real-open'; },
+    URL: { createObjectURL: () => 'blob:real' },
+    anchorClicks,
+  };
+  win.originalAnchorClick = win.HTMLAnchorElement.prototype.click;
+  win.originalOpen = win.open;
+  win.originalCreateObjectURL = win.URL.createObjectURL;
+  return win;
+}
+
+function docWithButtons(buttons) {
+  return {
+    querySelectorAll(sel) {
+      return /behavior-btn/.test(sel) ? buttons : [];
+    },
+  };
+}
+
+test('a file offered only as a button is clicked and its signed URL captured', async () => {
+  // The exact failure the user hit four exports in a row: the archive exists,
+  // the page will hand over a URL, but only if something clicks the button.
+  const win = makeWin();
+  const button = downloadButton('Скачать готовый Canon Consilium Prompt Bundle v1', {
+    onClick() {
+      // What ChatGPT's handler does: build an <a download> and click it.
+      const anchor = {
+        getAttribute: () => 'https://chatgpt.com/backend-api/estuary/content' +
+          '?id=file_000&fn=canon-consilium-prompt-bundle-v1.zip&SIGNED&ts=1',
+        hasAttribute: (n) => n === 'download',
+      };
+      win.HTMLAnchorElement.prototype.click.call(anchor);
+    },
+  });
+
+  const files = await parser.collectButtonDownloads({
+    doc: docWithButtons([button]),
+    win,
+    sleep: async () => {},
+  });
+
+  assert.equal(button.clicked, 1, 'the button must actually be clicked');
+  assert.equal(files.length, 1, 'the handler produced exactly one download');
+  assert.equal(files[0].name, 'canon-consilium-prompt-bundle-v1.zip',
+    'the real name comes from fn=, never from the prose label');
+  assert.ok(files[0].url.indexOf('SIGNED') !== -1, 'the signed URL must be kept intact');
+});
+
+test('the intercepted click does not reach the page, and the routes are restored', async () => {
+  // Two failures in one: an unintercepted click downloads through the PAGE,
+  // which passes no filename and drops the file in the Downloads root; and a
+  // patch left behind would break downloading for the user after the export.
+  const win = makeWin();
+  const button = downloadButton('Скачать архив', {
+    onClick() {
+      const anchor = {
+        getAttribute: () => 'https://chatgpt.com/backend-api/estuary/content?fn=a.zip',
+        hasAttribute: () => true,
+      };
+      win.HTMLAnchorElement.prototype.click.call(anchor);
+    },
+  });
+
+  await parser.collectButtonDownloads({
+    doc: docWithButtons([button]),
+    win,
+    sleep: async () => {},
+  });
+
+  assert.equal(win.anchorClicks.length, 0,
+    'the real anchor click must be suppressed, or the page downloads it itself');
+  assert.equal(win.HTMLAnchorElement.prototype.click, win.originalAnchorClick,
+    'anchor click must be restored');
+  assert.equal(win.open, win.originalOpen, 'window.open must be restored');
+  assert.equal(win.URL.createObjectURL, win.originalCreateObjectURL,
+    'createObjectURL must be restored');
+});
+
+test('routes are restored even when a handler throws', async () => {
+  // A positive control for the finally block: without it one bad button leaves
+  // the page permanently unable to download anything.
+  const win = makeWin();
+  const button = downloadButton('Скачать', { onClick() { throw new Error('handler blew up'); } });
+
+  await parser.collectButtonDownloads({
+    doc: docWithButtons([button]),
+    win,
+    sleep: async () => {},
+  });
+
+  assert.equal(win.HTMLAnchorElement.prototype.click, win.originalAnchorClick,
+    'a throwing handler must not leave the page patched');
+  assert.equal(win.open, win.originalOpen, 'window.open must be restored after a throw');
+});
+
+test('only download buttons are clicked, never viewer buttons', async () => {
+  // The same conversation carried "Открыть полное техническое задание" and
+  // "Посмотреть полный diff" on identical markup. Clicking those opens a viewer
+  // and navigates the page out from under a running export.
+  const buttons = [
+    downloadButton('Скачать полное ТЗ Canon Arcana v0.3'),
+    downloadButton('Открыть полное техническое задание'),
+    downloadButton('Посмотреть полный diff v0.2 → v0.3'),
+    downloadButton('Контрольные суммы SHA-256'),
+    downloadButton('Download the bundle'),
+  ];
+  const found = parser.downloadButtonsInPage(docWithButtons(buttons));
+  const labels = found.map((f) => f.label);
+
+  assert.deepEqual(labels, ['Скачать полное ТЗ Canon Arcana v0.3', 'Download the bundle'],
+    'only labels that offer a download may be clicked');
+});
+
+test('a button already wrapped in a link is left to the attachment path', async () => {
+  // That one has an href, which the existing chip path reads without clicking.
+  const inside = downloadButton('Скачать файл', { insideAnchor: true });
+  assert.deepEqual(parser.downloadButtonsInPage(docWithButtons([inside])), []);
+});
+
+test('a blob download keeps its bytes, since a blob URL is unusable elsewhere', async () => {
+  // A blob: URL minted in the page cannot be fetched from the popup, so the
+  // object itself has to travel with the entry.
+  const win = makeWin();
+  const blob = { size: 12, type: 'application/zip' };
+  const button = downloadButton('Скачать отчёт', {
+    onClick() { win.URL.createObjectURL(blob); },
+  });
+
+  const files = await parser.collectButtonDownloads({
+    doc: docWithButtons([button]),
+    win,
+    sleep: async () => {},
+  });
+
+  assert.equal(files.length, 1);
+  assert.equal(files[0].blob, blob, 'the blob must be carried, not just its URL');
+});
+
+test('button downloads reach the markdown as links the popup can fetch', async () => {
+  // The end-to-end contract: parseArtifactRefs reads the finished markdown, so
+  // a file that never appears there is never downloaded into the folder.
+  const out = await parser.appendPanelArtifacts('body', {
+    doc: { querySelectorAll: () => [] },
+    conversationId: 'conv-1',
+    artifacts: [],
+    fetchImpl: stubFetch([]),
+    token: 'tok',
+    buttonFiles: [{
+      name: 'canon-consilium-prompt-bundle-v1.zip',
+      url: 'https://chatgpt.com/backend-api/estuary/content?id=file_0&fn=canon-consilium-prompt-bundle-v1.zip',
+      fromButton: true,
+    }],
+  });
+
+  assert.ok(out.indexOf('## Files') !== -1, 'a Files section must be added');
+  assert.ok(
+    out.indexOf('[canon-consilium-prompt-bundle-v1.zip](https://chatgpt.com/backend-api/estuary/') !== -1,
+    'the archive must be a markdown link, which is what the downloader parses',
+  );
+});
+
+test('a file already resolved by the panel is not clicked a second time', async () => {
+  // Clicking costs a network round-trip and a page side effect; the panel and
+  // the body reach the same file more cheaply.
+  const doc = {
+    querySelectorAll(sel) {
+      return /open-file|artifact-row/.test(sel)
+        ? [{ getAttribute: (n) => (n === 'aria-label' ? 'report.pdf' : null) }]
+        : [];
+    },
+  };
+  const out = await parser.appendPanelArtifacts('body', {
+    doc,
+    conversationId: 'conv-1',
+    artifacts: [{ kind: 'asset', messageId: 'm1' }],
+    fetchImpl: stubFetch([
+      ['/interpreter/download', jsonOk({
+        download_url: 'https://chatgpt.com/backend-api/estuary/content?id=file_r&fn=report.pdf',
+        file_name: 'report.pdf',
+      })],
+    ]),
+    token: 'tok',
+    buttonFiles: [{ name: 'report.pdf', url: 'https://example.com/duplicate.pdf' }],
+  });
+
+  // Counted as LINKS, not as occurrences of the name: the resolved URL carries
+  // `fn=report.pdf`, so the name legitimately appears twice inside one link.
+  assert.equal(out.split('[report.pdf](').length - 1, 1,
+    'the file must be linked exactly once');
+  assert.ok(out.indexOf('duplicate.pdf') === -1, 'the cheaper source wins');
+});
+
+test('clicking is opt-out, so a plain markdown copy never touches the page', async () => {
+  // Clicking is a side effect. "Copy as Markdown" is a pure DOM read and must
+  // stay one; a stray click would download files the user did not ask for.
+  let clicked = false;
+  const button = downloadButton('Скачать архив', { onClick() { clicked = true; } });
+  const out = await parser.appendPanelArtifacts('body', {
+    doc: docWithButtons([button]),
+    win: makeWin(),
+    conversationId: 'conv-1',
+    artifacts: [],
+    fetchImpl: stubFetch([]),
+    token: 'tok',
+    clickDownloads: false,
+  });
+
+  assert.equal(clicked, false, 'no button may be clicked when clicking is off');
+  assert.equal(out, 'body', 'the markdown must come back untouched');
+});
+
+test('the prose label is used only when the URL carries no name', async () => {
+  assert.equal(
+    parser.downloadNameFromUrl(
+      'https://chatgpt.com/backend-api/estuary/content?id=file_0&fn=bundle.zip', 'Скачать всё'),
+    'bundle.zip', 'fn= wins');
+  assert.equal(
+    parser.downloadNameFromUrl('https://example.com/files/report.pdf', 'Скачать'),
+    'report.pdf', 'a path segment that looks like a file name is used');
+  assert.equal(
+    parser.downloadNameFromUrl('https://chatgpt.com/backend-api/estuary/content', 'Скачать всё'),
+    'Скачать всё', '/content is a route, not a file name');
+  assert.equal(
+    parser.downloadNameFromUrl(null, 'a/b:c'), 'a-b-c',
+    'a label used as a filename must not carry path separators');
+});
+
+test('the shipped capture path reaches a file offered only as a button', async () => {
+  // The wiring, not the helper. A mutation deleting the button collection from
+  // appendPanelArtifacts leaves every unit test above green, because they call
+  // the helper directly. This drives getConversationMarkdown — the function the
+  // popup actually calls — against a page shaped like the measured one: a
+  // conversation whose archive has no link, no panel row and no file id.
+  const turn = userTurn('user-1', 1, 'Собери архив');
+  const container = createVirtualizedFixture([[turn]], 0);
+  container.overflowY = 'auto';
+  turn.parentElement = container;
+
+  let clicked = 0;
+  const archiveButton = {
+    tagName: 'BUTTON',
+    textContent: 'Скачать готовый Canon Consilium Prompt Bundle v1',
+    getAttribute: () => null,
+    closest: () => null,
+    scrollIntoView() {},
+    click() {
+      clicked += 1;
+      // ChatGPT's handler: sign a URL, then click a hidden <a download>.
+      const anchor = {
+        getAttribute: () => 'https://chatgpt.com/backend-api/estuary/content' +
+          '?id=file_000&fn=canon-consilium-prompt-bundle-v1.zip',
+        hasAttribute: (n) => n === 'download',
+      };
+      global.window.HTMLAnchorElement.prototype.click.call(anchor);
+    },
+  };
+
+  const previousDocument = global.document;
+  const previousWindow = global.window;
+  const previousStyle = global.getComputedStyle;
+  const previousLocation = global.location;
+  const previousFetch = global.fetch;
+
+  global.document = {
+    title: 'ChatGPT',
+    querySelector: (sel) => (sel === '[data-turn-id]' ? turn : null),
+    querySelectorAll(sel) {
+      if (/behavior-btn/.test(sel)) return [archiveButton];
+      if (/open-file|artifact-row/.test(sel)) return [];   // a .zip gets no panel row
+      if (sel === '[data-message-id]') return [];
+      return container.querySelectorAll('[data-turn-id]');
+    },
+  };
+  global.window = {
+    HTMLAnchorElement: { prototype: { click() { throw new Error('the page must not download it'); } } },
+    open() { throw new Error('the page must not open it'); },
+    URL: { createObjectURL: () => 'blob:x' },
+  };
+  global.getComputedStyle = (node) => ({ overflowY: node.overflowY || 'visible' });
+  global.location = { pathname: '/c/conv-88', href: 'https://chatgpt.com/' };
+  global.fetch = async (url) => {
+    const target = String(url);
+    if (target.indexOf('/api/auth/session') !== -1) {
+      return { ok: true, status: 200, json: async () => ({ accessToken: 'tok' }) };
+    }
+    if (target.indexOf('/backend-api/conversation/conv-88') !== -1) {
+      return { ok: true, status: 200, json: async () => ({ mapping: {} }) };
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+
+  try {
+    const result = await parser.getConversationMarkdown({ downloadFiles: true });
+    assert.equal(result.ok, true, 'capture failed: ' + result.error);
+    assert.equal(clicked, 1, 'the shipped path must click the download button');
+    assert.ok(
+      result.md.indexOf('[canon-consilium-prompt-bundle-v1.zip](https://chatgpt.com/backend-api/estuary/') !== -1,
+      'the archive must reach the markdown as a link the popup can fetch',
+    );
+  } finally {
+    global.document = previousDocument;
+    if (previousWindow === undefined) delete global.window; else global.window = previousWindow;
+    global.getComputedStyle = previousStyle;
+    global.location = previousLocation;
+    if (previousFetch === undefined) delete global.fetch; else global.fetch = previousFetch;
+  }
+});
+
+test('a plain copy clicks nothing in the shipped path either', async () => {
+  // Positive control for the opt-in: the same fixture, downloadFiles off. If the
+  // click were unconditional, "Copy as Markdown" would silently download files.
+  const turn = userTurn('user-1', 1, 'Просто скопируй');
+  const container = createVirtualizedFixture([[turn]], 0);
+  container.overflowY = 'auto';
+  turn.parentElement = container;
+
+  let clicked = 0;
+  const button = {
+    tagName: 'BUTTON',
+    textContent: 'Скачать архив',
+    getAttribute: () => null,
+    closest: () => null,
+    scrollIntoView() {},
+    click() { clicked += 1; },
+  };
+
+  const previousDocument = global.document;
+  const previousStyle = global.getComputedStyle;
+  const previousLocation = global.location;
+
+  global.document = {
+    title: 'ChatGPT',
+    querySelector: (sel) => (sel === '[data-turn-id]' ? turn : null),
+    querySelectorAll(sel) {
+      if (/behavior-btn/.test(sel)) return [button];
+      return container.querySelectorAll('[data-turn-id]');
+    },
+  };
+  global.getComputedStyle = (node) => ({ overflowY: node.overflowY || 'visible' });
+  global.location = { pathname: '/c/conv-99', href: 'https://chatgpt.com/' };
+
+  try {
+    const result = await parser.getConversationMarkdown({});
+    assert.equal(result.ok, true, 'capture failed: ' + result.error);
+    assert.equal(clicked, 0, 'a plain copy must not click anything');
+  } finally {
+    global.document = previousDocument;
+    global.getComputedStyle = previousStyle;
+    global.location = previousLocation;
+  }
+});

@@ -1342,6 +1342,215 @@ function sandboxFilesFromMarkdown(markdown) {
   return files;
 }
 
+/* ------------------------------------------------------------------------- *
+ * Files offered only as a BUTTON WITH A HANDLER.
+ *
+ *  Measured on a production conversation (2026-09-10), after four exports in a
+ *  row named a .zip without ever fetching it. The page offered it like this:
+ *
+ *    <button class="behavior-btn …" type="button">
+ *      Скачать готовый Canon Consilium Prompt Bundle v1
+ *    </button>
+ *
+ *  Every other path in this file misses it, and each for its own reason:
+ *    - no `href`      -> the attachment-chip selectors match nothing;
+ *    - no `sandbox:`  -> `sandboxFilesFromMarkdown` returns [] (measured: 0);
+ *    - no panel row   -> a .zip has no built-in viewer, so the panel lists only
+ *                        the .md/.txt siblings (measured: 4 rows, no archive);
+ *    - no data-*      -> nothing carries a file id (measured: dataAttrs {} on
+ *                        all 8 buttons), so the id cannot be read and resolved.
+ *
+ *  The label is PROSE, not a file name ("Скачать готовый …", no extension), so
+ *  it cannot be turned into a path either. The real URL exists only after the
+ *  page's own handler runs and asks the backend to sign one:
+ *
+ *    /backend-api/estuary/content?id=file_…&fn=<real name>&<signature>&ts=…
+ *
+ *  So the file is reachable only by CLICKING, and the click must be intercepted
+ *  rather than allowed to proceed: an unintercepted click downloads through the
+ *  PAGE, which never passes a `filename`, so Chrome drops the file in the root
+ *  of Downloads instead of beside its conversation. Interception hands the URL
+ *  to chrome.downloads, which is the same road every other artefact takes.
+ * ------------------------------------------------------------------------- */
+
+/** Buttons that offer a file download and carry no link of their own.
+ *
+ *  Matched by shape, not by wording alone: the class is ChatGPT's, while the
+ *  label is user-facing text that is translated ("Скачать …" / "Download …")
+ *  and would break the moment the UI language changes. A button that already
+ *  sits inside an <a> is skipped — that one has an href and the existing
+ *  attachment path already handles it. */
+function downloadButtonsInPage(doc) {
+  const root = doc || (typeof document !== 'undefined' ? document : null);
+  if (!root || !root.querySelectorAll) return [];
+  let nodes;
+  try {
+    nodes = root.querySelectorAll('button.behavior-btn, .behavior-btn');
+  } catch (_e) {
+    return [];
+  }
+  const out = [];
+  for (const node of Array.from(nodes)) {
+    if (!node || node.tagName !== 'BUTTON') continue;
+    if (typeof node.closest === 'function' && node.closest('a')) continue;
+    const label = (node.textContent || '').trim();
+    if (!label || label.length > 200) continue;
+    // "Скачать …" / "Download …" / "Загрузить …". The other behavior-btn labels
+    // in the same conversation ("Открыть полное ТЗ", "Посмотреть полный diff")
+    // open a viewer instead of downloading, and clicking those would navigate
+    // the page out from under a running export.
+    // The boundary is whitespace or end-of-string, NEVER `\b`: that is an ASCII
+    // word boundary, so `/^скачать\b/i` is false for "Скачать архив" and true
+    // for "Download the bundle" — the check would have passed every English
+    // label and rejected every Russian one, which is exactly the conversation
+    // this was built for. Measured on the failing fixture before the fix.
+    if (!/^\s*(скачать|download|загрузить|télécharger|herunterladen|descargar)(\s|$)/i.test(label)) {
+      continue;
+    }
+    out.push({ button: node, label: label });
+  }
+  return out;
+}
+
+/** Click each download button with the page's own download routes intercepted,
+ *  and return the signed URLs the handlers produced.
+ *
+ *  The interception replaces three routes and restores all of them in a
+ *  `finally`: leaving a patched `click()` behind would break the page for the
+ *  user after the export, which is worse than missing a file.
+ *
+ *    - HTMLAnchorElement.prototype.click — the usual `<a download>` road;
+ *    - window.open — used when the handler opens the URL instead;
+ *    - URL.createObjectURL — a blob built in the page, which has no address
+ *      the popup could fetch later, so its bytes are read here instead.
+ *
+ *  Each URL is recorded and the underlying action suppressed, so nothing lands
+ *  in the Downloads root while the export is running.
+ *
+ *  Returns [{name, url, label, blob}] — `name` from the URL's `fn=` parameter
+ *  when present, because the button's label is prose and not a file name. */
+async function collectButtonDownloads(options) {
+  const opts = options || {};
+  const doc = opts.doc || (typeof document !== 'undefined' ? document : null);
+  const win = opts.win || (typeof window !== 'undefined' ? window : null);
+  if (!doc || !win) return [];
+  const buttons = opts.buttons || downloadButtonsInPage(doc);
+  if (!buttons.length) return [];
+
+  const sleep = opts.sleep || function(ms) {
+    return new Promise(function(resolve) { setTimeout(resolve, ms); });
+  };
+  // How long one handler gets to produce a URL. It is a network round-trip to
+  // sign the link, so this is not instant; a button that never resolves must
+  // not stall the export either.
+  const settleMs = opts.clickSettleMs === undefined ? 2500 : opts.clickSettleMs;
+
+  const captured = [];
+  const anchorProto = win.HTMLAnchorElement && win.HTMLAnchorElement.prototype;
+  const originalAnchorClick = anchorProto ? anchorProto.click : null;
+  const originalOpen = win.open;
+  const originalCreateObjectURL = win.URL && win.URL.createObjectURL;
+
+  function record(url, blob) {
+    if (!url && !blob) return;
+    captured.push({ url: url || null, blob: blob || null });
+  }
+
+  try {
+    if (anchorProto && typeof originalAnchorClick === 'function') {
+      anchorProto.click = function() {
+        const href = this.getAttribute ? (this.getAttribute('href') || '') : '';
+        // Only swallow the click when it is a download; an ordinary in-page
+        // anchor clicked by unrelated code must still work.
+        if (href && (this.hasAttribute('download') || /^(https?:|blob:)/.test(href))) {
+          record(href, null);
+          return undefined;
+        }
+        return originalAnchorClick.apply(this, arguments);
+      };
+    }
+    win.open = function(url) {
+      if (url) { record(String(url), null); return null; }
+      return originalOpen ? originalOpen.apply(win, arguments) : null;
+    };
+    if (win.URL && typeof originalCreateObjectURL === 'function') {
+      win.URL.createObjectURL = function(obj) {
+        const url = originalCreateObjectURL.apply(win.URL, arguments);
+        // Keep the blob itself: a blob: URL minted in the page is not fetchable
+        // from the popup's context, so the bytes have to travel instead.
+        record(url, obj || null);
+        return url;
+      };
+    }
+
+    for (const entry of buttons) {
+      const before = captured.length;
+      try {
+        if (typeof entry.button.scrollIntoView === 'function') {
+          entry.button.scrollIntoView({ block: 'center' });
+        }
+        entry.button.click();
+      } catch (_e) {
+        continue;
+      }
+      // Wait for the handler's round-trip, but stop as soon as it delivers.
+      const deadline = (opts.now ? opts.now() : Date.now()) + settleMs;
+      while (captured.length === before &&
+             (opts.now ? opts.now() : Date.now()) < deadline) {
+        await sleep(opts.clickPollMs === undefined ? 150 : opts.clickPollMs);
+      }
+      for (let i = before; i < captured.length; i += 1) {
+        captured[i].label = entry.label;
+      }
+    }
+  } finally {
+    if (anchorProto && typeof originalAnchorClick === 'function') {
+      anchorProto.click = originalAnchorClick;
+    }
+    win.open = originalOpen;
+    if (win.URL && typeof originalCreateObjectURL === 'function') {
+      win.URL.createObjectURL = originalCreateObjectURL;
+    }
+  }
+
+  const seen = new Set();
+  const files = [];
+  for (const item of captured) {
+    const key = item.url || (item.label + ':blob');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    files.push({
+      name: downloadNameFromUrl(item.url, item.label),
+      url: item.url,
+      blob: item.blob,
+      label: item.label || null,
+      fromButton: true,
+    });
+  }
+  return files;
+}
+
+/** The file's real name, which the button's prose label does not carry.
+ *  `fn=` is what the signing endpoint puts there; the last path segment is the
+ *  fallback, and the label is used only when the URL offers nothing usable. */
+function downloadNameFromUrl(url, label) {
+  const fallback = String(label || 'download').trim().replace(/[\\/:*?"<>|]+/g, '-');
+  if (!url) return fallback;
+  let parsed;
+  try {
+    parsed = new URL(url, typeof location !== 'undefined' ? location.href : undefined);
+  } catch (_e) {
+    return fallback;
+  }
+  const fn = parsed.searchParams ? parsed.searchParams.get('fn') : null;
+  if (fn) return fn;
+  const last = (parsed.pathname || '').split('/').filter(Boolean).pop();
+  // A path segment is only a name when it looks like one: the estuary endpoint
+  // ends in `/content`, which is a route, not a file.
+  if (last && /\.[A-Za-z0-9]{1,8}$/.test(last)) return last;
+  return fallback;
+}
+
 async function appendPanelArtifacts(markdown, options) {
   const opts = options || {};
   const doc = opts.doc || (typeof document !== 'undefined' ? document : null);
@@ -1397,7 +1606,15 @@ async function appendPanelArtifacts(markdown, options) {
   for (const file of bodyFiles) bySandboxPath.set(file.sandboxPath, file);
   files = Array.from(bySandboxPath.values());
 
-  if (!files.length) return markdown;
+  // Files behind a button handler are gathered BEFORE the early return below:
+  // such a file has no sandbox path at all, so `files` is empty for a
+  // conversation whose only artefact is the archive — and returning here would
+  // drop it exactly the way four consecutive exports did.
+  const buttonFiles = opts.clickDownloads === false
+    ? []
+    : (opts.buttonFiles !== undefined ? opts.buttonFiles : await collectButtonDownloads(opts));
+
+  if (!files.length && !buttonFiles.length) return markdown;
 
   // Candidate message ids for the download call. Measured: the endpoint requires
   // a message_id but does NOT use it to select the file — 12 different ids
@@ -1441,6 +1658,22 @@ async function appendPanelArtifacts(markdown, options) {
       lines.push(markdownLink(entry.file.name, entry.resolved.url));
     } else {
       unresolved.push(entry.file.name);
+    }
+  }
+
+  // Files that exist only behind a button handler. Collected LAST, and only
+  // when asked: clicking is a side effect on the page, so it must not happen
+  // during a plain "copy as Markdown". Names already resolved above are not
+  // clicked again — the panel and the body reach the same file more cheaply.
+  const alreadyNamed = new Set();
+  for (const entry of resolvedList) alreadyNamed.add(entry.file.name);
+  for (const file of buttonFiles) {
+    if (!file || alreadyNamed.has(file.name)) continue;
+    alreadyNamed.add(file.name);
+    if (file.url) {
+      lines.push(markdownLink(file.name, file.url));
+    } else {
+      unresolved.push(file.name);
     }
   }
   // Deliberately overlapping with the `!files.length` early return above: that
@@ -2486,6 +2719,9 @@ if (typeof module !== 'undefined' && module.exports) {
     resolveArtifactPanelFiles: resolveArtifactPanelFiles,
     appendPanelArtifacts: appendPanelArtifacts,
     sandboxFilesFromMarkdown: sandboxFilesFromMarkdown,
+    downloadButtonsInPage: downloadButtonsInPage,
+    collectButtonDownloads: collectButtonDownloads,
+    downloadNameFromUrl: downloadNameFromUrl,
     waitForArtifactPanel: waitForArtifactPanel,
     findCollapsedProjectRows: findCollapsedProjectRows,
     projectRowContainer: projectRowContainer,

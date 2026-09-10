@@ -592,3 +592,23 @@ test('batch mode reports per-conversation progress and writes a zip archive', as
   assert.ok(zipDownload, 'batch must download a zip archive');
   assert.match(zipDownload.filename, /My-Project-export--\d{8}-\d{4}\.zip$/);
 });
+
+test('a link captured from a download button is fetched into the conversation folder', () => {
+  // Closes the loop measured on 2026-09-10: content.js clicks the button and
+  // writes the signed URL into the markdown, and the popup must recognise it as
+  // downloadable. If either half drifts, the archive appears in the export as a
+  // link while the bytes never land beside the .md — exactly the failure the
+  // user reported four exports running.
+  const md = [
+    '## Files',
+    '',
+    '[canon-consilium-prompt-bundle-v1.zip]' +
+      '(https://chatgpt.com/backend-api/estuary/content?id=file_000&fn=canon-consilium-prompt-bundle-v1.zip)',
+  ].join('\n');
+
+  const refs = popup.parseFileRefs(md);
+  assert.equal(refs.length, 1, 'the archive link must be picked up for download');
+  assert.equal(refs[0].label, 'canon-consilium-prompt-bundle-v1.zip');
+  assert.ok(popup.isDownloadableFileUrl(refs[0].url),
+    'an estuary URL is the shape a clicked download button produces');
+});

@@ -2739,7 +2739,7 @@ test('a file offered only as a button is clicked and its signed URL captured', a
   // The exact failure the user hit four exports in a row: the archive exists,
   // the page will hand over a URL, but only if something clicks the button.
   const win = makeWin();
-  const button = downloadButton('Скачать готовый Canon Consilium Prompt Bundle v1', {
+  const button = downloadButton('Скачать готовый Canon Consilium Prompt Bundle v1.zip', {
     onClick() {
       // What ChatGPT's handler does: build an <a download> and click it.
       const anchor = {
@@ -2769,7 +2769,7 @@ test('the intercepted click does not reach the page, and the routes are restored
   // which passes no filename and drops the file in the Downloads root; and a
   // patch left behind would break downloading for the user after the export.
   const win = makeWin();
-  const button = downloadButton('Скачать архив', {
+  const button = downloadButton('Скачать архив bundle.zip', {
     onClick() {
       const anchor = {
         getAttribute: () => 'https://chatgpt.com/backend-api/estuary/content?fn=a.zip',
@@ -2798,7 +2798,7 @@ test('routes are restored even when a handler throws', async () => {
   // A positive control for the finally block: without it one bad button leaves
   // the page permanently unable to download anything.
   const win = makeWin();
-  const button = downloadButton('Скачать', { onClick() { throw new Error('handler blew up'); } });
+  const button = downloadButton('Скачать bundle.zip', { onClick() { throw new Error('handler blew up'); } });
 
   await parser.collectButtonDownloads({
     doc: docWithButtons([button]),
@@ -2816,22 +2816,22 @@ test('only download buttons are clicked, never viewer buttons', async () => {
   // "Посмотреть полный diff" on identical markup. Clicking those opens a viewer
   // and navigates the page out from under a running export.
   const buttons = [
-    downloadButton('Скачать полное ТЗ Canon Arcana v0.3'),
+    downloadButton('Скачать полное ТЗ Canon Arcana v0.3.zip'),
     downloadButton('Открыть полное техническое задание'),
     downloadButton('Посмотреть полный diff v0.2 → v0.3'),
     downloadButton('Контрольные суммы SHA-256'),
-    downloadButton('Download the bundle'),
+    downloadButton('Download the bundle.diff'),
   ];
   const found = parser.downloadButtonsInPage(docWithButtons(buttons));
   const labels = found.map((f) => f.label);
 
-  assert.deepEqual(labels, ['Скачать полное ТЗ Canon Arcana v0.3', 'Download the bundle'],
+  assert.deepEqual(labels, ['Скачать полное ТЗ Canon Arcana v0.3.zip', 'Download the bundle.diff'],
     'only labels that offer a download may be clicked');
 });
 
 test('a button already wrapped in a link is left to the attachment path', async () => {
   // That one has an href, which the existing chip path reads without clicking.
-  const inside = downloadButton('Скачать файл', { insideAnchor: true });
+  const inside = downloadButton('Скачать файл archive.zip', { insideAnchor: true });
   assert.deepEqual(parser.downloadButtonsInPage(docWithButtons([inside])), []);
 });
 
@@ -2840,7 +2840,7 @@ test('a blob download keeps its bytes, since a blob URL is unusable elsewhere', 
   // object itself has to travel with the entry.
   const win = makeWin();
   const blob = { size: 12, type: 'application/zip' };
-  const button = downloadButton('Скачать отчёт', {
+  const button = downloadButton('Скачать отчёт report.zip', {
     onClick() { win.URL.createObjectURL(blob); },
   });
 
@@ -2912,7 +2912,7 @@ test('clicking is opt-out, so a plain markdown copy never touches the page', asy
   // Clicking is a side effect. "Copy as Markdown" is a pure DOM read and must
   // stay one; a stray click would download files the user did not ask for.
   let clicked = false;
-  const button = downloadButton('Скачать архив', { onClick() { clicked = true; } });
+  const button = downloadButton('Скачать архив bundle.zip', { onClick() { clicked = true; } });
   const out = await parser.appendPanelArtifacts('body', {
     doc: docWithButtons([button]),
     win: makeWin(),
@@ -2957,7 +2957,7 @@ test('the shipped capture path reaches a file offered only as a button', async (
   let clicked = 0;
   const archiveButton = {
     tagName: 'BUTTON',
-    textContent: 'Скачать готовый Canon Consilium Prompt Bundle v1',
+    textContent: 'Скачать готовый Canon Consilium Prompt Bundle v1.zip',
     getAttribute: () => null,
     closest: () => null,
     scrollIntoView() {},
@@ -3035,7 +3035,7 @@ test('a plain copy clicks nothing in the shipped path either', async () => {
   let clicked = 0;
   const button = {
     tagName: 'BUTTON',
-    textContent: 'Скачать архив',
+    textContent: 'Скачать архив bundle.zip',
     getAttribute: () => null,
     closest: () => null,
     scrollIntoView() {},
@@ -3066,4 +3066,200 @@ test('a plain copy clicks nothing in the shipped path either', async () => {
     global.getComputedStyle = previousStyle;
     global.location = previousLocation;
   }
+});
+
+/* ------------------------------------------------------------------------- *
+ * The regression measured on 2026-09-10, after clicking on the label alone.
+ *
+ * A "Скачать …" button for a .md OPENED the Library viewer instead of
+ * downloading. The viewer slid over the artefact panel, the panel read went
+ * from 4 rows to 1, and the export produced ONE file where the previous run
+ * produced four — worse than before the feature existed. The label does not
+ * decide the action; the format does, and a file the panel already resolved
+ * must never be clicked at all.
+ * ------------------------------------------------------------------------- */
+
+test('a previewable format is never clicked, whatever its label says', () => {
+  // ChatGPT renders .md/.txt/images/video/pdf in a viewer, so its "download"
+  // button opens rather than downloads. Clicking one costs the export the files
+  // the panel was already resolving.
+  const buttons = [
+    downloadButton('Скачать Canon_Arcana_Control_Arcana_TZ_v0.1.md'),
+    downloadButton('Скачать заметку notes.txt'),
+    downloadButton('Download the screenshot.png'),
+    downloadButton('Скачать отчёт report.pdf'),
+    downloadButton('Скачать архив bundle.zip'),
+  ];
+  const labels = parser.downloadButtonsInPage(docWithButtons(buttons), []).map((b) => b.label);
+  assert.deepEqual(labels, ['Скачать архив bundle.zip'],
+    'only formats ChatGPT cannot preview may be clicked');
+});
+
+test('a file the panel already resolved is never clicked', () => {
+  // The panel supplies it without a click, and clicking is exactly what opened
+  // the viewer over the panel. Matched on the stem, because the button label
+  // carries no extension.
+  const buttons = [
+    downloadButton('Скачать полное ТЗ Canon_Arcana_Consilium_Context_Selection_TZ_v0.3.zip'),
+    downloadButton('Скачать canon-consilium-prompt-bundle-v1.zip'),
+  ];
+  const panelNames = ['Canon_Arcana_Consilium_Context_Selection_TZ_v0.3.md'];
+  const labels = parser.downloadButtonsInPage(docWithButtons(buttons), panelNames).map((b) => b.label);
+  assert.deepEqual(labels, ['Скачать canon-consilium-prompt-bundle-v1.zip'],
+    'the panel-resolved file must be left alone; only the archive is clicked');
+});
+
+test('an unrecognised format is skipped rather than risked', () => {
+  // Asymmetric costs: a needless skip loses nothing, because the panel still
+  // lists whatever it can resolve. A needless click covers the panel and loses
+  // files that were already arriving.
+  const buttons = [downloadButton('Скачать готовый Canon Consilium Prompt Bundle v1')];
+  assert.deepEqual(parser.downloadButtonsInPage(docWithButtons(buttons), []), [],
+    'a label naming no format must not be clicked on a guess');
+});
+
+test('a click that opened a viewer is dismissed, not left covering the panel', async () => {
+  // Positive control for the recovery path: without it one viewer costs every
+  // artefact behind it for the rest of the run.
+  let closed = 0;
+  const doc = {
+    body: { dispatchEvent() { return true; } },
+    querySelectorAll(sel) {
+      if (/behavior-btn/.test(sel)) {
+        return [downloadButton('Скачать архив bundle.zip', { onClick() { /* opens a viewer */ } })];
+      }
+      if (/aria-label|close/.test(sel)) {
+        return [{
+          getAttribute: (n) => (n === 'aria-label' ? 'Закрыть' : null),
+          click() { closed += 1; },
+        }];
+      }
+      return [];
+    },
+  };
+
+  await parser.collectButtonDownloads({ doc, win: makeWin(), sleep: async () => {} });
+  assert.equal(closed, 1, 'the viewer must be closed when the click produced no URL');
+});
+
+test('a successful download does not trigger the viewer dismissal', async () => {
+  // The dismissal presses Escape as a fallback, which would close things the
+  // user is looking at. It must fire only when a click produced nothing.
+  let closed = 0;
+  const win = makeWin();
+  const doc = {
+    body: { dispatchEvent() { closed += 1; return true; } },
+    querySelectorAll(sel) {
+      if (/behavior-btn/.test(sel)) {
+        return [downloadButton('Скачать архив bundle.zip', {
+          onClick() {
+            const anchor = {
+              getAttribute: () => 'https://chatgpt.com/backend-api/estuary/content?fn=bundle.zip',
+              hasAttribute: () => true,
+            };
+            win.HTMLAnchorElement.prototype.click.call(anchor);
+          },
+        })];
+      }
+      return [];
+    },
+  };
+
+  const files = await parser.collectButtonDownloads({ doc, win, sleep: async () => {} });
+  assert.equal(files.length, 1, 'the download must be captured');
+  assert.equal(closed, 0, 'nothing may be dismissed when the click worked');
+});
+
+test('panel files reaching the export are not reduced by the button pass', async () => {
+  // The end-to-end shape of the regression: four panel files in, four out. The
+  // measured failure produced one.
+  const panelRows = [
+    'Canon_Arcana_Control_Arcana_TZ_v0.1.md',
+    'Canon_Arcana_MultiPortal_Context_Selection_TZ_v0.2.md',
+    'Canon_Arcana_Consilium_Context_Selection_TZ_v0.3.md',
+    'Canon_Arcana_v0.3_SHA256SUMS.txt',
+  ];
+  const doc = {
+    querySelectorAll(sel) {
+      if (/open-file|artifact-row/.test(sel)) {
+        return panelRows.map((name) => ({
+          getAttribute: (n) => (n === 'aria-label' ? name : null),
+        }));
+      }
+      if (/behavior-btn/.test(sel)) {
+        // The same buttons the real conversation carries, including the ones
+        // whose labels repeat the panel's files.
+        return [
+          downloadButton('Скачать полное ТЗ Canon_Arcana_Control_Arcana_TZ_v0.1.md'),
+          downloadButton('Скачать готовый Canon Consilium Prompt Bundle v1'),
+        ];
+      }
+      return [];
+    },
+  };
+
+  const out = await parser.appendPanelArtifacts('body', {
+    doc,
+    win: makeWin(),
+    conversationId: 'conv-1',
+    artifacts: [{ kind: 'asset', messageId: 'm1' }],
+    fetchImpl: stubFetch([
+      ['/interpreter/download', jsonOk({
+        download_url: 'https://chatgpt.com/backend-api/estuary/content?id=f&fn=x',
+        file_name: 'x',
+      })],
+    ]),
+    token: 'tok',
+  });
+
+  for (const name of panelRows) {
+    assert.ok(out.indexOf(name) !== -1, 'the panel file must survive the button pass: ' + name);
+  }
+});
+
+test('the panel names actually reach the button selector', async () => {
+  // Kills the mutant that survived: replacing `files.map(f => f.name)` with []
+  // left every test green, because the fixtures above pass panelNames directly
+  // to downloadButtonsInPage instead of letting appendPanelArtifacts derive it.
+  // Without this, the guard that prevents the measured regression is unverified
+  // wiring — the exact "helper is tested, its use is not" trap in CLAUDE.md.
+  let seenPanelNames = null;
+  const panelRow = 'Canon_Arcana_Consilium_Context_Selection_TZ_v0.3.md';
+
+  const doc = {
+    querySelectorAll(sel) {
+      if (/open-file|artifact-row/.test(sel)) {
+        return [{ getAttribute: (n) => (n === 'aria-label' ? panelRow : null) }];
+      }
+      if (/behavior-btn/.test(sel)) {
+        return [downloadButton('Скачать ' + panelRow.replace('.md', '.zip'))];
+      }
+      return [];
+    },
+  };
+
+  // Wrap the real selector so the arguments it receives can be asserted.
+  const realSelector = parser.downloadButtonsInPage;
+  await parser.appendPanelArtifacts('body', {
+    doc,
+    win: makeWin(),
+    conversationId: 'conv-1',
+    artifacts: [{ kind: 'asset', messageId: 'm1' }],
+    fetchImpl: stubFetch([
+      ['/interpreter/download', jsonOk({
+        download_url: 'https://chatgpt.com/backend-api/estuary/content?id=f&fn=' + panelRow,
+        file_name: panelRow,
+      })],
+    ]),
+    token: 'tok',
+    // Intercept at the boundary appendPanelArtifacts actually calls.
+    buttons: undefined,
+    onSelectButtons(namesPassed) { seenPanelNames = namesPassed; },
+  });
+  assert.equal(typeof realSelector, 'function');
+
+  assert.ok(Array.isArray(seenPanelNames),
+    'appendPanelArtifacts must hand the panel names to the button selector');
+  assert.ok(seenPanelNames.indexOf(panelRow) !== -1,
+    'the resolved panel file must be among the names, or it will be clicked');
 });

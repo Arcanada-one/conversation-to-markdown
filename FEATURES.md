@@ -163,9 +163,19 @@ handler runs. Such buttons are clicked during a file-saving export and the URL i
 captured. Verify against a conversation containing a `.zip` or `.diff` offered as
 "Скачать …": the archive must arrive in the conversation's folder, NOT in the root
 of Downloads (an unintercepted page download passes no filename and lands there).
-Verify also that buttons which merely open a viewer — "Открыть …", "Посмотреть …" —
-are not clicked, and that downloading still works on the page after an export
-finishes: the interception patches three global routes and must restore them.
+Verify that downloading still works on the page after an export finishes: the
+interception patches three global routes and must restore them.
+
+**Clicking never costs a file that was already arriving.** A "Скачать …" button
+for a format ChatGPT can preview (`.md`, `.txt`, image, video, PDF) opens a
+viewer instead of downloading, and that viewer covers the artefact panel — it
+once cut an export from four files to one. Only unpreviewable formats are
+clicked, never a file the panel already lists, and a click that produces no URL
+is treated as a viewer and dismissed. **Verify by counting:** export a
+conversation whose panel lists several `.md`/`.txt` files plus an archive behind
+a button; every panel file must still arrive, and the count must never drop
+below what an export without file-saving reports. This is the one item where a
+regression looks like success — the export still completes, with fewer files.
 
 **Unretrievable files are named.** A file that could not be fetched is listed
 with the reason, so an incomplete export never looks complete.

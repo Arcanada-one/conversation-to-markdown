@@ -1380,7 +1380,28 @@ function sandboxFilesFromMarkdown(markdown) {
  *  and would break the moment the UI language changes. A button that already
  *  sits inside an <a> is skipped — that one has an href and the existing
  *  attachment path already handles it. */
-function downloadButtonsInPage(doc) {
+/** Formats ChatGPT cannot preview, so its button downloads instead of opening.
+ *
+ *  MEASURED, after clicking on the label alone made the export WORSE (2026-09-10):
+ *  a "Скачать …" button for a .md opened the Library viewer instead of
+ *  downloading, the viewer covered the artefact panel, and the next export
+ *  produced ONE file where the previous one produced four. The label does not
+ *  decide the action — the format does. ChatGPT previews what it can render
+ *  (.md, .txt, images, video, PDF) and only downloads what it cannot. */
+var UNPREVIEWABLE_FORMATS = /(^|[^a-z0-9])(zip|diff|patch|tar|gz|tgz|bz2|xz|7z|rar|whl|jar|exe|dmg|pkg|bin|iso|sqlite|db|parquet|pickle|pkl)([^a-z0-9]|$)/i;
+
+/** Buttons that offer a file download and carry no link of their own.
+ *
+ *  Three conditions, all required — the first alone is what broke the export:
+ *    1. the label offers a download ("Скачать …" / "Download …");
+ *    2. the label names a format ChatGPT cannot preview, so the click really
+ *       downloads instead of opening a viewer over the artefact panel;
+ *    3. the file is not one the panel already lists, since the panel resolves
+ *       it without a click and clicking it is what opens the viewer.
+ *
+ *  `panelNames` carries what the panel already found. Passing it is how the
+ *  regression is prevented, so it is required by the callers that ship. */
+function downloadButtonsInPage(doc, panelNames) {
   const root = doc || (typeof document !== 'undefined' ? document : null);
   if (!root || !root.querySelectorAll) return [];
   let nodes;
@@ -1389,6 +1410,16 @@ function downloadButtonsInPage(doc) {
   } catch (_e) {
     return [];
   }
+  // Stems of the names the panel already resolved, so "Скачать полное ТЗ
+  // Canon Arcana v0.3" can be matched against the panel's
+  // "Canon_Arcana_Consilium_Context_Selection_TZ_v0.3.md". Compared on the
+  // extension-stripped name because the label never carries one.
+  const known = [];
+  for (const name of Array.from(panelNames || [])) {
+    const stem = String(name || '').replace(/\.[A-Za-z0-9]{1,8}$/, '').toLowerCase();
+    if (stem) known.push(stem);
+  }
+
   const out = [];
   for (const node of Array.from(nodes)) {
     if (!node || node.tagName !== 'BUTTON') continue;
@@ -1407,6 +1438,18 @@ function downloadButtonsInPage(doc) {
     if (!/^\s*(скачать|download|загрузить|télécharger|herunterladen|descargar)(\s|$)/i.test(label)) {
       continue;
     }
+    // A previewable format is opened, not downloaded. Clicking it costs the
+    // export three files, so an unrecognised format is left alone: a needless
+    // skip loses nothing (the panel still lists what it can resolve), while a
+    // needless click covers the panel and loses files that were already working.
+    if (!UNPREVIEWABLE_FORMATS.test(label)) continue;
+    // Already resolved without a click.
+    const labelLower = label.toLowerCase();
+    let seenInPanel = false;
+    for (const stem of known) {
+      if (labelLower.indexOf(stem) !== -1) { seenInPanel = true; break; }
+    }
+    if (seenInPanel) continue;
     out.push({ button: node, label: label });
   }
   return out;
@@ -1429,12 +1472,54 @@ function downloadButtonsInPage(doc) {
  *
  *  Returns [{name, url, label, blob}] — `name` from the URL's `fn=` parameter
  *  when present, because the button's label is prose and not a file name. */
+/** Close a viewer a click opened, so it stops covering the artefact panel.
+ *
+ *  Tried in order of reliability: the viewer's own close control, then Escape.
+ *  Both are attempted rather than one, because the close button is identified
+ *  by a translated aria-label ("Close" / "Закрыть") that a UI language change
+ *  breaks, while Escape is a keyboard convention that survives it. Failing to
+ *  close is not an error — the export continues either way and the panel read
+ *  reports what it can see. */
+function dismissViewerOverlay(doc, win) {
+  const root = doc || (typeof document !== 'undefined' ? document : null);
+  if (!root) return false;
+  let closed = false;
+  try {
+    const candidates = root.querySelectorAll(
+      '[role="dialog"] button[aria-label], [data-testid*="close"], button[aria-label]');
+    for (const node of Array.from(candidates || [])) {
+      const label = (node.getAttribute && node.getAttribute('aria-label')) || '';
+      if (!/^(close|закрыть|schließen|fermer|cerrar)$/i.test(label.trim())) continue;
+      if (typeof node.click === 'function') { node.click(); closed = true; break; }
+    }
+  } catch (_e) { /* selector unsupported in a shim */ }
+
+  if (!closed) {
+    try {
+      const target = root.body || root;
+      const KeyboardEventCtor = (win && win.KeyboardEvent) ||
+        (typeof KeyboardEvent !== 'undefined' ? KeyboardEvent : null);
+      if (KeyboardEventCtor && target && typeof target.dispatchEvent === 'function') {
+        target.dispatchEvent(new KeyboardEventCtor('keydown', {
+          key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true,
+        }));
+        closed = true;
+      }
+    } catch (_e) { /* no KeyboardEvent in this environment */ }
+  }
+  return closed;
+}
+
 async function collectButtonDownloads(options) {
   const opts = options || {};
   const doc = opts.doc || (typeof document !== 'undefined' ? document : null);
   const win = opts.win || (typeof window !== 'undefined' ? window : null);
   if (!doc || !win) return [];
-  const buttons = opts.buttons || downloadButtonsInPage(doc);
+  // Reported so a test can assert the names really travelled: a mutation
+  // emptying them left the whole suite green, making the regression guard
+  // unverified wiring rather than a checked one.
+  if (typeof opts.onSelectButtons === 'function') opts.onSelectButtons(opts.panelNames || []);
+  const buttons = opts.buttons || downloadButtonsInPage(doc, opts.panelNames);
   if (!buttons.length) return [];
 
   const sleep = opts.sleep || function(ms) {
@@ -1502,6 +1587,11 @@ async function collectButtonDownloads(options) {
       for (let i = before; i < captured.length; i += 1) {
         captured[i].label = entry.label;
       }
+      // A click that produced no URL opened a viewer instead of downloading —
+      // measured: the Library panel slid over the artefact panel and the next
+      // export read ONE file where the previous read four. Close it, or every
+      // artefact behind it is lost for the rest of the run.
+      if (captured.length === before) dismissViewerOverlay(doc, win);
     }
   } finally {
     if (anchorProto && typeof originalAnchorClick === 'function') {
@@ -1610,9 +1700,16 @@ async function appendPanelArtifacts(markdown, options) {
   // such a file has no sandbox path at all, so `files` is empty for a
   // conversation whose only artefact is the archive — and returning here would
   // drop it exactly the way four consecutive exports did.
+  // The panel's names are handed to the button selector so a file it already
+  // resolved is never clicked. That is the guard against the measured
+  // regression: clicking a .md the panel had already listed opened the Library
+  // viewer over the panel and cut the next export from four files to one.
+  const panelNames = files.map(function(f) { return f.name; });
   const buttonFiles = opts.clickDownloads === false
     ? []
-    : (opts.buttonFiles !== undefined ? opts.buttonFiles : await collectButtonDownloads(opts));
+    : (opts.buttonFiles !== undefined
+      ? opts.buttonFiles
+      : await collectButtonDownloads(Object.assign({}, opts, { panelNames: panelNames })));
 
   if (!files.length && !buttonFiles.length) return markdown;
 
@@ -2722,6 +2819,8 @@ if (typeof module !== 'undefined' && module.exports) {
     downloadButtonsInPage: downloadButtonsInPage,
     collectButtonDownloads: collectButtonDownloads,
     downloadNameFromUrl: downloadNameFromUrl,
+    dismissViewerOverlay: dismissViewerOverlay,
+    UNPREVIEWABLE_FORMATS: UNPREVIEWABLE_FORMATS,
     waitForArtifactPanel: waitForArtifactPanel,
     findCollapsedProjectRows: findCollapsedProjectRows,
     projectRowContainer: projectRowContainer,

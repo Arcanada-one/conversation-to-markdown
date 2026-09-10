@@ -169,12 +169,18 @@ interception patches three global routes and must restore them.
 **Clicking never costs a file that was already arriving.** A "Скачать …" button
 for a format ChatGPT can preview (`.md`, `.txt`, image, video, PDF) opens a
 viewer instead of downloading, and that viewer covers the artefact panel — it
-once cut an export from four files to one. Only unpreviewable formats are
-clicked, never a file the panel already lists, and a click that produces no URL
-is treated as a viewer and dismissed. **Verify by counting:** export a
-conversation whose panel lists several `.md`/`.txt` files plus an archive behind
-a button; every panel file must still arrive, and the count must never drop
-below what an export without file-saving reports. This is the one item where a
+once cut an export from four files to one. The markup cannot tell the two kinds
+of button apart (same class, same icon, same attributes; only the label differs,
+and it names no format on the archive while a viewer button says "diff"), so
+every download button is clicked, archives first, and a click that produces no
+URL is treated as a viewer and dismissed twice over — the close control, then
+Escape. A file the panel already lists is never clicked at all.
+
+**Verify by counting:** export a conversation whose panel lists several
+`.md`/`.txt` files plus an archive behind a button. Every panel file must still
+arrive, the archive must arrive too, and the count must never drop below what an
+export without file-saving reports. Watch the page during the export: a viewer
+may flash open, and must close on its own. This is the one item where a
 regression looks like success — the export still completes, with fewer files.
 
 **Unretrievable files are named.** A file that could not be fetched is listed

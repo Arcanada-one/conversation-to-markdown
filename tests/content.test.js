@@ -3079,20 +3079,21 @@ test('a plain copy clicks nothing in the shipped path either', async () => {
  * must never be clicked at all.
  * ------------------------------------------------------------------------- */
 
-test('a previewable format is never clicked, whatever its label says', () => {
-  // ChatGPT renders .md/.txt/images/video/pdf in a viewer, so its "download"
-  // button opens rather than downloads. Clicking one costs the export the files
-  // the panel was already resolving.
+test('archives are clicked before anything else', () => {
+  // MEASURED (probe 7): the markup cannot separate a download button from a
+  // viewer button — same class, same <svg>, same data-*. Only the label
+  // differs, and it lies both ways: the archive's label names no format while a
+  // VIEWER button says "Посмотреть полный diff". So format cannot gate the
+  // click; it only orders it. Files obtainable ONLY by clicking go first.
   const buttons = [
     downloadButton('Скачать Canon_Arcana_Control_Arcana_TZ_v0.1.md'),
     downloadButton('Скачать заметку notes.txt'),
-    downloadButton('Download the screenshot.png'),
-    downloadButton('Скачать отчёт report.pdf'),
     downloadButton('Скачать архив bundle.zip'),
   ];
-  const labels = parser.downloadButtonsInPage(docWithButtons(buttons), []).map((b) => b.label);
-  assert.deepEqual(labels, ['Скачать архив bundle.zip'],
-    'only formats ChatGPT cannot preview may be clicked');
+  const found = parser.downloadButtonsInPage(docWithButtons(buttons), []);
+  assert.equal(found[0].label, 'Скачать архив bundle.zip',
+    'the archive must be clicked first, before a viewer can interfere');
+  assert.equal(found.length, 3, 'the others are still clicked, just later');
 });
 
 test('a file the panel already resolved is never clicked', () => {
@@ -3109,13 +3110,15 @@ test('a file the panel already resolved is never clicked', () => {
     'the panel-resolved file must be left alone; only the archive is clicked');
 });
 
-test('an unrecognised format is skipped rather than risked', () => {
-  // Asymmetric costs: a needless skip loses nothing, because the panel still
-  // lists whatever it can resolve. A needless click covers the panel and loses
-  // files that were already arriving.
+test('a label naming no format is still clicked — that is the archive', () => {
+  // The user's actual archive: "Скачать готовый Canon Consilium Prompt Bundle
+  // v1" carries no extension and no format word. An earlier version skipped it
+  // for that reason and the file never arrived. It is safe to click now because
+  // a click that opens a viewer is dismissed, measured working in probe 7.
   const buttons = [downloadButton('Скачать готовый Canon Consilium Prompt Bundle v1')];
-  assert.deepEqual(parser.downloadButtonsInPage(docWithButtons(buttons), []), [],
-    'a label naming no format must not be clicked on a guess');
+  const labels = parser.downloadButtonsInPage(docWithButtons(buttons), []).map((b) => b.label);
+  assert.deepEqual(labels, ['Скачать готовый Canon Consilium Prompt Bundle v1'],
+    'the file that can ONLY be had by clicking must not be skipped');
 });
 
 test('a click that opened a viewer is dismissed, not left covering the panel', async () => {
@@ -3262,4 +3265,38 @@ test('the panel names actually reach the button selector', async () => {
     'appendPanelArtifacts must hand the panel names to the button selector');
   assert.ok(seenPanelNames.indexOf(panelRow) !== -1,
     'the resolved panel file must be among the names, or it will be clicked');
+});
+
+test('a viewer gets both dismissal routes, not just the first', async () => {
+  // The close control cannot report whether the viewer actually went away, and
+  // a viewer left open costs every artefact behind it. Escape follows it.
+  let closeClicks = 0;
+  let escapes = 0;
+  const doc = {
+    body: {
+      dispatchEvent(ev) { if (ev && ev.key === 'Escape') escapes += 1; return true; },
+    },
+    querySelectorAll(sel) {
+      if (/behavior-btn/.test(sel)) {
+        return [downloadButton('Скачать ТЗ v0.1', { onClick() { /* opens a viewer */ } })];
+      }
+      if (/aria-label|close/.test(sel)) {
+        return [{
+          getAttribute: (n) => (n === 'aria-label' ? 'Закрыть' : null),
+          click() { closeClicks += 1; },
+        }];
+      }
+      return [];
+    },
+  };
+
+  await parser.collectButtonDownloads({
+    doc,
+    win: makeWin(),
+    sleep: async () => {},
+    dismissSettleMs: 0,
+  });
+
+  assert.equal(closeClicks, 1, 'the close control must be pressed');
+  assert.equal(escapes, 1, 'Escape must follow, since the control reports nothing');
 });

@@ -50,6 +50,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   markup, and clicking those opens a viewer, navigating the page out from under
   a running scan.
 
+- **The archive is fetched again, now that a wrong click costs nothing.**
+  Measured on the live page: the markup cannot tell a download button from a
+  viewer button. Both carry the same class, **the same `<svg>` icon** and the
+  same `data-start`/`data-end`; only the prose label differs, and it lies in
+  both directions — the archive's label names no format at all ("Скачать готовый
+  Canon Consilium Prompt Bundle v1") while a *viewer* button reads "Посмотреть
+  полный diff". So no attribute can gate the click, and the format-based gate
+  from the previous entry skipped the one file that could only be had by
+  clicking.
+
+  Clicking every download button is safe only because a wrong click now repairs
+  itself, which the same measurement confirmed: a click on a `.md` button
+  produced no URL (it opened the Library viewer), the close control was found
+  and pressed, and the artefact panel read again afterwards. A wrong click
+  therefore costs one dismissal instead of every artefact behind the viewer.
+  Archives are clicked first, so the files obtainable only by clicking are
+  fetched before any viewer can interfere, and a viewer now gets both dismissal
+  routes — the close control **and** Escape — because the control cannot report
+  whether the viewer actually went away.
+
+- **A supplied timer turned the click wait into a busy-loop.** The wait for a
+  handler's round-trip was bounded by `Date.now()` while the sleep itself was
+  injectable, so a `sleep` that returns immediately still burned the full
+  budget: 2.5s per button, 20s across the eight buttons a real conversation
+  carries. It is bounded by poll count now — 2500ms to 2.6ms in the suite.
+
 - **Clicking on the label alone made the export worse, and now it does not.**
   The first version of the button feature clicked anything labelled "Скачать …".
   Measured against the live conversation: a "Скачать …" button for a `.md`

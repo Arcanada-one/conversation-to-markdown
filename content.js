@@ -1438,20 +1438,32 @@ function downloadButtonsInPage(doc, panelNames) {
     if (!/^\s*(скачать|download|загрузить|télécharger|herunterladen|descargar)(\s|$)/i.test(label)) {
       continue;
     }
-    // A previewable format is opened, not downloaded. Clicking it costs the
-    // export three files, so an unrecognised format is left alone: a needless
-    // skip loses nothing (the panel still lists what it can resolve), while a
-    // needless click covers the panel and loses files that were already working.
-    if (!UNPREVIEWABLE_FORMATS.test(label)) continue;
-    // Already resolved without a click.
+    // Already resolved without a click — the panel supplies it for free, and
+    // clicking it is what opened the viewer over the panel in the first place.
     const labelLower = label.toLowerCase();
     let seenInPanel = false;
     for (const stem of known) {
       if (labelLower.indexOf(stem) !== -1) { seenInPanel = true; break; }
     }
     if (seenInPanel) continue;
-    out.push({ button: node, label: label });
+    out.push({ button: node, label: label, archive: UNPREVIEWABLE_FORMATS.test(label) });
   }
+  // MEASURED (2026-09-10, probe 7): the markup cannot tell a download button
+  // from a viewer button. Both carry the same class, the SAME <svg> icon and
+  // the same data-start/data-end — only the prose label differs, and it lies in
+  // both directions: the archive's label names no format at all ("Скачать
+  // готовый Canon Consilium Prompt Bundle v1") while a VIEWER button says
+  // "Посмотреть полный diff". So the format cannot gate the click.
+  //
+  // Clicking anyway is safe now, and only now: the same probe measured a click
+  // on a .md button producing no URL (it opened the Library viewer), the close
+  // control being found and pressed, and the panel reading again afterwards. A
+  // wrong click therefore costs one dismissal instead of every artefact behind
+  // the viewer — which is what the earlier label-only version cost.
+  //
+  // Ordering still matters: archives first, so the files that can ONLY be had
+  // by clicking are fetched before any viewer has a chance to interfere.
+  out.sort(function(a, b) { return (b.archive ? 1 : 0) - (a.archive ? 1 : 0); });
   return out;
 }
 
@@ -1480,10 +1492,37 @@ function downloadButtonsInPage(doc, panelNames) {
  *  breaks, while Escape is a keyboard convention that survives it. Failing to
  *  close is not an error — the export continues either way and the panel read
  *  reports what it can see. */
-function dismissViewerOverlay(doc, win) {
+/** An Escape keydown, falling back to a plain object where KeyboardEvent does
+ *  not exist (Node, and any environment running these functions outside a page).
+ *  Without the fallback the Escape route is unreachable off-browser, which makes
+ *  it untestable — and an untestable guard is one nobody can prove works. */
+function escapeKeydownEvent(win) {
+  const Ctor = (win && win.KeyboardEvent) ||
+    (typeof KeyboardEvent !== 'undefined' ? KeyboardEvent : null);
+  const init = { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true };
+  if (Ctor) {
+    try { return new Ctor('keydown', init); } catch (_e) { /* fall through */ }
+  }
+  return Object.assign({ type: 'keydown' }, init);
+}
+
+function dismissViewerOverlay(doc, win, options) {
   const root = doc || (typeof document !== 'undefined' ? document : null);
   if (!root) return false;
+  const opts = options || {};
   let closed = false;
+  if (opts.escapeOnly) {
+    // Second pass: the close control already had its turn and cannot report
+    // whether the viewer actually went away, so Escape follows unconditionally.
+    try {
+      const target = root.body || root;
+      if (target && typeof target.dispatchEvent === 'function') {
+        target.dispatchEvent(escapeKeydownEvent(win));
+        return true;
+      }
+    } catch (_e) { /* dispatch refused */ }
+    return false;
+  }
   try {
     const candidates = root.querySelectorAll(
       '[role="dialog"] button[aria-label], [data-testid*="close"], button[aria-label]');
@@ -1497,15 +1536,11 @@ function dismissViewerOverlay(doc, win) {
   if (!closed) {
     try {
       const target = root.body || root;
-      const KeyboardEventCtor = (win && win.KeyboardEvent) ||
-        (typeof KeyboardEvent !== 'undefined' ? KeyboardEvent : null);
-      if (KeyboardEventCtor && target && typeof target.dispatchEvent === 'function') {
-        target.dispatchEvent(new KeyboardEventCtor('keydown', {
-          key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true,
-        }));
+      if (target && typeof target.dispatchEvent === 'function') {
+        target.dispatchEvent(escapeKeydownEvent(win));
         closed = true;
       }
-    } catch (_e) { /* no KeyboardEvent in this environment */ }
+    } catch (_e) { /* dispatch refused */ }
   }
   return closed;
 }
@@ -1579,10 +1614,15 @@ async function collectButtonDownloads(options) {
         continue;
       }
       // Wait for the handler's round-trip, but stop as soon as it delivers.
-      const deadline = (opts.now ? opts.now() : Date.now()) + settleMs;
-      while (captured.length === before &&
-             (opts.now ? opts.now() : Date.now()) < deadline) {
-        await sleep(opts.clickPollMs === undefined ? 150 : opts.clickPollMs);
+      // Bounded by POLL COUNT, not by the wall clock: a supplied `sleep` that
+      // returns immediately (tests, or a page throttling timers) turns a
+      // clock-bounded loop into a busy-wait that still burns the full budget —
+      // 2.5s per button, 20s over the eight buttons a real conversation
+      // carries. Counting polls keeps the bound honest in both environments.
+      const pollMs = opts.clickPollMs === undefined ? 150 : opts.clickPollMs;
+      const maxPolls = Math.max(1, Math.ceil(settleMs / Math.max(1, pollMs)));
+      for (let poll = 0; poll < maxPolls && captured.length === before; poll += 1) {
+        await sleep(pollMs);
       }
       for (let i = before; i < captured.length; i += 1) {
         captured[i].label = entry.label;
@@ -1591,7 +1631,14 @@ async function collectButtonDownloads(options) {
       // measured: the Library panel slid over the artefact panel and the next
       // export read ONE file where the previous read four. Close it, or every
       // artefact behind it is lost for the rest of the run.
-      if (captured.length === before) dismissViewerOverlay(doc, win);
+      if (captured.length === before) {
+        // Both routes, not the first that "worked": the close control reports
+        // nothing about whether the viewer actually went away, and a viewer
+        // left open costs every artefact behind it. Escape after it is cheap.
+        dismissViewerOverlay(doc, win);
+        await sleep(opts.dismissSettleMs === undefined ? 400 : opts.dismissSettleMs);
+        dismissViewerOverlay(doc, win, { escapeOnly: true });
+      }
     }
   } finally {
     if (anchorProto && typeof originalAnchorClick === 'function') {
@@ -2820,6 +2867,7 @@ if (typeof module !== 'undefined' && module.exports) {
     collectButtonDownloads: collectButtonDownloads,
     downloadNameFromUrl: downloadNameFromUrl,
     dismissViewerOverlay: dismissViewerOverlay,
+    escapeKeydownEvent: escapeKeydownEvent,
     UNPREVIEWABLE_FORMATS: UNPREVIEWABLE_FORMATS,
     waitForArtifactPanel: waitForArtifactPanel,
     findCollapsedProjectRows: findCollapsedProjectRows,

@@ -6,6 +6,24 @@ const chkImages = document.getElementById('chk-images');
 const chkBatch = document.getElementById('chk-batch');
 const batchWarning = document.getElementById('batch-warning');
 
+// The running version, shown in the popup so a reloaded build is identifiable
+// at a glance. Read from the manifest rather than written here: a number typed
+// in two places is a number that goes stale in one of them, and the whole point
+// is to tell two builds apart. Guarded because the popup is also loaded by the
+// test shims, where chrome.runtime is absent.
+(function showVersion() {
+  const el = document.getElementById('version');
+  if (!el) return;
+  try {
+    const manifest = typeof chrome !== 'undefined' && chrome.runtime &&
+      typeof chrome.runtime.getManifest === 'function'
+      ? chrome.runtime.getManifest() : null;
+    if (manifest && manifest.version) el.textContent = 'v' + manifest.version;
+  } catch (_e) {
+    // Leave the placeholder; a missing version must never break the popup.
+  }
+})();
+
 /** Keep the two options consistent, and show the caveat while it is still a choice.
  *
  *  A batch WITHOUT file saving archives signed, short-lived links rather than the

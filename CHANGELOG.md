@@ -50,6 +50,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   markup, and clicking those opens a viewer, navigating the page out from under
   a running scan.
 
+- **Clicking on the label alone made the export worse, and now it does not.**
+  The first version of the button feature clicked anything labelled "Скачать …".
+  Measured against the live conversation: a "Скачать …" button for a `.md`
+  **opened the Library viewer instead of downloading**, the viewer slid over the
+  artefact panel, and the export produced **one file where the previous run
+  produced four** — worse than before the feature existed. ChatGPT previews what
+  it can render (`.md`, `.txt`, images, video, PDF) and downloads only what it
+  cannot, so the label never decided the action; the format did.
+
+  A button is now clicked only when all three hold: the label offers a download,
+  it names a format ChatGPT cannot preview, and the file is **not one the panel
+  already resolved** (matched on the extension-stripped stem, because the label
+  carries no extension). An unrecognised format is skipped rather than risked —
+  a needless skip loses nothing, since the panel still lists what it resolves,
+  while a needless click covers the panel and loses files that were arriving.
+  And a click that yields no URL is now treated as a viewer that opened: it is
+  dismissed via the viewer's own close control, falling back to Escape, so the
+  panel is readable for the rest of the run.
+
 - **The download-button filter rejected every Russian label.** The first
   implementation matched `/^(скачать|download|…)\b/i`. `\b` is an ASCII word
   boundary, so it is absent after a Cyrillic letter: the check passed

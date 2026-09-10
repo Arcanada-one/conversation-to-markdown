@@ -24,6 +24,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the link rather than rebuilt as `/mnt/data/` + filename — a file written to a
   subdirectory resolved to nothing before.
 
+- **A file offered only as a button was unreachable by every existing path.**
+  The same conversation offered its archive not as a link but as a button with
+  a click handler — `<button class="behavior-btn">Скачать готовый Canon
+  Consilium Prompt Bundle v1</button>` — and measurement on the live page found
+  every other source at zero: no `href`, no `sandbox:` link, no panel row
+  (a `.zip` has no viewer, so the panel listed only its `.md`/`.txt` siblings),
+  and no `data-*` carrying a file id on any of the eight buttons present. The
+  label is prose rather than a file name, so no path could be derived from it
+  either. The signed URL exists only after the page's own handler asks the
+  backend for one.
+
+  Such buttons are now clicked during a file-saving export, with the page's
+  download routes (`HTMLAnchorElement.click`, `window.open`,
+  `URL.createObjectURL`) temporarily intercepted so the URL is captured and the
+  page's own download suppressed. This matters for where the file lands: an
+  uninterrupted page download passes no `filename`, so Chrome drops it in the
+  root of Downloads, whereas the captured URL goes through `chrome.downloads`
+  and lands beside its conversation like every other artefact. All three routes
+  are restored in a `finally`, including when a handler throws — a patch left
+  behind would break downloading for the user after the export.
+
+  Only labels that offer a download are clicked. The same conversation carried
+  "Открыть полное техническое задание" and "Посмотреть полный diff" on identical
+  markup, and clicking those opens a viewer, navigating the page out from under
+  a running scan.
+
+- **The download-button filter rejected every Russian label.** The first
+  implementation matched `/^(скачать|download|…)\b/i`. `\b` is an ASCII word
+  boundary, so it is absent after a Cyrillic letter: the check passed
+  "Download the bundle" and failed "Скачать архив" — every label in the
+  conversation it was written for. Caught by a fixture in the failing language,
+  as this repository's own rule requires; the boundary is now whitespace or
+  end-of-string.
+
 ## [1.4.0] — 2026-09-10
 
 **The Web Store goes from 1.1.8 straight to 1.4.0.** Versions 1.2.0 and 1.3.0

@@ -20,7 +20,9 @@ In this mode the extension requests each file directly from that host, converts 
 
 Files that ChatGPT **generates** for you — a PDF or Word document it produced during the conversation — are not links in the page at all, so saving them needs one additional step in this same mode: the extension asks ChatGPT for the conversation's own file list, exactly as the page does when you click a file yourself, and then requests the file. This uses the session you are already signed in with; the extension does not read, store, or transmit your credentials or session token, and the request goes to `chatgpt.com` and nowhere else.
 
-This lookup happens **only** when the save checkbox is ticked. A plain **Copy as Markdown** reads the page and nothing more — it makes no network request of any kind, and that is enforced by a test in the repository, not only by this document.
+Some generated files are offered by ChatGPT as a **button with a handler** rather than as a link, and their address does not exist anywhere in the page until that handler runs. To save those, the extension clicks the button for you — the same click you would make yourself — and captures the resulting address instead of letting the page download the file, so that it can be written next to its conversation rather than into the root of your Downloads folder. Only buttons whose label offers a download are clicked; buttons that open a viewer are left alone. While a click is in progress the extension temporarily replaces three of the page's own download routines and restores all of them immediately afterwards, including if the page raises an error. Nothing about the click is recorded or transmitted.
+
+This lookup happens **only** when the save checkbox is ticked, and so does any click. A plain **Copy as Markdown** reads the page and nothing more — it makes no network request of any kind and clicks nothing, and both are enforced by tests in the repository, not only by this document.
 
 ## Exporting a whole Project
 

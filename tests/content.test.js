@@ -3300,3 +3300,80 @@ test('a viewer gets both dismissal routes, not just the first', async () => {
   assert.equal(closeClicks, 1, 'the close control must be pressed');
   assert.equal(escapes, 1, 'Escape must follow, since the control reports nothing');
 });
+
+test('buttons outside the viewport are found by scrolling for them', async () => {
+  // MEASURED (2026-09-10, 16:51 export): zero buttons, no `## Files` section at
+  // all, on a conversation that carries eight of them. This pass runs AFTER
+  // scanTurns restores the original scroll position, so the virtualizer has
+  // unmounted everything off-screen — a static query sees one screen's worth.
+  // The feature is dead without this on any conversation longer than a screen,
+  // which is every conversation that generates files.
+  const allButtons = [
+    downloadButton('Скачать ТЗ v0.1'),
+    downloadButton('Скачать готовый Canon Consilium Prompt Bundle v1'),
+  ];
+
+  // A virtualized page: only the button whose band is in view is mounted.
+  const scroller = { scrollTop: 0, scrollHeight: 3000, clientHeight: 1000 };
+  const doc = {
+    querySelector: () => ({ tag: 'turn' }),
+    querySelectorAll(sel) {
+      if (!/behavior-btn/.test(sel)) return [];
+      // First button mounts near the top, the second near the bottom.
+      return scroller.scrollTop < 1000 ? [allButtons[0]] : [allButtons[1]];
+    },
+  };
+
+  const found = await parser.findButtonsByScrolling(doc, makeWin(), {
+    scroller,
+    sleep: async () => {},
+    buttonScrollSettleMs: 0,
+  });
+  const labels = found.map((b) => b.label).sort();
+
+  assert.deepEqual(labels,
+    ['Скачать ТЗ v0.1', 'Скачать готовый Canon Consilium Prompt Bundle v1'].sort(),
+    'both buttons must be found, including the one that starts unmounted');
+  assert.equal(scroller.scrollTop, 0, 'the scroll position must be restored');
+});
+
+test('the export scrolls for buttons when a static read finds none', async () => {
+  // Drives appendPanelArtifacts, not the helper: the ordering defect lived in
+  // the caller, and a helper test would not have caught it.
+  const archive = downloadButton('Скачать готовый Canon Consilium Prompt Bundle v1', {
+    onClick() {
+      const anchor = {
+        getAttribute: () => 'https://chatgpt.com/backend-api/estuary/content?fn=bundle.zip',
+        hasAttribute: () => true,
+      };
+      win.HTMLAnchorElement.prototype.click.call(anchor);
+    },
+  });
+  const win = makeWin();
+  const scroller = { scrollTop: 0, scrollHeight: 3000, clientHeight: 1000 };
+  const doc = {
+    querySelector: () => ({ tag: 'turn' }),
+    querySelectorAll(sel) {
+      if (/open-file|artifact-row/.test(sel)) return [];
+      if (!/behavior-btn/.test(sel)) return [];
+      // Mounted only once the scan has scrolled down — the measured shape.
+      return scroller.scrollTop > 0 ? [archive] : [];
+    },
+  };
+
+  const out = await parser.appendPanelArtifacts('body', {
+    doc,
+    win,
+    scroller,
+    conversationId: 'conv-1',
+    artifacts: [],
+    fetchImpl: stubFetch([]),
+    token: 'tok',
+    sleep: async () => {},
+    buttonScrollSettleMs: 0,
+    panelWaitMs: 0,
+  });
+
+  assert.ok(out.indexOf('[bundle.zip](') !== -1,
+    'the archive must be found even though it is unmounted when the pass starts');
+});

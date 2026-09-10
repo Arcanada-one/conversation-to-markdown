@@ -276,6 +276,12 @@ a single one would be indistinguishable from a word break in the title.
 the files it left out. Verify a large project still produces a usable archive, or
 says what is missing — the saved files on disk are complete regardless.
 
+**The running version is visible.** The popup shows the loaded version under
+its title, read from the manifest rather than written twice. Verify after
+reloading an unpacked build that the number matches `manifest.json` — this is how
+a reload is confirmed to have taken effect, and four builds once shipped under
+one version number with no way to tell them apart from the browser.
+
 ## Privacy and permissions
 
 **Local only.** No telemetry, no analytics, no server, no third party. The
@@ -300,7 +306,7 @@ match the CHANGELOG's top entry, and users must never see a gap. The last entry
 below is the version being shipped; a test checks this line against the CHANGELOG
 so a release cannot be added without revisiting this file.
 
-Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0
+Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1
 
 **Changelog coupling.** A version bump with no dated CHANGELOG entry fails the
 build, because releases 1.1.6 and 1.1.7 reached the store leaving no record of

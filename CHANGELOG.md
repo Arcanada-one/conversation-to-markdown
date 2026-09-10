@@ -5,6 +5,16 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] — 2026-09-10
+
+### Added
+
+- **The popup shows the running version.** Four builds were installed in a row
+  carrying the same `1.5.0`, with no way to tell from the browser which one was
+  actually loaded — an unnecessary doubt during verification. The number is read
+  from the manifest, never typed twice, and every fix from now on moves the patch
+  version so a reload is visible.
+
 ## [1.5.0] — 2026-09-10
 
 ### Fixed

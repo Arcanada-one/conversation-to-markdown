@@ -661,16 +661,27 @@ async function resolveArtifactPanelFiles(conversationId, options) {
  *  that rendered a frame later was dropped silently. Reproduced on a fixture: one
  *  poll, 1 file of 3, and the row that mounts late is the one lost.
  *
- *  Absence still costs only one poll: the growth wait begins after rows exist.
+ *  Absence still costs only one poll: the union wait begins after rows exist.
+ *
+ *  ACCUMULATES the union of every reading rather than keeping the last one.
+ *  Measured (2026-09-13) after a count-based version failed to fix anything: the
+ *  panel showed TZ-01..TZ-04 while the export contained TZ-02..TZ-04 plus
+ *  `arcanada_talomnia_89_articles_narratives.md` — two DIFFERENT sets of four.
+ *  The panel does not only grow, it is REPLACED as the page settles, and a
+ *  same-length replacement looked perfectly stable to a count-based wait: four
+ *  before, four after, so it returned a set missing the file the user wanted.
+ *  Taking the union means a row seen in any frame survives the frame that drops
+ *  it. The cost of a stale extra name is one failed resolve, reported as
+ *  unresolved; the cost of a dropped name is a file the user never learns about.
  */
 async function waitForArtifactPanel(doc, options) {
   const opts = options || {};
   const root = doc || (typeof document !== 'undefined' ? document : null);
   const budgetMs = opts.panelWaitMs === undefined ? 15000 : opts.panelWaitMs;
   const stepMs = opts.panelPollMs === undefined ? 500 : opts.panelPollMs;
-  // How many consecutive polls must report the same count before the list is
-  // believed complete. Two, because a single unchanged frame is exactly what a
-  // half-mounted panel looks like between two renders.
+  // How many consecutive polls must add nothing new before the list is believed
+  // complete. Two, because one unchanged frame is exactly what a half-rendered
+  // panel looks like between two renders.
   const stablePolls = opts.panelStablePolls === undefined ? 2 : opts.panelStablePolls;
   const sleep = opts.sleep || function(ms) {
     return new Promise(function(resolve) { setTimeout(resolve, ms); });
@@ -685,23 +696,24 @@ async function waitForArtifactPanel(doc, options) {
   }
   if (!files.length) return files;
 
-  // Rows exist; now wait for the count to settle. A panel that keeps growing is
-  // still rendering, and returning mid-render loses whatever has not mounted.
+  // Rows exist; accumulate by name until no poll contributes anything new.
+  const byName = new Map();
+  for (const file of files) byName.set(file.name, file);
   let steady = 0;
   while (steady < stablePolls && now() < deadline) {
     await sleep(stepMs);
-    const next = listArtifactPanelFiles(root);
-    if (next.length > files.length) {
-      files = next;
-      steady = 0;          // grew — start counting again
-    } else {
-      // A shrinking list means the panel re-rendered; keep the larger reading,
-      // since a file that was there is not made absent by a transient frame.
-      if (next.length === files.length) files = next;
-      steady += 1;
+    let added = 0;
+    for (const file of listArtifactPanelFiles(root)) {
+      if (byName.has(file.name)) continue;
+      byName.set(file.name, file);
+      added += 1;
     }
+    // Only a poll that CONTRIBUTES resets the counter. A frame that merely
+    // swaps one set for another of equal size adds names here rather than
+    // replacing them, which is the whole point.
+    steady = added > 0 ? 0 : steady + 1;
   }
-  return files;
+  return Array.from(byName.values());
 }
 
 /** Read the artefact panel's rows from the DOM: file name plus its sandbox path.

@@ -651,14 +651,27 @@ async function resolveArtifactPanelFiles(conversationId, options) {
  *  generated documents without a word.
  *
  *  Bounded and silent on absence: most conversations have no panel at all, and
- *  waiting the full budget for every one of them would slow every export. The
- *  loop therefore exits as soon as rows appear, and gives up quietly otherwise.
+ *  waiting the full budget for every one of them would slow every export.
+ *
+ *  Waits for the list to STOP GROWING, not for its first row. Measured on a
+ *  production conversation (2026-09-12): five files in the panel, four exported,
+ *  `TZ-01_Arcanada_Ecosystem_Project_Cards.md` missing with no notice — the file
+ *  appeared nowhere in the markdown, not even as unresolved. The panel mounts its
+ *  rows progressively, and the old loop returned on the first one, so every row
+ *  that rendered a frame later was dropped silently. Reproduced on a fixture: one
+ *  poll, 1 file of 3, and the row that mounts late is the one lost.
+ *
+ *  Absence still costs only one poll: the growth wait begins after rows exist.
  */
 async function waitForArtifactPanel(doc, options) {
   const opts = options || {};
   const root = doc || (typeof document !== 'undefined' ? document : null);
   const budgetMs = opts.panelWaitMs === undefined ? 15000 : opts.panelWaitMs;
   const stepMs = opts.panelPollMs === undefined ? 500 : opts.panelPollMs;
+  // How many consecutive polls must report the same count before the list is
+  // believed complete. Two, because a single unchanged frame is exactly what a
+  // half-mounted panel looks like between two renders.
+  const stablePolls = opts.panelStablePolls === undefined ? 2 : opts.panelStablePolls;
   const sleep = opts.sleep || function(ms) {
     return new Promise(function(resolve) { setTimeout(resolve, ms); });
   };
@@ -669,6 +682,24 @@ async function waitForArtifactPanel(doc, options) {
   while (!files.length && now() < deadline) {
     await sleep(stepMs);
     files = listArtifactPanelFiles(root);
+  }
+  if (!files.length) return files;
+
+  // Rows exist; now wait for the count to settle. A panel that keeps growing is
+  // still rendering, and returning mid-render loses whatever has not mounted.
+  let steady = 0;
+  while (steady < stablePolls && now() < deadline) {
+    await sleep(stepMs);
+    const next = listArtifactPanelFiles(root);
+    if (next.length > files.length) {
+      files = next;
+      steady = 0;          // grew — start counting again
+    } else {
+      // A shrinking list means the panel re-rendered; keep the larger reading,
+      // since a file that was there is not made absent by a transient frame.
+      if (next.length === files.length) files = next;
+      steady += 1;
+    }
   }
   return files;
 }

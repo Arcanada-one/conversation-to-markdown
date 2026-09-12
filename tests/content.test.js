@@ -3377,3 +3377,99 @@ test('the export scrolls for buttons when a static read finds none', async () =>
   assert.ok(out.indexOf('[bundle.zip](') !== -1,
     'the archive must be found even though it is unmounted when the pass starts');
 });
+
+test('the panel is read after it stops growing, not on its first row', async () => {
+  // MEASURED (2026-09-12): a conversation with five panel files exported four.
+  // TZ-01_Arcanada_Ecosystem_Project_Cards.md appeared NOWHERE in the markdown —
+  // not as a link, not as unresolved, not by name. The panel mounts its rows
+  // progressively and the wait returned on the first one, so anything rendering
+  // a frame later was dropped silently. The user had to download it by hand.
+  const rows = [
+    'TZ-01_Arcanada_Ecosystem_Project_Cards.md',
+    'arcanada_talomnia_89_articles_narratives.md',
+    'TZ-02_Canon_Arcana_Authoring_Manual.md',
+  ];
+  let poll = 0;
+  const doc = {
+    querySelectorAll(sel) {
+      if (!/open-file|artifact-row/.test(sel)) return [];
+      poll += 1;
+      // The measured shape: one row on the first frame, the rest a frame later.
+      const visible = poll <= 1 ? rows.slice(1, 2) : rows;
+      return visible.map((n) => ({
+        getAttribute: (a) => (a === 'aria-label' ? n : null),
+      }));
+    },
+  };
+
+  const files = await parser.waitForArtifactPanel(doc, {
+    sleep: async () => {},
+    now: () => Date.now(),
+  });
+  const names = files.map((f) => f.name);
+
+  assert.equal(names.length, 3, 'every mounted row must be read, not just the first');
+  assert.ok(names.indexOf('TZ-01_Arcanada_Ecosystem_Project_Cards.md') !== -1,
+    'the row that mounts late is exactly the one that used to be lost');
+});
+
+test('a conversation with no panel still costs only one poll', async () => {
+  // Positive control for the cost: the growth wait must not run when there is
+  // nothing to wait for, or every panel-less export pays the full budget.
+  let polls = 0;
+  const doc = {
+    querySelectorAll(sel) {
+      if (/open-file|artifact-row/.test(sel)) polls += 1;
+      return [];
+    },
+  };
+
+  let clock = 0;
+  const files = await parser.waitForArtifactPanel(doc, {
+    sleep: async () => { clock += 500; },
+    now: () => clock,
+    panelWaitMs: 2000,
+    panelPollMs: 500,
+  });
+
+  assert.deepEqual(files, []);
+  // 2000ms of budget at 500ms per poll: the absence loop spends 5 reads and the
+  // export moves on. This bounds the COST of a panel-less conversation, which is
+  // most of them.
+  //
+  // Honest limit of this assertion: it does not kill a mutant deleting the
+  // `if (!files.length) return files;` guard. By the time the absence loop ends
+  // the budget is spent, so the stability wait it guards exits immediately too —
+  // the guard is unobservable from the outside here. Asserting it with a LIVE
+  // budget does not work either: an empty panel then spins until the deadline,
+  // and with a stubbed clock that never advances the suite hangs instead of
+  // failing (measured: two files timed out at 60s). Recorded in
+  // MUTATION-EVIDENCE.md as redundant-by-design rather than left looking
+  // verified — the guard is a cheap early exit, not a correctness boundary.
+  assert.ok(polls <= 5,
+    'an absent panel must not cost more than its budget, saw ' + polls);
+});
+
+test('a transient shrink does not erase files already seen', async () => {
+  // The panel re-renders. A frame reporting fewer rows is a render artefact, not
+  // proof a file vanished — treating it as truth would reintroduce the loss.
+  const all = ['a.md', 'b.md', 'c.md'];
+  let poll = 0;
+  const doc = {
+    querySelectorAll(sel) {
+      if (!/open-file|artifact-row/.test(sel)) return [];
+      poll += 1;
+      const visible = poll === 3 ? all.slice(0, 1) : all;   // one frame shrinks
+      return visible.map((n) => ({
+        getAttribute: (a) => (a === 'aria-label' ? n : null),
+      }));
+    },
+  };
+
+  const files = await parser.waitForArtifactPanel(doc, {
+    sleep: async () => {},
+    now: () => Date.now(),
+  });
+
+  assert.equal(files.length, 3, 'a shrinking frame must not shrink the result');
+});

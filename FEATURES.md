@@ -276,6 +276,14 @@ a single one would be indistinguishable from a word break in the title.
 the files it left out. Verify a large project still produces a usable archive, or
 says what is missing — the saved files on disk are complete regardless.
 
+**Every panel row is read, including rows the panel later replaces.** ChatGPT
+renders the artefact panel progressively AND swaps its contents as the page
+settles — two different sets of four files were measured on one conversation, one
+on screen and one in the export. Readings are merged by name across the whole
+wait, so a row seen in any frame survives. **Verify by counting**, and by opening
+the panel yourself: every name listed there must reach the folder. A file that is
+simply absent produces no error line, which is why counting is the check.
+
 **Every panel row is read, including the ones that mount late.** ChatGPT renders
 the artefact panel progressively, so the export waits for the row count to settle
 rather than reading the first row that appears. **Verify by counting:** open a
@@ -314,7 +322,7 @@ match the CHANGELOG's top entry, and users must never see a gap. The last entry
 below is the version being shipped; a test checks this line against the CHANGELOG
 so a release cannot be added without revisiting this file.
 
-Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2
+Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3
 
 **Changelog coupling.** A version bump with no dated CHANGELOG entry fails the
 build, because releases 1.1.6 and 1.1.7 reached the store leaving no record of

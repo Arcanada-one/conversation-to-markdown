@@ -1712,3 +1712,36 @@ loop returned on the first row it saw, and ChatGPT mounts rows progressively.
 
 Reproduced on a fixture before touching the code: **one poll, 1 file of 3**, and
 the row that mounts late is the one lost. After: 4 polls, 3 of 3, TZ-01 present.
+
+## 1.5.3 — the panel is replaced, not merely grown
+
+1.5.2 shipped a count-based stability wait against the wrong theory. The proof it
+was wrong is the cleanest kind: the next export was **byte-identical** to the one
+before it (`543df995ad09ae9e…`), still missing the same file.
+
+Measuring the live page showed two different sets of four:
+
+    panel on screen:  TZ-01, TZ-02, TZ-03, TZ-04
+    export contained: 89_articles, TZ-02, TZ-03, TZ-04
+
+A same-size replacement is indistinguishable from a settled list when the only
+thing being watched is the count. The wait now merges every reading by name.
+
+| # | Mutation | Result |
+|---|----------|--------|
+| S1 | union → keep only the last reading (`byName.clear()` each poll) | **killed**, 3 failures |
+
+Reproduced before the fix on a fixture shaped like the measurement: one frame of
+four names, then a different four. Before — 4 names, TZ-01 absent. After — 5
+names, both frames represented.
+
+### Why a union rather than the larger reading
+
+The failure directions are not symmetric, the same rule this repository applies
+to skipping a conversation:
+
+- a **stale extra** name costs one failed resolve, and that failure is visible —
+  it prints under "Could not retrieve a download link for";
+- a **dropped** name costs a file the user is never told about. This one hid for
+  a day: no error, no notice, just four files where five were expected, found
+  only because the numbering had a gap.

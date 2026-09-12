@@ -5,6 +5,26 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.3] — 2026-09-13
+
+### Fixed
+
+- **The artefact panel is read as a union of frames, because it gets replaced.**
+  1.5.2 waited for the row COUNT to settle and fixed nothing: the next export
+  came back byte-identical (`543df995…`), still missing
+  `TZ-01_Arcanada_Ecosystem_Project_Cards.md`. Measuring the live page explained
+  why — the panel on screen held TZ-01..TZ-04 while the export held
+  `arcanada_talomnia_89_articles_narratives.md` plus TZ-02..TZ-04. **Two
+  different sets of four.** The panel does not only grow as it renders, it is
+  swapped for another set as the page settles, and a same-size swap looks
+  perfectly stable to a count-based wait.
+
+  Every polled reading is now merged by file name, so a row seen in any frame
+  survives the frame that drops it. The asymmetry is deliberate: a stale extra
+  name costs one failed resolve, which is reported as unresolved, while a
+  dropped name costs a file the user is never told about — this one went
+  unnoticed for a day and was fetched by hand.
+
 ## [1.5.2] — 2026-09-12
 
 ### Fixed

@@ -3473,3 +3473,64 @@ test('a transient shrink does not erase files already seen', async () => {
 
   assert.equal(files.length, 3, 'a shrinking frame must not shrink the result');
 });
+
+test('a panel replaced by a different set of the same size loses nothing', async () => {
+  // MEASURED (2026-09-13). The count-based wait shipped in 1.5.2 fixed nothing:
+  // the export came back byte-identical to the one before it. The reason is that
+  // the panel does not only GROW, it is REPLACED as the page settles —
+  //
+  //   panel on screen:  TZ-01, TZ-02, TZ-03, TZ-04
+  //   export contained: 89_articles, TZ-02, TZ-03, TZ-04
+  //
+  // two different sets of four. A same-size swap looks perfectly stable to a
+  // count-based wait, so it returned the set that was missing the file the user
+  // actually wanted, with no notice of any kind.
+  const early = ['arcanada_talomnia_89_articles_narratives.md', 'b.md', 'c.md', 'd.md'];
+  const late = ['TZ-01_Arcanada_Ecosystem_Project_Cards.md', 'b.md', 'c.md', 'd.md'];
+  let poll = 0;
+  const doc = {
+    querySelectorAll(sel) {
+      if (!/open-file|artifact-row/.test(sel)) return [];
+      poll += 1;
+      return (poll <= 1 ? early : late).map((n) => ({
+        getAttribute: (a) => (a === 'aria-label' ? n : null),
+      }));
+    },
+  };
+
+  const names = (await parser.waitForArtifactPanel(doc, {
+    sleep: async () => {},
+    now: () => Date.now(),
+  })).map((f) => f.name);
+
+  assert.equal(names.length, 5, 'the union of both frames, not the last frame');
+  assert.ok(names.indexOf('TZ-01_Arcanada_Ecosystem_Project_Cards.md') !== -1,
+    'the file the user came for must survive the swap');
+  assert.ok(names.indexOf('arcanada_talomnia_89_articles_narratives.md') !== -1,
+    'and the one the earlier frame carried must survive it too');
+});
+
+test('a name seen once is never dropped by a later frame', async () => {
+  // The asymmetry that justifies the union: a stale extra name costs one failed
+  // resolve, reported as unresolved. A dropped name costs a file the user never
+  // hears about — which is exactly how this defect stayed invisible for a day.
+  let poll = 0;
+  const doc = {
+    querySelectorAll(sel) {
+      if (!/open-file|artifact-row/.test(sel)) return [];
+      poll += 1;
+      // Present on the first frame, gone from every frame after it.
+      return (poll <= 1 ? ['vanishing.md', 'stable.md'] : ['stable.md']).map((n) => ({
+        getAttribute: (a) => (a === 'aria-label' ? n : null),
+      }));
+    },
+  };
+
+  const names = (await parser.waitForArtifactPanel(doc, {
+    sleep: async () => {},
+    now: () => Date.now(),
+  })).map((f) => f.name);
+
+  assert.ok(names.indexOf('vanishing.md') !== -1,
+    'a row that disappears from a later frame must still be reported');
+});

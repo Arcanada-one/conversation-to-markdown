@@ -1674,3 +1674,41 @@ symptom, and neither addressed it:
 Both fixes were kept: they are guarded by their own tests and cost nothing. But
 the export kept losing the file, and the reason it kept losing it was never
 either of them. A measurement whose subject is not pinned is not a measurement.
+
+## 1.5.2 — the panel wait returned before the panel finished mounting
+
+Mutants against `waitForArtifactPanel`, run with `npm test` reading the exit code
+from the command itself and restoring from a backup copy each time:
+
+| # | Mutation | Result |
+|---|----------|--------|
+| R1 | `let steady = 0` → `let steady = 99` (never wait for stability) | **killed**, 1 failure |
+| R2 | keep a shrinking reading instead of the larger one | **killed**, 1 failure |
+| R3 | delete `if (!files.length) return files;` | **survived** |
+
+### R3 survives by design, and the reason is worth stating
+
+The guard is a cheap early exit for a conversation with no panel, not a
+correctness boundary. It is unobservable from outside the function:
+
+- With an **exhausted** budget — the only shape the suite can drive — the
+  stability wait the guard protects exits immediately anyway, so removing the
+  guard changes nothing an assertion can see.
+- With a **live** budget the guard does matter, but an empty panel then polls
+  until the deadline. Driving that with a stubbed clock that does not advance
+  makes the suite **hang rather than fail**: measured, `tests/content.test.js`
+  and `tests/batch.test.js` both timed out at 60s.
+
+So the test bounds the COST of a panel-less export (5 polls within a 2000ms
+budget) and says plainly that it does not kill R3. An unkillable guard recorded
+as unkillable is honest; the same guard left looking verified is not.
+
+### What the fix was
+
+Measured on a production conversation (2026-09-12): five files in the artefact
+panel, **four exported**, `TZ-01_Arcanada_Ecosystem_Project_Cards.md` absent from
+the markdown entirely — not a link, not an unresolved note, not even a name. The
+loop returned on the first row it saw, and ChatGPT mounts rows progressively.
+
+Reproduced on a fixture before touching the code: **one poll, 1 file of 3**, and
+the row that mounts late is the one lost. After: 4 polls, 3 of 3, TZ-01 present.

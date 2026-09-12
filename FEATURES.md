@@ -276,6 +276,14 @@ a single one would be indistinguishable from a word break in the title.
 the files it left out. Verify a large project still produces a usable archive, or
 says what is missing — the saved files on disk are complete regardless.
 
+**Every panel row is read, including the ones that mount late.** ChatGPT renders
+the artefact panel progressively, so the export waits for the row count to settle
+rather than reading the first row that appears. **Verify by counting:** open a
+conversation whose panel lists four or more files and confirm every one of them
+reaches the folder. A conversation once exported four of five files with no
+notice at all — the missing one was simply absent from the markdown, which is
+why counting is the check and not reading the error line.
+
 **The running version is visible.** The popup shows the loaded version under
 its title, read from the manifest rather than written twice. Verify after
 reloading an unpacked build that the number matches `manifest.json` — this is how
@@ -306,7 +314,7 @@ match the CHANGELOG's top entry, and users must never see a gap. The last entry
 below is the version being shipped; a test checks this line against the CHANGELOG
 so a release cannot be added without revisiting this file.
 
-Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1
+Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2
 
 **Changelog coupling.** A version bump with no dated CHANGELOG entry fails the
 build, because releases 1.1.6 and 1.1.7 reached the store leaving no record of

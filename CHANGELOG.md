@@ -5,6 +5,24 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] — 2026-09-12
+
+### Fixed
+
+- **A file in the artefact panel was dropped when it mounted a frame late.**
+  Measured on a production conversation: five files in the panel, **four
+  exported**, `TZ-01_Arcanada_Ecosystem_Project_Cards.md` missing — and missing
+  silently. It appeared nowhere in the markdown: not as a link, not under
+  "Could not retrieve", not even by name. The numbering gave it away, TZ-02
+  through TZ-04 present with TZ-01 absent, and the user downloaded it by hand.
+
+  The panel wait returned on the **first row** it saw, and ChatGPT mounts the
+  rows progressively, so every row rendering a frame later was never read.
+  Reproduced on a fixture before the fix: one poll, 1 file of 3, and the row
+  that mounts late is the one lost. The wait now continues until the row count
+  stops growing, with a transient shrink treated as a re-render rather than as
+  proof a file vanished. A conversation with no panel still costs one poll.
+
 ## [1.5.1] — 2026-09-10
 
 ### Added

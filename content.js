@@ -959,6 +959,10 @@ function createScanSettings(options) {
       return target.querySelectorAll('[data-turn-id]');
     },
     extractTurn: supplied.extractTurn || extractTurn,
+    // Called at every scroll position the scan holds, after the turns there
+    // have mounted. Used to read per-turn artefact rows while their turn
+    // exists — they are unmounted again as soon as the scan moves on.
+    onMounted: supplied.onMounted || null,
     settle: supplied.settle || waitForRenderQuiet,
     scrollTo: supplied.scrollTo || scrollToConversationPosition,
     now: supplied.now || function() { return Date.now(); },
@@ -1259,6 +1263,12 @@ async function scanTurns(container, options) {
       // turns it is the signature of a stretch the virtualizer never rendered
       // while the scan was looking at it.
       readBands.push([container.scrollTop, observation.mountedBand]);
+      // Read anything that lives inside a turn BEFORE the scan scrolls away and
+      // the virtualizer unmounts it. Guarded: a throwing collector must not end
+      // a scan that has already captured turns.
+      if (settings.onMounted) {
+        try { settings.onMounted(container); } catch (_e) { /* collector failed */ }
+      }
 
       const movedDown = Math.abs(container.scrollTop - lastProgressTop) >= 1;
       if (observation.newIds > 0 || movedDown) {
@@ -1817,6 +1827,11 @@ async function appendPanelArtifacts(markdown, options) {
       .match(/\/c\/([A-Za-z0-9-]+)/) || [])[1] || null;
   if (!conversationId) return markdown;
 
+  // Rows harvested during the scan, while each turn was mounted. They are the
+  // authoritative reading for a panel nested inside a turn — see the comment at
+  // the onMounted collector in getConversationMarkdown.
+  const scannedFiles = Array.isArray(opts.scannedPanelFiles) ? opts.scannedPanelFiles : [];
+
   const artifacts = opts.artifacts !== undefined
     ? opts.artifacts
     : await fetchConversationArtifacts(conversationId, opts);
@@ -1847,7 +1862,8 @@ async function appendPanelArtifacts(markdown, options) {
     // A sandbox link in the body is proof a generated file exists — better
     // proof than the API, which reports neither uploads nor interpreter output
     // for such a conversation. Wait for the panel when either source says so.
-    const mayHaveFiles = artifacts === null || artifacts.length > 0 || bodyFiles.length > 0;
+    const mayHaveFiles = artifacts === null || artifacts.length > 0 ||
+      bodyFiles.length > 0 || scannedFiles.length > 0;
     files = mayHaveFiles
       ? await waitForArtifactPanel(doc, opts)
       : listArtifactPanelFiles(doc);
@@ -1855,6 +1871,9 @@ async function appendPanelArtifacts(markdown, options) {
 
   // Merge, preferring the body's real path over the panel's reconstructed one.
   const bySandboxPath = new Map();
+  // Scan-time rows first: they were read while their turn was mounted, which a
+  // post-scan read cannot reproduce for a panel nested inside a turn.
+  for (const file of scannedFiles) bySandboxPath.set(file.sandboxPath, file);
   for (const file of files) bySandboxPath.set(file.sandboxPath, file);
   for (const file of bodyFiles) bySandboxPath.set(file.sandboxPath, file);
   files = Array.from(bySandboxPath.values());
@@ -2886,6 +2905,9 @@ async function getConversationMarkdown(settings) {
     const firstSection = document.querySelector('[data-turn-id]');
     let md;
     var scanMeta = null;
+    // Artefact rows collected while the scan holds each scroll position. Keyed
+    // by file name: the same row can mount repeatedly as the walk passes it.
+    const panelFilesDuringScan = new Map();
     if (!firstSection) {
       md = extractConversationLegacy();
     } else {
@@ -2908,6 +2930,28 @@ async function getConversationMarkdown(settings) {
           scanState.observed = p.observed;
           scanState.elapsedMs = p.elapsedMs;
         },
+        // Harvest artefact rows AT EVERY SCROLL POSITION, while the scan holds
+        // the page there. Measured from the live markup: the rows are not in a
+        // sidebar, they are nested INSIDE the turn —
+        //
+        //   <div class="…agent-turn">
+        //     <div data-message-author-role="assistant" …>
+        //     <div class="w-full max-w-[480px]">      <- the artefact panel
+        //
+        // so a row is mounted only while its own turn is, and `scanTurns`
+        // restores the original scroll position in its `finally`. Reading after
+        // the scan therefore sees whichever turn happens to be on screen: the
+        // panel showed TZ-01..TZ-04 while the export carried 89_articles plus
+        // TZ-02..TZ-04, two different sets of four, because they were read at
+        // two different scroll positions. Collected during the walk, every
+        // turn's files are seen while that turn exists.
+        onMounted: wantFiles ? function() {
+          for (const file of listArtifactPanelFiles(document)) {
+            if (!panelFilesDuringScan.has(file.name)) {
+              panelFilesDuringScan.set(file.name, file);
+            }
+          }
+        } : null,
       });
       md = buildConversationMarkdown(turns);
       if (scanMeta.partial) md = prefixPartialNotice(md, scanMeta.reason);
@@ -2917,7 +2961,14 @@ async function getConversationMarkdown(settings) {
     // tree with no href and no testid, so the per-turn scan above cannot see
     // them. Appending them here puts them in the markdown, which is where the
     // popup's downloader looks for artefacts.
-    if (wantFiles) md = await appendPanelArtifacts(md, {});
+    if (wantFiles) {
+      // What the walk saw wins: those rows were read while their own turn was
+      // mounted. appendPanelArtifacts still reads the panel itself, and merges,
+      // so a conversation whose panel IS a sidebar keeps working unchanged.
+      md = await appendPanelArtifacts(md, {
+        scannedPanelFiles: Array.from(panelFilesDuringScan.values()),
+      });
+    }
     const title = extractConversationTitle();
     if (title) md = '# ' + title + '\n\n' + md;
     return {

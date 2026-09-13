@@ -5,6 +5,32 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.4] — 2026-09-13
+
+### Fixed
+
+- **The artefact panel is nested inside a turn, so it is virtualized with it.**
+  Three releases in a row tried to fix a missing file by reading the panel
+  better — later, longer, as a union. All three read it at the WRONG MOMENT. The
+  live markup settles it:
+
+      <div class="…agent-turn">
+        <div data-message-author-role="assistant" …>
+        <div class="w-full max-w-[480px]">      <- the artefact panel
+
+  The rows are not a sidebar. A row exists only while its own turn is mounted,
+  and the scan restores the original scroll position when it finishes, so every
+  read after the scan sees whichever turn happens to be on screen. That is the
+  whole explanation for the two different sets of four: the panel showed
+  TZ-01..TZ-04 and the export carried `arcanada_talomnia_89_articles_narratives.md`
+  plus TZ-02..TZ-04, because they were read at two different scroll positions.
+
+  Artefact rows are now harvested **during** the scan, at every position it
+  holds, while the turns there are mounted. A failing collector cannot end a
+  scan — the turns are the expensive, unrepeatable part. The post-scan panel
+  read is kept and merged, so a conversation whose panel really is a sidebar
+  keeps working unchanged.
+
 ## [1.5.3] — 2026-09-13
 
 ### Fixed

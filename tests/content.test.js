@@ -3534,3 +3534,116 @@ test('a name seen once is never dropped by a later frame', async () => {
   assert.ok(names.indexOf('vanishing.md') !== -1,
     'a row that disappears from a later frame must still be reported');
 });
+
+/* ------------------------------------------------------------------------- *
+ * The artefact panel is nested INSIDE a turn, so it is virtualized with it.
+ *
+ * Measured from the live markup (2026-09-13):
+ *
+ *   <div class="…agent-turn">
+ *     <div data-message-author-role="assistant" …>
+ *     <div class="w-full max-w-[480px]">      <- the artefact panel
+ *
+ * The rows are not a sidebar. A row exists only while its own turn is mounted,
+ * and scanTurns restores the original scroll position in its `finally`, so a
+ * post-scan read sees whichever turn happens to be on screen. That is why the
+ * panel showed TZ-01..TZ-04 while the export carried 89_articles plus
+ * TZ-02..TZ-04 — two different sets of four, read at two scroll positions.
+ * ------------------------------------------------------------------------- */
+
+test('artefact rows are harvested during the scan, while their turn is mounted', async () => {
+  // The rows visible depend on scroll position, exactly as on the live page.
+  let scrollTop = 0;
+  const doc = {
+    querySelectorAll(sel) {
+      if (!/open-file|artifact-row/.test(sel)) return [];
+      const rows = scrollTop < 500
+        ? ['TZ-01_Arcanada_Ecosystem_Project_Cards.md']
+        : ['TZ-02_x.md', 'TZ-03_x.md'];
+      return rows.map((n) => ({ getAttribute: (a) => (a === 'aria-label' ? n : null) }));
+    },
+  };
+
+  const collected = new Map();
+  for (const pos of [0, 600]) {
+    scrollTop = pos;
+    for (const f of parser.listArtifactPanelFiles(doc)) collected.set(f.name, f);
+  }
+  // The scan has finished and restored the position: only TZ-01 is on screen.
+  scrollTop = 0;
+
+  const out = await parser.appendPanelArtifacts('body', {
+    doc,
+    conversationId: 'conv-1',
+    artifacts: [{ kind: 'asset', messageId: 'm1' }],
+    scannedPanelFiles: Array.from(collected.values()),
+    token: 'tok',
+    sleep: async () => {},
+    clickDownloads: false,
+    fetchImpl: stubFetch([
+      ['/interpreter/download', jsonOk({
+        download_url: 'https://chatgpt.com/backend-api/estuary/content?id=f&fn=x',
+        file_name: 'x',
+      })],
+    ]),
+  });
+
+  for (const name of ['TZ-01_Arcanada_Ecosystem_Project_Cards.md', 'TZ-02_x.md', 'TZ-03_x.md']) {
+    assert.ok(out.indexOf(name) !== -1,
+      'every turn\'s rows must survive the scan, missing: ' + name);
+  }
+});
+
+test('the scan calls its mounted-collector at each position it holds', async () => {
+  // Drives scanTurns itself: the collector is the wiring, and wiring is what
+  // broke here. A helper test cannot see that the scan never calls it.
+  const positions = [];
+  const container = { scrollTop: 0, scrollHeight: 2000, clientHeight: 1000 };
+  const turn = {
+    getAttribute: (n) => (n === 'data-turn-id' ? 't1' : null),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    textContent: 'hi',
+  };
+
+  await parser.scanTurns(container, {
+    readSections: () => [turn],
+    extractTurn: () => ({ id: 't1', order: 1, markdown: 'hi', discoveryIndex: 0 }),
+    scrollTo: async (target, top) => { target.scrollTop = top; },
+    settle: async () => {},
+    isCancelled: () => false,
+    scanMeta: {},
+    maxSteps: 6,
+    stablePasses: 1,
+    onMounted: () => { positions.push(container.scrollTop); },
+  });
+
+  assert.ok(positions.length >= 2,
+    'the collector must run at more than one scroll position, saw ' + positions.length);
+});
+
+test('a throwing collector does not lose the conversation', async () => {
+  // The turns are the expensive, unrepeatable part. A failure reading artefact
+  // rows must not take them with it.
+  const container = { scrollTop: 0, scrollHeight: 2000, clientHeight: 1000 };
+  const turn = {
+    getAttribute: (n) => (n === 'data-turn-id' ? 't1' : null),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    textContent: 'hi',
+  };
+
+  const turns = await parser.scanTurns(container, {
+    readSections: () => [turn],
+    extractTurn: () => ({ id: 't1', order: 1, markdown: 'hi', discoveryIndex: 0 }),
+    scrollTo: async (target, top) => { target.scrollTop = top; },
+    settle: async () => {},
+    isCancelled: () => false,
+    scanMeta: {},
+    maxSteps: 4,
+    stablePasses: 1,
+    onMounted: () => { throw new Error('collector exploded'); },
+  });
+
+  assert.equal(turns.length, 1, 'the captured turns must survive a failing collector');
+});

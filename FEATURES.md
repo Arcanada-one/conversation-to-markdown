@@ -276,6 +276,14 @@ a single one would be indistinguishable from a word break in the title.
 the files it left out. Verify a large project still produces a usable archive, or
 says what is missing — the saved files on disk are complete regardless.
 
+**Files attached to a turn are collected while that turn is on screen.** The
+artefact panel is nested inside the turn, not in a sidebar, so its rows are
+unmounted with the turn and cannot be read once the scan has scrolled back.
+Rows are harvested during the walk instead. **Verify on a conversation where the
+files are attached to DIFFERENT answers**, several turns apart: every one must
+reach the folder. Reading them afterwards returns only the files of whichever
+turn is on screen, which produced two different sets of four on one conversation.
+
 **Every panel row is read, including rows the panel later replaces.** ChatGPT
 renders the artefact panel progressively AND swaps its contents as the page
 settles — two different sets of four files were measured on one conversation, one
@@ -322,7 +330,7 @@ match the CHANGELOG's top entry, and users must never see a gap. The last entry
 below is the version being shipped; a test checks this line against the CHANGELOG
 so a release cannot be added without revisiting this file.
 
-Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3
+Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4
 
 **Changelog coupling.** A version bump with no dated CHANGELOG entry fails the
 build, because releases 1.1.6 and 1.1.7 reached the store leaving no record of

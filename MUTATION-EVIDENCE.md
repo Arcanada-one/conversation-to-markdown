@@ -1745,3 +1745,34 @@ to skipping a conversation:
 - a **dropped** name costs a file the user is never told about. This one hid for
   a day: no error, no notice, just four files where five were expected, found
   only because the numbering had a gap.
+
+## 1.5.4 — the panel is inside the turn, and three fixes read it at the wrong moment
+
+1.5.2 (wait for the count to settle) and 1.5.3 (union of readings) both treated a
+missing file as a panel-reading problem. Neither worked, and the live markup says
+why:
+
+    <div class="…agent-turn">
+      <div data-message-author-role="assistant" …>
+      <div class="w-full max-w-[480px]">      <- the artefact panel
+
+The rows are not a sidebar. They are virtualized with their turn, and
+`scanTurns` restores the original scroll position in its `finally`, so EVERY
+read after the scan returns the files of whichever turn is on screen. The two
+different sets of four were one panel read at two scroll positions.
+
+| # | Mutation | Result |
+|---|----------|--------|
+| T1 | delete the `onMounted` call inside the scan loop | **killed**, 1 failure |
+| T2 | stop merging scan-time rows into the file list | **killed**, 1 failure |
+| T3 | remove the try/catch around the collector | **killed**, 1 failure |
+
+T3 matters for a reason the other two do not: the turns are the expensive,
+unrepeatable part of an export. A collector that throws must not take a scan
+that has already captured hundreds of turns with it.
+
+### The lesson, stated plainly
+
+Three consecutive fixes refined HOW the panel was read. The defect was WHEN. A
+measurement of the panel's contents could not distinguish them — both theories
+predict "the wrong four files" — and only the DOM structure did.

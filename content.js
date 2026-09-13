@@ -931,6 +931,62 @@ async function scrollToConversationPosition(target, top, behavior) {
   }
 }
 
+/**
+ * Drive the conversation to its true beginning, and report whether it arrived.
+ *
+ * A single scroll to 0 does not reach the top of a virtualized conversation that
+ * loads its history in chunks. Measured on a live thread: `scrollTo(0,'smooth')`
+ * settled at 2850 of 0 while `scrollHeight` SHRANK 6900 -> 5750 mid-flight (the
+ * virtualizer unmounted the turns above), and the scan then walked down from the
+ * middle. The export carried 26KB of a 126KB conversation, with only the last
+ * turn's attachment, and the top of the thread — where the files were offered —
+ * was never mounted once.
+ *
+ * The document does not merely settle, it GROWS: across one measured run the
+ * height went 6900 -> 53335 -> 55775, roughly 8x, as older messages arrived.
+ * Each arrival moves the position again, which is why one jump plus a fixed wait
+ * cannot work. Two other strategies were measured on the same page and failed:
+ * smooth-then-jump ended at 46368, and climbing a screen at a time at 48988.
+ * Repeated jumps to 0 arrived in 4 steps and held.
+ *
+ * Arrival needs BOTH conditions, because either alone lies: position 0 on a
+ * thread that is still prepending history is not the beginning, and a steady
+ * first turn while the page sits at 40000 is just a stalled scroll.
+ */
+async function scrollToConversationStart(container, options) {
+  const opts = options || {};
+  const sleep = opts.sleep || function(ms) {
+    return new Promise(function(r) { return setTimeout(r, ms); });
+  };
+  const scrollTo = opts.scrollTo || scrollToConversationPosition;
+  const readFirstTurnId = opts.readFirstTurnId || function(target) {
+    const first = target.querySelector ? target.querySelector('[data-turn-id]') : null;
+    return first && first.getAttribute ? first.getAttribute('data-turn-id') : null;
+  };
+  const settleMs = opts.settleMs === undefined ? 400 : opts.settleMs;
+  const stableRounds = opts.stableRounds === undefined ? 3 : opts.stableRounds;
+  // Bounded so a thread that prepends forever cannot hang the export; the
+  // measured run needed 4 rounds, so 40 is an order of magnitude of headroom.
+  const maxRounds = opts.maxRounds === undefined ? 40 : opts.maxRounds;
+
+  let steady = 0;
+  let previousFirstId = null;
+  let rounds = 0;
+  for (let i = 0; i < maxRounds && steady < stableRounds; i += 1) {
+    rounds = i + 1;
+    await scrollTo(container, 0, 'auto');
+    await sleep(settleMs);
+    const firstId = readFirstTurnId(container);
+    const atTop = container.scrollTop <= 1;
+    steady = atTop && firstId === previousFirstId ? steady + 1 : 0;
+    previousFirstId = firstId;
+  }
+  // Reported rather than thrown: a scan that starts below the beginning is still
+  // worth running, and the coverage-gap check turns it into a visible partial
+  // export. Failing here would trade a flagged partial for nothing at all.
+  return { reachedTop: steady >= stableRounds, rounds: rounds };
+}
+
 function waitForRenderQuiet(target) {
   if (typeof MutationObserver === 'undefined') return Promise.resolve();
   return new Promise(function(resolve) {
@@ -965,6 +1021,10 @@ function createScanSettings(options) {
     onMounted: supplied.onMounted || null,
     settle: supplied.settle || waitForRenderQuiet,
     scrollTo: supplied.scrollTo || scrollToConversationPosition,
+    // Injectable so a fixture can drive the arrival-detection directly.
+    scrollToStart: supplied.scrollToStart || function(target) {
+      return scrollToConversationStart(target, { scrollTo: supplied.scrollTo });
+    },
     now: supplied.now || function() { return Date.now(); },
     stablePasses: supplied.stablePasses || 3,
     // How many times a turn may mount empty before it stops blocking the scan.
@@ -1203,7 +1263,10 @@ function largestCoverageGap(bands, viewportHeight, documentHeight) {
 function markPartialScan(settings, reason) {
   if (settings.scanMeta) {
     settings.scanMeta.partial = true;
-    settings.scanMeta.reason = reason;
+    // Keep the FIRST reason. A scan that never reached the start also tends to
+    // stall later, and overwriting would report the symptom while hiding the
+    // cause — the user reads this reason in the artifact itself.
+    if (!settings.scanMeta.reason) settings.scanMeta.reason = reason;
   }
 }
 
@@ -1247,9 +1310,10 @@ async function scanTurns(container, options) {
   let lastProgressTop = -1;
 
   try {
-    // Smooth scroll to top triggers ChatGPT's virtualization to mount
-    // the earliest turns. Fallback delay catches any timeout.
-    await settings.scrollTo(container, 0, 'smooth');
+    // Reach the actual beginning before walking down, or everything above the
+    // landing position is lost silently. See scrollToConversationStart.
+    const start = await settings.scrollToStart(container);
+    if (!start.reachedTop) markPartialScan(settings, 'never reached the start');
     await settings.settle(container);
     for (let step = 0; settings.maxSteps === 0 || step < settings.maxSteps; step += 1) {
       if (settings.isCancelled()) {
@@ -3038,6 +3102,7 @@ if (typeof module !== 'undefined' && module.exports) {
     escapeKeydownEvent: escapeKeydownEvent,
     UNPREVIEWABLE_FORMATS: UNPREVIEWABLE_FORMATS,
     waitForArtifactPanel: waitForArtifactPanel,
+    scrollToConversationStart: scrollToConversationStart,
     findCollapsedProjectRows: findCollapsedProjectRows,
     projectRowContainer: projectRowContainer,
     stripSidebarLabelSuffix: stripSidebarLabelSuffix,

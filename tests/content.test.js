@@ -287,6 +287,141 @@ test('elapsed time alone never ends a healthy scan', async () => {
   );
 });
 
+/**
+ * A conversation that prepends history when scrolled to 0, as measured on the
+ * live site: the height went 6900 -> 53335 -> 55775 across one run, and each
+ * arrival pushed the position back down. A single jump lands mid-conversation.
+ */
+function createPrependingConversation(options) {
+  const opts = options || {};
+  const chunks = opts.chunks === undefined ? 3 : opts.chunks;
+  let loaded = 0;
+  const container = {
+    scrollTop: 50000,
+    scrollHeight: 6900,
+    clientHeight: 900,
+    firstTurnId: 'turn-latest',
+    querySelector() {
+      return { getAttribute: () => container.firstTurnId };
+    },
+  };
+  container.jumpToTop = function() {
+    if (loaded < chunks) {
+      // History arrives: the document grows and the position is pushed back
+      // down, so this jump did NOT reach the beginning.
+      loaded += 1;
+      container.scrollHeight += 20000;
+      container.scrollTop = opts.settlesAtZero ? 0 : 3000;
+      container.firstTurnId = 'turn-older-' + loaded;
+      return;
+    }
+    container.scrollTop = 0;
+  };
+  return container;
+}
+
+test('the scan reaches the true beginning of a conversation that prepends history', async () => {
+  // The defect this covers: scrollTo(0) settled at 2850 of 0 while the
+  // virtualizer unmounted the turns above, and the scan walked down from the
+  // middle. A 126KB conversation exported as 26KB.
+  const container = createPrependingConversation();
+
+  const result = await parser.scrollToConversationStart(container, {
+    scrollTo: async (target) => { target.jumpToTop(); },
+    sleep: async () => {},
+    settleMs: 0,
+  });
+
+  assert.equal(result.reachedTop, true);
+  assert.equal(container.scrollTop, 0);
+  // Positive control: one jump is genuinely not enough on this fixture, so the
+  // assertion above is not vacuously true.
+  const single = createPrependingConversation();
+  single.jumpToTop();
+  assert.notEqual(single.scrollTop, 0);
+});
+
+test('arrival needs a steady first turn, not merely position zero', async () => {
+  // Position 0 on a thread still prepending history is not the beginning. This
+  // fixture parks at 0 on every jump while older turns keep arriving; accepting
+  // position alone would start the scan above nothing and lose the history.
+  const container = createPrependingConversation({ chunks: 2, settlesAtZero: true });
+  const firstIds = [];
+
+  const result = await parser.scrollToConversationStart(container, {
+    scrollTo: async (target) => { target.jumpToTop(); },
+    sleep: async () => {},
+    settleMs: 0,
+    readFirstTurnId: (target) => {
+      firstIds.push(target.firstTurnId);
+      return target.firstTurnId;
+    },
+  });
+
+  assert.equal(result.reachedTop, true);
+  // It kept going while the top was still changing rather than stopping at the
+  // first zero it saw.
+  assert.ok(firstIds.length > 3, 'expected more rounds than a position-only check would take');
+  assert.equal(firstIds[firstIds.length - 1], firstIds[firstIds.length - 2]);
+});
+
+test('a conversation that never reaches its start exports as partial', async () => {
+  // Failing the climb must not fail the export — a flagged partial beats
+  // nothing — but the user has to be able to read that it happened.
+  const container = createPrependingConversation({ chunks: Infinity });
+
+  const result = await parser.scrollToConversationStart(container, {
+    scrollTo: async (target) => { target.jumpToTop(); },
+    sleep: async () => {},
+    settleMs: 0,
+    maxRounds: 5,
+  });
+
+  assert.equal(result.reachedTop, false);
+  assert.equal(result.rounds, 5);
+});
+
+test('the scan marks a partial export when it never reached the start', async () => {
+  const container = createVirtualizedFixture([
+    [{ turnId: 'u1', markdown: 'from the middle' }],
+  ], 0);
+  const scanMeta = {};
+
+  await parser.scanTurns(container, {
+    readSections: (target) => target.querySelectorAll('[data-turn-id]'),
+    extractTurn: (turn) => turn,
+    settle: async () => {},
+    scrollTo: async () => {},
+    scrollToStart: async () => ({ reachedTop: false, rounds: 40 }),
+    scanMeta: scanMeta,
+  });
+
+  assert.equal(scanMeta.partial, true);
+  assert.equal(scanMeta.reason, 'never reached the start');
+  const md = parser.prefixPartialNotice(parser.buildConversationMarkdown([]), scanMeta.reason);
+  assert.match(md, />\s*\*\*Partial export\*\*/);
+});
+
+test('a scan that reaches the start is not flagged partial', async () => {
+  // The other direction: a false "partial export" notice on a complete file
+  // tells the user their good data is untrustworthy.
+  const container = createVirtualizedFixture([
+    [{ turnId: 'u1', markdown: 'complete' }],
+  ], 0);
+  const scanMeta = {};
+
+  await parser.scanTurns(container, {
+    readSections: (target) => target.querySelectorAll('[data-turn-id]'),
+    extractTurn: (turn) => turn,
+    settle: async () => {},
+    scrollTo: async () => {},
+    scrollToStart: async () => ({ reachedTop: true, rounds: 4 }),
+    scanMeta: scanMeta,
+  });
+
+  assert.notEqual(scanMeta.reason, 'never reached the start');
+});
+
 test('a stalled scan returns partial turns with a notice in the artifact', async () => {
   // When a scan genuinely stalls mid-conversation, whatever was captured must
   // survive — never silently discarded. The partial notice lives in the markdown
@@ -302,6 +437,9 @@ test('a stalled scan returns partial turns with a notice in the artifact', async
     extractTurn: (turn) => turn,
     settle: async () => {},
     scrollTo: async () => {},
+    // This fixture is about stalling mid-scan, so it starts from a reached top;
+    // otherwise the climb reports first and masks the stall under test.
+    scrollToStart: async () => ({ reachedTop: true, rounds: 1 }),
     noProgressSteps: 5,
     scanMeta: scanMeta,
   });

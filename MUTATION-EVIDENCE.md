@@ -1776,3 +1776,39 @@ that has already captured hundreds of turns with it.
 Three consecutive fixes refined HOW the panel was read. The defect was WHEN. A
 measurement of the panel's contents could not distinguish them — both theories
 predict "the wrong four files" — and only the DOM structure did.
+
+## 1.5.5 — the scan started in the middle of the conversation
+
+Measured on a live thread before the fix: `scrollTo(0,'smooth')` settled at
+**2850 of 0** while `scrollHeight` shrank **6900 → 5750** mid-flight — the
+virtualizer unmounted the turns above as the page moved. The scan then walked
+DOWN from 2850. A 126KB conversation exported as 26KB.
+
+No band-to-band gap existed to detect, because the hole was BEFORE the first
+band rather than between two of them.
+
+Three strategies measured on the same page, same starting state:
+
+| Strategy | Final position | Reached 0 |
+|----------|---------------|-----------|
+| smooth, then one instant jump (shipped through 1.5.4) | 46368 | no |
+| climb one screen at a time | 48988 | no |
+| repeated jumps to 0 until the first turn holds | 0 | **yes**, 4 rounds |
+
+Across that run the document grew 6900 → 53335 → 55775, roughly 8x, as older
+messages arrived — which is why one jump plus a fixed wait cannot work.
+
+| # | Mutation | Result |
+|---|----------|--------|
+| M1 | accept position 0 alone as arrival, drop the first-turn check | **killed**, 1 failure |
+| M2 | replace the climb with a single jump | **killed**, 10 failures |
+| M3 | do not mark partial when the start was never reached | **killed**, 2 failures |
+| M4 | let a later reason overwrite the first one | **killed**, 2 failures |
+
+M4 was not a planned mutation — it was a real defect the new test found. A scan
+that never reaches the start also tends to stall afterwards, and `stall`
+overwrote the true cause in the artifact the user reads.
+
+The fixture earns its keep by prepending history on every jump, exactly as the
+live page does; a positive control asserts that one jump genuinely fails on it,
+so the arrival assertion is not vacuous.

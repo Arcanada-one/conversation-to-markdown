@@ -117,6 +117,17 @@ one viewport left below it is reported as partial. Verify on a conversation of
 when it does: before 1.4.0 an 8-turn conversation saved 4 turns silently, and
 the generated file attached to a dropped turn went with it.
 
+**A scroll to the top is not the top.** A conversation loads its history in
+chunks, so scrolling to position 0 lands mid-thread and the scan then walks
+DOWN from there — everything above is lost with no gap between bands to detect,
+because the hole is before the first one. The scan now climbs repeatedly and
+only begins when it is both at zero and the first turn has stopped changing;
+failing to arrive is reported as partial. Verify by exporting a long
+conversation from the bottom: the first turn of the thread must be the first
+turn of the file. Measured before the fix on a live thread: the climb settled at
+2850 of 0 while the document shrank 6900 → 5750 mid-flight, and a 126KB
+conversation exported as 26KB carrying only the last turn's attachment.
+
 **Markdown fidelity.** Paragraphs, headings, lists, blockquotes, links, code,
 tables and visible generated images survive. Multiple segments of one turn are
 combined rather than only the first paragraph.
@@ -330,7 +341,7 @@ match the CHANGELOG's top entry, and users must never see a gap. The last entry
 below is the version being shipped; a test checks this line against the CHANGELOG
 so a release cannot be added without revisiting this file.
 
-Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4
+Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5
 
 **Changelog coupling.** A version bump with no dated CHANGELOG entry fails the
 build, because releases 1.1.6 and 1.1.7 reached the store leaving no record of

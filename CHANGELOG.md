@@ -5,6 +5,43 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.5] — 2026-09-13
+
+### Fixed
+
+- **The scan began in the middle of the conversation, and everything above it
+  was lost.** A conversation loads its history in chunks, so a single
+  `scrollTo(0)` does not reach the beginning: measured on a live thread, the
+  smooth scroll settled at **2850 of 0** while `scrollHeight` SHRANK
+  **6900 → 5750** mid-flight, because the virtualizer unmounted the turns above
+  as the page moved. The scan then walked DOWN from 2850 and never saw the top
+  of the thread. A 126KB conversation exported as **26KB** — 542 lines of 2733,
+  0 section headings of 48 — carrying only the last turn's attachment, while the
+  `.zip` and `.diff` offered in the FIRST reply were never on screen for the
+  button-click path to find.
+
+  No gap was detectable between the scan's bands because the hole was not
+  between them: it was before the first one. The existing blind-tail check
+  caught it and the artifact said `coverage gap`, which is how the defect was
+  found at all.
+
+  The scan now climbs to the start repeatedly, and treats arrival as **two**
+  conditions rather than one: at position zero AND the first turn has stopped
+  changing. Either alone lies — position 0 on a thread still prepending history
+  is not the beginning, and a steady first turn at position 40000 is a stalled
+  scroll. Three strategies were measured on the same page: smooth-then-jump
+  ended at 46368, climbing a screen at a time at 48988, repeated jumps arrived
+  in **4 rounds** and held. Across that run the document grew 6900 → 53335 →
+  55775 — roughly 8x — which is why one jump plus a fixed wait cannot work.
+
+  Failing to arrive does not abort the export; it is reported as partial, since
+  a flagged partial beats nothing at all.
+
+- **A later failure overwrote the reason for an earlier one.** A scan that never
+  reached the start also tends to stall afterwards, and the stall replaced the
+  real cause — so the artifact told the user "stall" while hiding why. The first
+  reason is now kept.
+
 ## [1.5.4] — 2026-09-13
 
 ### Fixed

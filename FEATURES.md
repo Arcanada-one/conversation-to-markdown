@@ -177,6 +177,17 @@ of Downloads (an unintercepted page download passes no filename and lands there)
 Verify that downloading still works on the page after an export finishes: the
 interception patches three global routes and must restore them.
 
+**One walk collects everything.** The scan traverses the conversation once, and
+the turns, the artefact rows and the download buttons are all read at each
+position while that turn is mounted. There is no second pass. A separate button
+traversal used to run afterwards, guarded by "only if nothing was found here" —
+and the guard failed the moment any unrelated `behavior-btn` happened to be on
+screen: measured on a live thread, the landing position held 2 of them (editing
+suggestions like "Make the opening more concrete"), so the traversal never ran
+and all 5 download buttons, the `.zip` and `.diff` among them, were missed.
+Verify on a conversation whose files are offered in its FIRST reply: they must
+arrive when the export is started from the bottom of a long thread.
+
 **Clicking never costs a file that was already arriving.** A "Скачать …" button
 for a format ChatGPT can preview (`.md`, `.txt`, image, video, PDF) opens a
 viewer instead of downloading, and that viewer covers the artefact panel — it
@@ -341,7 +352,7 @@ match the CHANGELOG's top entry, and users must never see a gap. The last entry
 below is the version being shipped; a test checks this line against the CHANGELOG
 so a release cannot be added without revisiting this file.
 
-Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5
+Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6
 
 **Changelog coupling.** A version bump with no dated CHANGELOG entry fails the
 build, because releases 1.1.6 and 1.1.7 reached the store leaving no record of

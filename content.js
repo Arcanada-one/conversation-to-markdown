@@ -1669,6 +1669,37 @@ function dismissViewerOverlay(doc, win, options) {
  *  static query sees the buttons of one screen and misses the rest. Collects
  *  across the whole conversation, de-duplicated by label, and leaves the
  *  scroller where it found it. */
+/**
+ * Drop buttons whose file the panel already resolved, and re-apply the ordering.
+ *
+ * Split out because the two facts arrive at different times now: the buttons are
+ * found during the scan's walk, while the panel's names are only complete after
+ * the merge that follows it. Clicking a file the panel already listed is what
+ * opened the Library viewer over the panel and cut an export from four files to
+ * one, so the exclusion has to happen — just later than the collection.
+ */
+function filterButtonsAgainstPanel(buttons, panelNames) {
+  const known = [];
+  for (const name of Array.from(panelNames || [])) {
+    const stem = String(name || '').replace(/\.[A-Za-z0-9]{1,8}$/, '').toLowerCase();
+    if (stem) known.push(stem);
+  }
+  const out = [];
+  for (const entry of Array.from(buttons || [])) {
+    if (!entry || !entry.label) continue;
+    const labelLower = String(entry.label).toLowerCase();
+    let seenInPanel = false;
+    for (const stem of known) {
+      if (labelLower.indexOf(stem) !== -1) { seenInPanel = true; break; }
+    }
+    if (!seenInPanel) out.push(entry);
+  }
+  // Archives first: the files that can ONLY be had by clicking are fetched
+  // before any viewer has a chance to interfere. Same rule as the selector.
+  out.sort(function(a, b) { return (b.archive ? 1 : 0) - (a.archive ? 1 : 0); });
+  return out;
+}
+
 async function findButtonsByScrolling(doc, win, options) {
   const opts = options || {};
   const root = doc || (typeof document !== 'undefined' ? document : null);
@@ -1729,7 +1760,11 @@ async function collectButtonDownloads(options) {
   // emptying them left the whole suite green, making the regression guard
   // unverified wiring rather than a checked one.
   if (typeof opts.onSelectButtons === 'function') opts.onSelectButtons(opts.panelNames || []);
-  let buttons = opts.buttons || downloadButtonsInPage(doc, opts.panelNames);
+  // `!== undefined`, not `||`: an EMPTY supplied list means the caller's walk
+  // found no buttons, which is an answer. Treating it as "nothing supplied"
+  // would re-traverse the whole conversation to reach the same result.
+  const supplied = opts.buttons !== undefined;
+  let buttons = supplied ? opts.buttons : downloadButtonsInPage(doc, opts.panelNames);
 
   // MEASURED (2026-09-10, 16:51 export): zero buttons found, no `## Files`
   // section written at all, while the same conversation demonstrably carries
@@ -1742,7 +1777,21 @@ async function collectButtonDownloads(options) {
   // conversation and collect what mounts. Without this the feature is dead on a
   // conversation longer than one screen, which is every conversation that
   // generates files.
-  if (!opts.buttons && !buttons.length && opts.scrollForButtons !== false) {
+  //
+  // This is now a FALLBACK, not the main path: the scan collects buttons on its
+  // own walk and passes them in, so a caller that supplies a list — empty or
+  // not — has already traversed. It stays for callers that do not, and because
+  // its own guard was itself the next defect:
+  //
+  //   if (!opts.buttons && !buttons.length && …)
+  //
+  // "only when nothing was found here" sounds safe and is not. Measured on a
+  // live thread: the landing position held 2 behavior-btn nodes, both editing
+  // suggestions ("Make the opening more concrete"), neither a download. Two was
+  // not zero, so the traversal never ran and all 5 download buttons — the .zip
+  // and the .diff among them — were never seen. A guard that reads "we found
+  // SOMETHING" cannot tell it apart from "we found the right thing".
+  if (!supplied && !buttons.length && opts.scrollForButtons !== false) {
     buttons = await findButtonsByScrolling(doc, win, opts);
   }
   if (!buttons.length) return [];
@@ -1951,11 +2000,22 @@ async function appendPanelArtifacts(markdown, options) {
   // regression: clicking a .md the panel had already listed opened the Library
   // viewer over the panel and cut the next export from four files to one.
   const panelNames = files.map(function(f) { return f.name; });
+  // Buttons gathered on the scan's single walk, filtered HERE rather than
+  // there: the exclusion needs the panel's names, and the panel is only fully
+  // known once the merge above has run.
+  const scannedButtons = Array.isArray(opts.scannedButtons)
+    ? filterButtonsAgainstPanel(opts.scannedButtons, panelNames)
+    : null;
   const buttonFiles = opts.clickDownloads === false
     ? []
     : (opts.buttonFiles !== undefined
       ? opts.buttonFiles
-      : await collectButtonDownloads(Object.assign({}, opts, { panelNames: panelNames })));
+      : await collectButtonDownloads(Object.assign({}, opts, {
+        panelNames: panelNames,
+        // Present but empty means the walk genuinely found none — do not fall
+        // back to a second traversal, which is what this replaces.
+        buttons: scannedButtons === null ? undefined : scannedButtons,
+      })));
 
   if (!files.length && !buttonFiles.length) return markdown;
 
@@ -2972,6 +3032,11 @@ async function getConversationMarkdown(settings) {
     // Artefact rows collected while the scan holds each scroll position. Keyed
     // by file name: the same row can mount repeatedly as the walk passes it.
     const panelFilesDuringScan = new Map();
+    // Download buttons collected on the same walk. A button found while scrolled
+    // away stays clickable — the click path calls scrollIntoView on it first —
+    // so there is no reason to traverse the conversation a second time to find
+    // them. Keyed by label, since one button can mount repeatedly.
+    const buttonsDuringScan = new Map();
     if (!firstSection) {
       md = extractConversationLegacy();
     } else {
@@ -3015,6 +3080,18 @@ async function getConversationMarkdown(settings) {
               panelFilesDuringScan.set(file.name, file);
             }
           }
+          // Same walk, same reason. The separate button traversal that used to
+          // run after the scan was guarded by "found nothing here", and the
+          // guard failed the moment ANY behavior-btn happened to be on screen:
+          // measured on a live thread, the landing position showed 2 buttons
+          // (both editing suggestions — "Make the opening more concrete"), so
+          // the traversal never ran and all 5 real download buttons were missed.
+          // Collected during the walk there is no guard to get wrong.
+          for (const entry of downloadButtonsInPage(document, [])) {
+            if (!buttonsDuringScan.has(entry.label)) {
+              buttonsDuringScan.set(entry.label, entry);
+            }
+          }
         } : null,
       });
       md = buildConversationMarkdown(turns);
@@ -3031,6 +3108,9 @@ async function getConversationMarkdown(settings) {
       // so a conversation whose panel IS a sidebar keeps working unchanged.
       md = await appendPanelArtifacts(md, {
         scannedPanelFiles: Array.from(panelFilesDuringScan.values()),
+        // Only when a scan actually ran. The legacy path has no walk behind it,
+        // so it must keep its own traversal rather than be told "none found".
+        scannedButtons: firstSection ? Array.from(buttonsDuringScan.values()) : undefined,
       });
     }
     const title = extractConversationTitle();
@@ -3095,6 +3175,7 @@ if (typeof module !== 'undefined' && module.exports) {
     appendPanelArtifacts: appendPanelArtifacts,
     sandboxFilesFromMarkdown: sandboxFilesFromMarkdown,
     downloadButtonsInPage: downloadButtonsInPage,
+    filterButtonsAgainstPanel: filterButtonsAgainstPanel,
     collectButtonDownloads: collectButtonDownloads,
     findButtonsByScrolling: findButtonsByScrolling,
     downloadNameFromUrl: downloadNameFromUrl,

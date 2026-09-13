@@ -2256,6 +2256,186 @@ test('the capture path itself appends panel artefacts', async () => {
   }
 });
 
+test('the capture path collects a button that is only mounted early in the scan', async () => {
+  // The wiring, not the helper. Two mutants survived a suite that drove
+  // collectButtonDownloads directly with a hand-supplied list: "do not collect
+  // during the scan" and "do not pass what was collected". Both are exactly the
+  // production defect — the buttons live in the FIRST reply, the export starts
+  // at the bottom, and nothing carried them across.
+  const turn = userTurn('user-1', 1, 'Собери архив');
+  // Starts at the BOTTOM, which is where a real export starts: the user scrolls
+  // to the end of a long thread and clicks save. The scan restores that position
+  // when it finishes, which is what unmounts the early turn's button again.
+  const container = createVirtualizedFixture([[turn]], 100);
+  container.overflowY = 'auto';
+  turn.parentElement = container;
+
+  const previousDocument = global.document;
+  const previousStyle = global.getComputedStyle;
+  const previousLocation = global.location;
+  const previousFetch = global.fetch;
+  const previousWindow = global.window;
+
+  // The archive button exists ONLY while the page is scrolled to the top, the
+  // way a virtualized turn's button does. `scanTurns` restores the original
+  // position in its `finally`, so after the walk it is gone and a post-scan read
+  // cannot find it. Tied to the ACTUAL scroll position rather than a flag that
+  // only ever turns on: a latch that never resets leaves the button visible
+  // forever, and then the fixture cannot express the failure at all — mutants
+  // deleting the collection and the hand-off both survived against exactly that.
+  const buttonMounted = () => container.scrollTop <= 1;
+
+  // Count the trips back to the top. The scan makes one; the retired button
+  // traversal made a second. Both routes are watched — the scan goes through
+  // scrollTo, the traversal assigns scrollTop directly.
+  let returnsToTop = 0;
+  let scrollTopValue = container.scrollTop;
+  let wasAtTop = scrollTopValue <= 1;
+  Object.defineProperty(container, 'scrollTop', {
+    get() { return scrollTopValue; },
+    set(value) {
+      scrollTopValue = value;
+      const atTop = value <= 1;
+      if (atTop && !wasAtTop) returnsToTop += 1;
+      wasAtTop = atTop;
+    },
+  });
+  const archiveButton = downloadButton('Скачать готовый Canon Consilium Prompt Bundle v1', {
+    onClick() {
+      global.window.HTMLAnchorElement.prototype.click.call({
+        getAttribute: () => 'https://chatgpt.com/backend-api/estuary/content' +
+          '?id=file_9&fn=canon-consilium-prompt-bundle-v1.zip&SIGNED&ts=1',
+        hasAttribute: (n) => n === 'download',
+      });
+    },
+  });
+  // What the landing position shows instead: unrelated suggestions. Two of them,
+  // as measured — enough to make a "found nothing here" guard stand down.
+  const suggestions = [
+    downloadButton('Make the opening more concrete'),
+    downloadButton('Clarify what Canon Arcana stores'),
+  ];
+
+  global.document = {
+    title: 'ChatGPT',
+    querySelector: (sel) => (sel === '[data-turn-id]' ? turn : null),
+    querySelectorAll(sel) {
+      if (/behavior-btn/.test(sel)) {
+        return buttonMounted() ? [archiveButton].concat(suggestions) : suggestions;
+      }
+      if (/open-file|artifact-row/.test(sel)) return [];
+      if (sel === '[data-message-id]') {
+        return [{ getAttribute: (n) => (n === 'data-message-id' ? 'msg-1' : null) }];
+      }
+      return container.querySelectorAll('[data-turn-id]');
+    },
+  };
+  global.getComputedStyle = (node) => ({ overflowY: node.overflowY || 'visible' });
+  global.location = { pathname: '/c/conv-88', href: 'https://chatgpt.com/' };
+  global.window = makeWin();
+  global.fetch = async (url) => {
+    const target = String(url);
+    if (target.indexOf('/api/auth/session') !== -1) {
+      return { ok: true, status: 200, json: async () => ({ accessToken: 'tok' }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ mapping: {} }) };
+  };
+
+  try {
+    const result = await parser.getConversationMarkdown({ downloadFiles: true });
+    assert.equal(result.ok, true, 'capture failed: ' + result.error);
+    assert.equal(archiveButton.clicked, 1,
+      'the button seen only during the scan must still be clicked');
+    assert.ok(
+      result.md.indexOf('canon-consilium-prompt-bundle-v1.zip') !== -1,
+      'the archive must reach the markdown the popup downloads from'
+    );
+    // Positive control: the suggestions are present throughout and must never be
+    // clicked, or the assertion above could be satisfied by clicking everything.
+    assert.equal(suggestions[0].clicked, 0);
+    assert.equal(suggestions[1].clicked, 0);
+    // ONE walk. The click assertion alone cannot see the defect: a second
+    // traversal scrolls back to the top, remounts the button and clicks it, so
+    // the archive still arrives — just after walking the whole conversation
+    // twice. Counting returns to the top is what tells the two apart.
+    assert.equal(returnsToTop, 1,
+      'the conversation must be traversed once, not once per concern');
+  } finally {
+    global.document = previousDocument;
+    global.getComputedStyle = previousStyle;
+    global.location = previousLocation;
+    if (previousFetch === undefined) delete global.fetch; else global.fetch = previousFetch;
+    if (previousWindow === undefined) delete global.window; else global.window = previousWindow;
+  }
+});
+
+test('a conversation with no download buttons is not walked a second time', async () => {
+  // The case that separates `[] ` from `undefined`, and the only one that can:
+  // when the walk finds buttons, both readings behave the same. Most
+  // conversations have none, so this is the common path — and treating its
+  // empty result as "nothing supplied" traverses the entire conversation again
+  // to re-discover that there is nothing there.
+  const turn = userTurn('user-1', 1, 'Просто поговорим');
+  const container = createVirtualizedFixture([[turn]], 100);
+  container.overflowY = 'auto';
+  turn.parentElement = container;
+
+  let returnsToTop = 0;
+  let scrollTopValue = container.scrollTop;
+  let wasAtTop = scrollTopValue <= 1;
+  Object.defineProperty(container, 'scrollTop', {
+    get() { return scrollTopValue; },
+    set(value) {
+      scrollTopValue = value;
+      const atTop = value <= 1;
+      if (atTop && !wasAtTop) returnsToTop += 1;
+      wasAtTop = atTop;
+    },
+  });
+
+  const previousDocument = global.document;
+  const previousStyle = global.getComputedStyle;
+  const previousLocation = global.location;
+  const previousFetch = global.fetch;
+  const previousWindow = global.window;
+
+  global.document = {
+    title: 'ChatGPT',
+    querySelector: (sel) => (sel === '[data-turn-id]' ? turn : null),
+    querySelectorAll(sel) {
+      if (/behavior-btn/.test(sel)) return [];
+      if (/open-file|artifact-row/.test(sel)) return [];
+      if (sel === '[data-message-id]') {
+        return [{ getAttribute: (n) => (n === 'data-message-id' ? 'msg-1' : null) }];
+      }
+      return container.querySelectorAll('[data-turn-id]');
+    },
+  };
+  global.getComputedStyle = (node) => ({ overflowY: node.overflowY || 'visible' });
+  global.location = { pathname: '/c/conv-89', href: 'https://chatgpt.com/' };
+  global.window = makeWin();
+  global.fetch = async (url) => {
+    const target = String(url);
+    if (target.indexOf('/api/auth/session') !== -1) {
+      return { ok: true, status: 200, json: async () => ({ accessToken: 'tok' }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ mapping: {} }) };
+  };
+
+  try {
+    const result = await parser.getConversationMarkdown({ downloadFiles: true });
+    assert.equal(result.ok, true, 'capture failed: ' + result.error);
+    assert.equal(returnsToTop, 1,
+      'an empty result from the walk is an answer, not a reason to walk again');
+  } finally {
+    global.document = previousDocument;
+    global.getComputedStyle = previousStyle;
+    global.location = previousLocation;
+    if (previousFetch === undefined) delete global.fetch; else global.fetch = previousFetch;
+    if (previousWindow === undefined) delete global.window; else global.window = previousWindow;
+  }
+});
+
 test('a plain copy makes no network request at all', async () => {
   // PRIVACY.md states that saving files is the ONLY mode in which the extension
   // makes network requests. Retrieving generated artefacts needs the conversation
@@ -2872,6 +3052,105 @@ function docWithButtons(buttons) {
     },
   };
 }
+
+test('buttons found on the scan are used instead of a second traversal', async () => {
+  // MEASURED on a live thread: the landing position held 2 behavior-btn nodes,
+  // both editing suggestions ("Make the opening more concrete"), neither a
+  // download. The old guard ran the button traversal only when it found ZERO
+  // buttons, so two-that-were-wrong stopped it, and all 5 real download buttons
+  // — the .zip and .diff among them — were never seen.
+  const win = makeWin();
+  const offScreen = downloadButton('Скачать готовый Canon Consilium Prompt Bundle v1', {
+    onClick() {
+      win.HTMLAnchorElement.prototype.click.call({
+        getAttribute: () => 'https://chatgpt.com/backend-api/estuary/content' +
+          '?id=file_1&fn=canon-consilium-prompt-bundle-v1.zip&SIGNED&ts=1',
+        hasAttribute: (n) => n === 'download',
+      });
+    },
+  });
+  // The page as it stands when the scan is over: only the unrelated suggestions
+  // are mounted. A traversal-based search would see no download button here.
+  const doc = docWithButtons([
+    downloadButton('Make the opening more concrete'),
+    downloadButton('Clarify what Canon Arcana stores'),
+  ]);
+  let traversed = false;
+
+  const captured = await parser.collectButtonDownloads({
+    doc,
+    win,
+    buttons: [{ button: offScreen, label: 'Скачать готовый Canon Consilium Prompt Bundle v1', archive: false }],
+    scroller: { get scrollTop() { traversed = true; return 0; }, set scrollTop(_v) { traversed = true; } },
+    sleep: async () => {},
+    clickSettleMs: 10,
+    clickPollMs: 5,
+  });
+
+  assert.equal(offScreen.clicked, 1, 'the button the walk found must be clicked');
+  assert.equal(captured.length, 1);
+  assert.equal(traversed, false, 'a second traversal must not run when the walk supplied buttons');
+});
+
+test('an empty button list from the scan is an answer, not a missing argument', async () => {
+  // `opts.buttons || …` treats [] as absent and re-traverses the whole
+  // conversation to reach the same result. The walk already looked.
+  const doc = docWithButtons([downloadButton('Скачать архив late.zip')]);
+  let traversed = false;
+
+  const captured = await parser.collectButtonDownloads({
+    doc,
+    win: makeWin(),
+    buttons: [],
+    scroller: { get scrollTop() { traversed = true; return 0; }, set scrollTop(_v) { traversed = true; } },
+    sleep: async () => {},
+    clickSettleMs: 10,
+    clickPollMs: 5,
+  });
+
+  assert.deepEqual(captured, []);
+  assert.equal(traversed, false);
+});
+
+test('a scan-collected button whose file the panel resolved is not clicked', async () => {
+  // The exclusion moved later — collection happens during the walk, the panel's
+  // names are only complete after it — but it must still happen, or clicking a
+  // .md the panel already listed opens the Library viewer over the panel. That
+  // regression cut an export from four files to one.
+  const kept = { button: downloadButton('Скачать архив bundle.zip'), label: 'Скачать архив bundle.zip', archive: true };
+  // The match is a substring of the extension-stripped panel name, so it fires
+  // when the label quotes the file name. It does NOT normalise separators: a
+  // label saying "Скачать полное ТЗ Canon Arcana v0.3" does not match the panel
+  // row "Canon_Arcana_Consilium_Context_Selection_TZ_v0.3.md", and never has —
+  // underscores against spaces, plus extra words in the middle. That button is
+  // still clicked. The cost is one viewer dismissal, which the click path
+  // already handles, so it is recorded here rather than tightened blind.
+  const dropped = {
+    button: downloadButton('Скачать Canon_Arcana_v0.3_SHA256SUMS'),
+    label: 'Скачать Canon_Arcana_v0.3_SHA256SUMS',
+    archive: false,
+  };
+
+  const out = parser.filterButtonsAgainstPanel([dropped, kept], [
+    'Canon_Arcana_v0.3_SHA256SUMS.txt',
+  ]);
+
+  assert.deepEqual(out.map((e) => e.label), ['Скачать архив bundle.zip']);
+  // Positive control: without the panel name the same button survives, so the
+  // assertion above is testing the exclusion and not a broken fixture.
+  assert.equal(parser.filterButtonsAgainstPanel([dropped, kept], []).length, 2);
+});
+
+test('scan-collected buttons keep archives first', async () => {
+  // Ordering is not decoration: a viewer opening over the panel costs the files
+  // behind it, so the ones obtainable ONLY by clicking go first.
+  const out = parser.filterButtonsAgainstPanel([
+    { button: downloadButton('Скачать отчёт'), label: 'Скачать отчёт', archive: false },
+    { button: downloadButton('Скачать архив'), label: 'Скачать архив', archive: true },
+  ], []);
+
+  assert.deepEqual(out.map((e) => e.archive), [true, false]);
+});
 
 test('a file offered only as a button is clicked and its signed URL captured', async () => {
   // The exact failure the user hit four exports in a row: the archive exists,

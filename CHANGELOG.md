@@ -5,6 +5,42 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.6] — 2026-09-13
+
+### Changed
+
+- **One walk instead of two.** The scan already traverses the whole
+  conversation; the download buttons are now collected on that same walk,
+  alongside the turns and the artefact rows, instead of by a second traversal
+  afterwards. A button found while scrolled away stays clickable — the click
+  path calls `scrollIntoView` on it first — so the second pass bought nothing.
+  It remains only as a fallback for callers that did not walk.
+
+### Fixed
+
+- **Files offered in the first reply were never fetched.** The second traversal
+  ran only when the post-scan page showed ZERO download buttons, and "found
+  nothing here" is not the same question as "found the right thing". Measured on
+  a live thread: the landing position held 2 `behavior-btn` nodes, both editing
+  suggestions ("Make the opening more concrete", "Clarify what Canon Arcana
+  stores"), neither a download. Two was not zero, so the traversal never ran —
+  and all 5 real download buttons, including the `.zip` and the `.diff`, were
+  never seen. Collected during the walk there is no guard left to get wrong.
+
+- **An empty list of buttons was read as "no list given".** `opts.buttons || …`
+  treats `[]` as absent, so a walk that legitimately found nothing would trigger
+  a full second traversal to reach the same answer.
+
+### Known limit
+
+- The panel-exclusion that keeps an already-resolved file from being clicked
+  matches the label against the panel's file name as a substring, and does not
+  normalise separators: a button labelled "Скачать полное ТЗ Canon Arcana v0.3"
+  does not match the row `Canon_Arcana_Consilium_Context_Selection_TZ_v0.3.md`,
+  so it is still clicked. That has always been true. The cost is one viewer
+  dismissal, which the click path already handles; it is recorded rather than
+  tightened without a measurement to aim at.
+
 ## [1.5.5] — 2026-09-13
 
 ### Fixed

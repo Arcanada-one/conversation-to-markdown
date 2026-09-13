@@ -1812,3 +1812,47 @@ overwrote the true cause in the artifact the user reads.
 The fixture earns its keep by prepending history on every jump, exactly as the
 live page does; a positive control asserts that one jump genuinely fails on it,
 so the arrival assertion is not vacuous.
+
+## 1.5.6 — one walk, and two mutants that survived the first attempt
+
+The defect: the button traversal ran only when the post-scan page showed ZERO
+download buttons. Measured on a live thread, the landing position held **2**
+`behavior-btn` nodes — both editing suggestions ("Make the opening more
+concrete", "Clarify what Canon Arcana stores"), neither a download. Two is not
+zero, so the traversal never ran and all **5** real download buttons, including
+the `.zip` and the `.diff`, were never seen.
+
+"Found something here" and "found the right thing" are different questions. The
+guard answered the first and decided the second.
+
+Buttons are now collected on the scan's own walk, alongside the turns and the
+artefact rows. There is no second pass and therefore no guard left to get wrong.
+
+| # | Mutation | First attempt | After |
+|---|----------|---------------|-------|
+| N1 | do not collect buttons during the scan | killed, 1 | killed, 2 |
+| N2 | do not pass the collected buttons on | **SURVIVED** | killed, 1 |
+| N3 | read an empty supplied list as "none supplied" | **SURVIVED** | killed, 1 |
+| N4 | drop the panel exclusion | killed, 1 | — |
+| N5 | stop ordering archives first | killed, 1 | — |
+
+### Why N2 and N3 survived
+
+Both are wiring, and the suite drove `collectButtonDownloads` directly with a
+hand-supplied list — the "helper is tested, its use is not" trap, and the wiring
+is precisely what was broken in production.
+
+The first repair was itself unfalsifiable: its fixture mounted the button behind
+a flag that was set to `true` and never reset, so the button stayed visible for
+the whole run and a post-scan read could find it too. **A latch that never
+resets cannot express the failure.** Tying visibility to the actual
+`scrollTop` fixed that.
+
+That still left N2 alive, because the fallback traversal scrolls back to the top,
+remounts the button and clicks it — the archive arrives either way, just after
+walking the conversation twice. Only counting the returns to the top separates
+one walk from two.
+
+N3 needed a fixture of its own: `[]` and `undefined` behave identically whenever
+the walk finds something, so the case that tells them apart is a conversation
+with **no** buttons at all — which is most conversations.

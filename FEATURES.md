@@ -151,6 +151,37 @@ of the file, and the export must carry no partial notice when it is. *(The
 simulated-delay measurements are fixture-only; the live check is the throttled
 export.)*
 
+**The marker is on the container, not on the turn.** That fact is what makes the
+paragraph above work, and getting it wrong is how 1.5.7 shipped exports starting
+82% into the conversation. The page nests the marked turn:
+`<div data-turn-id-container="paginated-root:…">` wrapping
+`<section data-turn-id="…" data-turn-id-container="…">` — the section repeats
+its OWN id in that attribute, so reading it off the turn never yields the
+marker and the check silently never fires. **Verify against the live DOM when
+ChatGPT changes its markup**, not against a fixture: open a long conversation,
+scroll to the very first turn, and confirm in DevTools that walking up from the
+first `[data-turn-id]` reaches an element whose `data-turn-id-container` starts
+with `paginated-root`. A fixture built to the wrong shape reports success —
+that is exactly what happened here.
+
+**The climb always returns.** A page that keeps looking like it is making
+progress — a first turn id that changes every round while the start marker never
+matches — used to leave the climb with no exit at all, holding the tab open with
+no export and no error. A 10-minute ceiling now ends it, checked after every
+other condition so a climb that would finish always does. The limit is in time,
+not in rounds, because rounds cap the conversation's length: 3000 turns still
+arrive in full. Verify that a normal long export is unaffected; the pathological
+page is *(fixture-only)*, since reproducing it live means waiting for ChatGPT to
+ship a re-rendering bug.
+
+**A hole is announced even when the cause is unknown.** A climb that never
+reached the marker produces a partial notice, and the only exemption is a page
+that publishes no marker anywhere — because there, waiting could not help and a
+notice on every export would make a true warning meaningless. Verify by
+interrupting a long export before it reaches the top: the file must say it is
+partial. The failure this prevents is the worse half of the 1.5.7 defect — the
+truncation was silent, so there was nothing to tell the user to re-run.
+
 **Markdown fidelity.** Paragraphs, headings, lists, blockquotes, links, code,
 tables and visible generated images survive. Multiple segments of one turn are
 combined rather than only the first paragraph.
@@ -375,7 +406,7 @@ match the CHANGELOG's top entry, and users must never see a gap. The last entry
 below is the version being shipped; a test checks this line against the CHANGELOG
 so a release cannot be added without revisiting this file.
 
-Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7
+Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8
 
 **Changelog coupling.** A version bump with no dated CHANGELOG entry fails the
 build, because releases 1.1.6 and 1.1.7 reached the store leaving no record of

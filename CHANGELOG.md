@@ -5,6 +5,71 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.8] — 2026-09-14
+
+### Fixed
+
+- **The start-of-conversation check read the marker off the wrong element, and
+  1.5.7 shipped it silently truncating exports.** The first export after 1.5.7
+  began 82% into its conversation, mid-sentence, with no partial notice at all —
+  worse than the defect 1.5.7 set out to fix.
+
+  Two mistakes, compounding. The page marks the root of pagination on a
+  CONTAINER, not on the turn:
+
+  ```html
+  <div data-turn-id-container="paginated-root:<conversation id>">
+    <section data-turn-id="bbb21ebf-…" data-turn-id-container="bbb21ebf-…">
+  ```
+
+  Reading that attribute off the `[data-turn-id]` element returns the section's
+  OWN id, never the marker, so the new arrival check could not return true on
+  any real page and every climb fell through to the timing guess it was written
+  to replace. And the same change had relaxed the partial-export notice to any
+  quiet climb — a condition that was now always met — so the truncation came out
+  unannounced. Removing the warning without fixing the cause is the worse half:
+  a user cannot even know to re-run.
+
+  The marker is now found by walking up the turn's ancestors, and by matching
+  the document's marker container against the first mounted turn. The relaxation
+  is narrowed to pages that publish no marker AT ALL; a page that has one and was
+  not reached is a truncated export and says so.
+
+  | fixture (real markup shape) | result |
+  |---|---|
+  | already at the start | confirmed in 1 round |
+  | long climb, history still arriving | confirmed after 26 rounds |
+  | marker present, climb never reached it | flagged partial |
+
+- **The simulator had been built to the same wrong assumption, so it validated
+  the broken code.** Its fixture put the marker on the turn — my belief about
+  the page, not the page — and reported a clean climb throughout. Rebuilt to the
+  measured shape, it separates the two: the reconstructed 1.5.7 code reports
+  `reachedTop: false` on every run, the fix reports `true` with zero turns lost
+  at fetch delays up to 4 s and thread lengths up to 3000 turns.
+
+- **The climb could run forever, holding the tab open with no export and no
+  error.** Removing the fixed round ceiling in 1.5.7 left the loop with no exit
+  for a page that keeps LOOKING like progress: a first turn id that changes
+  every round resets the patience budget indefinitely while the marker never
+  matches, and a re-rendering list produces exactly that. Found by mutation
+  testing — the mutant did not terminate — and reproduced against the unmutated
+  code, so it is a real defect rather than an artefact.
+
+  The ceiling is back, but measured in TIME (10 minutes) rather than in rounds,
+  because rounds cap the conversation's length and seconds do not: the 3000-turn
+  simulator run still completes in 1000 rounds with zero turns lost. It is
+  checked last, so a climb that would finish always does, and a climb it stops
+  reports a partial export rather than silence.
+
+- **Five ways to break the marker check went undetected by the test suite.**
+  Mutation testing found every fixture satisfied both recognition paths at once,
+  so disabling either stayed green — including the exact defect that shipped.
+  Five tests added, each leaving one path able to answer: the ancestor walk, the
+  marker-container match, node identity for an attribute-less turn, two
+  different id-less turns not being called the same turn, and asking the
+  DOCUMENT rather than the first turn whether the page publishes a marker.
+
 ## [1.5.7] — 2026-09-14
 
 ### Fixed

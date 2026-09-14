@@ -76,24 +76,27 @@ function createVirtualizedFixture(pages, originalScrollTop) {
       );
       return pages[Math.max(0, pageIndex)];
     },
-    // The page's own start marker, which the climb now waits for. At position 0
-    // the first page is mounted, so its first turn IS the root of pagination.
-    // Without this the climb cannot confirm arrival on any of these fixtures and
-    // spends its whole no-progress budget before every scan — measured at 16s
-    // per test across the suite.
+    // The page's own start marker, which the climb waits for. On the live site
+    // it lives on a CONTAINER around the turn, not on the turn itself, so it is
+    // answered here as its own element rather than by decorating a turn — the
+    // production check walks up from the turn and queries the document, and a
+    // fixture that cannot tell the two selectors apart cannot exercise either.
     querySelector(selector) {
-      const list = this.querySelectorAll(selector);
-      const node = list && list.length ? list[0] : null;
-      if (!node) return null;
+      const wantsMarker = String(selector).indexOf('paginated-root') !== -1;
       const atStart = this.scrollTop <= 1;
-      return {
-        getAttribute(name) {
-          if (name === 'data-turn-id-container') {
-            return atStart ? 'paginated-root:conv-fixture' : 'container-mid';
-          }
-          return node.getAttribute ? node.getAttribute(name) : null;
-        },
-      };
+      if (wantsMarker) {
+        // The marker element EXISTS in the page whether or not the climb has
+        // reached it — that is what distinguishes "not there yet" from "this
+        // layout has no marker". It contains the first turn only at the start.
+        const first = pages[0] && pages[0][0];
+        return {
+          getAttribute: (name) => (name === 'data-turn-id-container'
+            ? 'paginated-root:conv-fixture' : null),
+          querySelector: () => (atStart && first ? first : null),
+        };
+      }
+      const list = this.querySelectorAll(selector);
+      return list && list.length ? list[0] : null;
     },
   };
   container.scrollCalls = calls;
@@ -511,7 +514,11 @@ test('a page that publishes no marker settles quickly instead of waiting it out'
   const turn = { getAttribute: (n) => (n === 'data-turn-id' ? 'turn-1' : null) };
   const container = {
     scrollTop: 0, scrollHeight: 5000, clientHeight: 900,
-    querySelector: () => turn, querySelectorAll: () => [turn],
+    // Answers only its OWN selector. A fixture that returns a node for every
+    // query says "the marker is here" to a check asking whether the page has
+    // one at all — which is how 20 tests went red on a correct change.
+    querySelector: (sel) => (String(sel).indexOf('paginated-root') !== -1 ? null : turn),
+    querySelectorAll: () => [turn],
   };
 
   const result = await parser.scrollToConversationStart(container, {
@@ -520,6 +527,7 @@ test('a page that publishes no marker settles quickly instead of waiting it out'
 
   assert.equal(result.reachedTop, false, 'no marker means arrival is unconfirmed');
   assert.equal(result.quietedWithoutMarker, true, 'but the old criterion was met');
+  assert.equal(result.markerAbsentFromPage, true, 'and the page has no marker at all');
   assert.ok(result.rounds <= 10,
     `a marker-less page must settle cheaply, took ${result.rounds} rounds`);
 
@@ -561,7 +569,7 @@ test('a quiet climb on a marker-less page is not reported as a partial export', 
     maxSteps: 5,
     scrollToStart: async () => ({
       reachedTop: false, confirmedByMarker: false,
-      quietedWithoutMarker: true, rounds: 7,
+      quietedWithoutMarker: true, markerAbsentFromPage: true, rounds: 7,
     }),
   });
   assert.notEqual(meta.partial, true, 'a quiet marker-less climb is not partial');
@@ -576,11 +584,408 @@ test('a quiet climb on a marker-less page is not reported as a partial export', 
     maxSteps: 5,
     scrollToStart: async () => ({
       reachedTop: false, confirmedByMarker: false,
-      quietedWithoutMarker: false, rounds: 40,
+      quietedWithoutMarker: false, markerAbsentFromPage: true, rounds: 40,
     }),
   });
   assert.equal(meta2.partial, true, 'a climb that never settled IS partial');
   assert.equal(meta2.reason, 'never reached the start');
+
+  // THE CASE THAT SHIPPED TRUNCATED AND SILENT: the page DOES publish a marker,
+  // the climb quieted down without reaching it. Exempting every quiet climb —
+  // rather than only the ones on a page with no marker at all — is what let an
+  // export missing 82% of its conversation come out with no notice.
+  const meta3 = {};
+  await parser.scanTurns(container, {
+    extractTurn: (t) => t,
+    settle: async () => {},
+    scanMeta: meta3,
+    maxSteps: 5,
+    scrollToStart: async () => ({
+      reachedTop: false, confirmedByMarker: false,
+      quietedWithoutMarker: true, markerAbsentFromPage: false, rounds: 41,
+    }),
+  });
+  assert.equal(meta3.partial, true,
+    'a page WITH a marker the climb never reached is a truncated export');
+  assert.equal(meta3.reason, 'never reached the start');
+});
+
+// The two tests below exist because mutation testing found them missing. The
+// marker is recognised through TWO independent paths — walking up the turn's
+// ancestors, and matching the document's marker container against the first
+// mounted turn — and every earlier fixture satisfied BOTH at once. Disabling
+// either path on its own therefore stayed green, while the shipped defect was
+// precisely "one path, and it was the wrong one". Each test below leaves
+// exactly one path able to answer.
+
+test('the marker is found on an ANCESTOR of the first turn', async () => {
+  // The live shape, measured 2026-09-14:
+  //   <div data-turn-id-container="paginated-root:<conversation id>">
+  //     <section data-turn-id="bbb21ebf-…" data-turn-id-container="bbb21ebf-…">
+  // Reading the attribute off the SECTION returns that section's own id, never
+  // the marker. That is why the first version of the check could not return
+  // true on any real page, and every export fell through to the timing guess.
+  const makeTurn = (id, withRoot) => {
+    const turn = {
+      getAttribute: (n) => (n === 'data-turn-id' ? id
+        : n === 'data-turn-id-container' ? id : null),
+      parentElement: withRoot ? {
+        getAttribute: (n) => (n === 'data-turn-id-container'
+          ? 'paginated-root:conv-x' : null),
+        parentElement: null,
+      } : null,
+    };
+    return turn;
+  };
+
+  let round = 0;
+  const container = {
+    scrollTop: 0, scrollHeight: 40000, clientHeight: 900,
+    first() { return makeTurn(round > 6 ? 'sec-first' : 'sec-mid', round > 6); },
+    // The document CANNOT answer the marker query, so the sibling-container
+    // path is unavailable and only the ancestor walk can confirm arrival.
+    querySelector(sel) {
+      return String(sel).indexOf('paginated-root') !== -1 ? null : container.first();
+    },
+    querySelectorAll() { return [container.first()]; },
+  };
+
+  const result = await parser.scrollToConversationStart(container, {
+    scrollTo: async () => { round += 1; }, sleep: async () => {},
+  });
+
+  assert.equal(result.reachedTop, true,
+    'a marker on the ancestor container confirms the start');
+  assert.equal(result.confirmedByMarker, true);
+
+  // Positive control: the same fixture WITHOUT the ancestor never confirms, so
+  // the assertion above is not satisfied by something else in the climb.
+  let r2 = 0;
+  const noAncestor = {
+    scrollTop: 0, scrollHeight: 40000, clientHeight: 900,
+    first() { return makeTurn(r2 > 6 ? 'sec-first' : 'sec-mid', false); },
+    querySelector(sel) {
+      return String(sel).indexOf('paginated-root') !== -1 ? null : noAncestor.first();
+    },
+    querySelectorAll() { return [noAncestor.first()]; },
+  };
+  const control = await parser.scrollToConversationStart(noAncestor, {
+    scrollTo: async () => { r2 += 1; }, sleep: async () => {},
+  });
+  assert.equal(control.reachedTop, false,
+    'without the ancestor there is nothing to confirm arrival');
+});
+
+test('the marker container is matched against the first mounted turn', async () => {
+  // The second shape: the marker sits on a container the turn is not a DOM
+  // ancestor-chain member of (a fixture cannot always model parentElement, and
+  // a re-render can detach it). Arrival is then proven by the turn INSIDE the
+  // marker container being the first mounted turn — never by the container
+  // merely existing, which it does even at the bottom of the thread.
+  let round = 0;
+  const firstId = () => (round > 6 ? 'sec-first' : 'sec-mid');
+  // No parentElement at all: the ancestor walk cannot answer here.
+  const turn = () => ({
+    getAttribute: (n) => (n === 'data-turn-id' ? firstId()
+      : n === 'data-turn-id-container' ? firstId() : null),
+  });
+  const markerContainer = {
+    getAttribute: (n) => (n === 'data-turn-id-container'
+      ? 'paginated-root:conv-y' : null),
+    // Holds the conversation's genuinely first turn, which is only MOUNTED
+    // once the climb has pulled the history back that far.
+    querySelector: () => (round > 6 ? turn() : null),
+  };
+  const container = {
+    scrollTop: 0, scrollHeight: 40000, clientHeight: 900,
+    querySelector(sel) {
+      return String(sel).indexOf('paginated-root') !== -1 ? markerContainer : turn();
+    },
+    querySelectorAll() { return [turn()]; },
+  };
+
+  const result = await parser.scrollToConversationStart(container, {
+    scrollTo: async () => { round += 1; }, sleep: async () => {},
+  });
+
+  assert.equal(result.reachedTop, true,
+    'the first mounted turn being the marked one confirms the start');
+
+  // Negative control, and it is the one that matters: the marker container is
+  // present from the very bottom of the thread (measured: present with 5 of
+  // 142 turns mounted). Its EXISTENCE must never be read as arrival.
+  let r2 = 0;
+  const neverArrives = {
+    scrollTop: 0, scrollHeight: 40000, clientHeight: 900,
+    querySelector(sel) {
+      return String(sel).indexOf('paginated-root') !== -1
+        ? { getAttribute: () => 'paginated-root:conv-y', querySelector: () => null }
+        : { getAttribute: (n) => (n === 'data-turn-id' ? 'sec-mid' : 'sec-mid') };
+    },
+    querySelectorAll() {
+      return [{ getAttribute: (n) => (n === 'data-turn-id' ? 'sec-mid' : 'sec-mid') }];
+    },
+  };
+  const control = await parser.scrollToConversationStart(neverArrives, {
+    scrollTo: async () => { r2 += 1; }, sleep: async () => {},
+  });
+  assert.equal(control.reachedTop, false,
+    'a marker container that holds no mounted turn is not the beginning');
+  assert.equal(control.markerAbsentFromPage, false,
+    'and the page DOES publish a marker, so a partial export must be flagged');
+});
+
+test('the same NODE is arrival even when it carries no id', async () => {
+  // Node identity is checked BEFORE the ids, and it has to be: a turn stripped
+  // of its attributes (a re-render mid-flight, an unexpected markup change) is
+  // still unambiguously the turn inside the marker container when it is the
+  // very same object. Deleting the identity check left a fixture like this one
+  // silently unconfirmed while every other test stayed green.
+  let round = 0;
+  const theTurn = { getAttribute: () => null };      // ONE stable node, no id
+  const someOtherTurn = { getAttribute: () => null };
+  const markerContainer = {
+    getAttribute: (n) => (n === 'data-turn-id-container' ? 'paginated-root:z' : null),
+    querySelector: () => (round > 6 ? theTurn : someOtherTurn),
+  };
+  const container = {
+    scrollTop: 0, scrollHeight: 40000, clientHeight: 900,
+    querySelector(sel) {
+      return String(sel).indexOf('paginated-root') !== -1 ? markerContainer : theTurn;
+    },
+    querySelectorAll() { return [theTurn]; },
+  };
+
+  const result = await parser.scrollToConversationStart(container, {
+    scrollTo: async () => { round += 1; }, sleep: async () => {},
+  });
+  assert.equal(result.reachedTop, true,
+    'the identical node inside the marker is the beginning, id or no id');
+});
+
+test('two different id-less turns are never called the same turn', async () => {
+  // The mirror of the test above, and the reason the id comparison is guarded
+  // by `!!a`. Two DIFFERENT nodes that both lack the attribute compare as
+  // `null === null` — which would declare arrival at a marker container holding
+  // something else entirely. A wrong "we are at the start" silently truncates.
+  const firstTurn = { getAttribute: () => null };
+  const insideMarker = { getAttribute: () => null };   // different object
+  const markerContainer = {
+    getAttribute: (n) => (n === 'data-turn-id-container' ? 'paginated-root:q' : null),
+    querySelector: () => insideMarker,
+  };
+  const container = {
+    scrollTop: 0, scrollHeight: 40000, clientHeight: 900,
+    querySelector(sel) {
+      return String(sel).indexOf('paginated-root') !== -1 ? markerContainer : firstTurn;
+    },
+    querySelectorAll() { return [firstTurn]; },
+  };
+
+  const result = await parser.scrollToConversationStart(container, {
+    scrollTo: async () => {}, sleep: async () => {},
+  });
+  assert.equal(result.reachedTop, false,
+    'a shared absence of ids is not evidence of being the same turn');
+});
+
+test('whether the page publishes a marker is asked of the DOCUMENT', async () => {
+  // `publishesMarker` decides how long to wait and whether a quiet climb may
+  // skip the partial notice. The marker CONTAINER exists in the document from
+  // the bottom of the thread onwards, while the first mounted turn carries no
+  // such attribute at all — so asking the turn answers "this layout has no
+  // marker", which both cuts the climb short and exempts it from the warning.
+  // That combination is exactly the shipped defect, from the other direction.
+  const plainTurn = { getAttribute: (n) => (n === 'data-turn-id' ? 't1' : null) };
+  const markerContainer = {
+    getAttribute: (n) => (n === 'data-turn-id-container' ? 'paginated-root:w' : null),
+    querySelector: () => null,      // the first turn is not mounted yet
+  };
+  const container = {
+    scrollTop: 0, scrollHeight: 40000, clientHeight: 900,
+    querySelector(sel) {
+      return String(sel).indexOf('paginated-root') !== -1 ? markerContainer : plainTurn;
+    },
+    querySelectorAll() { return [plainTurn]; },
+  };
+
+  const result = await parser.scrollToConversationStart(container, {
+    scrollTo: async () => {}, sleep: async () => {},
+  });
+  assert.equal(result.markerAbsentFromPage, false,
+    'the document publishes a marker even though the first turn does not');
+  assert.equal(result.reachedTop, false, 'and the climb never reached it');
+  // Measured: asking the turn instead collapses this climb from 41 rounds to 7,
+  // because a marker-less layout is given the cheap exit. The full patience is
+  // the observable difference, so assert it rather than the flag alone.
+  assert.ok(result.rounds > 10,
+    `a marked page gets the full patience, took ${result.rounds} rounds`);
+});
+
+test('a climb that can never finish still returns, and says it is partial', async () => {
+  // Found by mutation testing, and it is a real defect rather than an artefact
+  // of the mutant: removing the fixed round ceiling left the loop with no exit
+  // at all for a page that keeps LOOKING like progress. A first turn id that
+  // changes every round resets the patience budget forever while the marker
+  // never matches, so the climb runs until the tab is closed — no export, no
+  // error, nothing to re-run. A re-rendering list produces exactly this shape.
+  let n = 0;
+  let virtualNow = 0;
+  const turn = () => ({
+    getAttribute: (k) => (k === 'data-turn-id' ? 't' + n : null),
+    parentElement: null,
+  });
+  const otherTurn = { getAttribute: (k) => (k === 'data-turn-id' ? 'OTHER' : null) };
+  const markerContainer = {
+    getAttribute: (k) => (k === 'data-turn-id-container' ? 'paginated-root:z' : null),
+    querySelector: () => otherTurn,       // never the first mounted turn
+  };
+  const container = {
+    scrollTop: 0, scrollHeight: 40000, clientHeight: 900,
+    querySelector(sel) {
+      return String(sel).indexOf('paginated-root') !== -1 ? markerContainer : turn();
+    },
+    querySelectorAll() { return [turn()]; },
+  };
+
+  const result = await parser.scrollToConversationStart(container, {
+    scrollTo: async () => { n += 1; virtualNow += 400; },
+    sleep: async () => {},
+    now: () => virtualNow,
+  });
+
+  assert.equal(result.ranOutOfTime, true, 'the clock is what ended this climb');
+  assert.equal(result.reachedTop, false, 'and it never reached the start');
+  assert.equal(result.markerAbsentFromPage, false,
+    'a timed-out climb must never qualify for the marker-less exemption');
+
+  // The ceiling must be a TIME limit, not a length limit in disguise: the
+  // simulator reaches a 3000-turn conversation in 1000 rounds, so the budget
+  // has to allow well past that before it fires.
+  assert.ok(result.rounds > 1000,
+    `the backstop must not cap conversation length, fired at ${result.rounds}`);
+
+  // Positive control: a climb that WOULD finish is never cut off by the clock,
+  // because the ceiling is checked last.
+  let round = 0;
+  const marked = {
+    scrollTop: 0, scrollHeight: 40000, clientHeight: 900,
+    node: () => ({
+      getAttribute: (k) => (k === 'data-turn-id' ? 'the-first' : null),
+      parentElement: round > 3 ? {
+        getAttribute: (k) => (k === 'data-turn-id-container'
+          ? 'paginated-root:ok' : null),
+        parentElement: null,
+      } : null,
+    }),
+    querySelector(sel) {
+      return String(sel).indexOf('paginated-root') !== -1 ? null : marked.node();
+    },
+    querySelectorAll() { return [marked.node()]; },
+  };
+  let okNow = 0;
+  const ok = await parser.scrollToConversationStart(marked, {
+    // A realistic clock — one round costs about a settle — and a budget this
+    // climb fits inside. The ceiling exists for the loop that never ends, not
+    // for the one that takes a while, and this asserts it does not fire early.
+    scrollTo: async () => { round += 1; okNow += 400; },
+    sleep: async () => {},
+    now: () => okNow,
+    maxClimbMs: 600000,
+  });
+  assert.equal(ok.reachedTop, true, 'arrival is decided before the clock is');
+  assert.notEqual(ok.ranOutOfTime, true);
+});
+
+test('the clock is checked after arrival, never before it', async () => {
+  // The positive control above cannot see the ORDER of the two checks, because
+  // its clock never advances past the ceiling. Here the ceiling is already
+  // exceeded on the very first round AND the page is at its start: if the
+  // ceiling were tested first, a conversation that was fully captured would be
+  // reported as a truncated one — a false partial on complete data, which this
+  // repository treats as a real cost rather than a safe default.
+  const atStart = {
+    getAttribute: (k) => (k === 'data-turn-id' ? 'first' : null),
+    parentElement: {
+      getAttribute: (k) => (k === 'data-turn-id-container'
+        ? 'paginated-root:done' : null),
+      parentElement: null,
+    },
+  };
+  const container = {
+    scrollTop: 0, scrollHeight: 40000, clientHeight: 900,
+    querySelector(sel) {
+      return String(sel).indexOf('paginated-root') !== -1 ? null : atStart;
+    },
+    querySelectorAll() { return [atStart]; },
+  };
+
+  // The elapsed time is measured from a `startedAt` captured BEFORE the loop,
+  // so a constant clock always reads zero elapsed and proves nothing — the
+  // first version of this test asserted against a mutant that behaved
+  // identically to the real code. The clock has to ADVANCE past the budget
+  // during the very first round for the ordering to be observable at all.
+  let virtualNow = 0;
+  const result = await parser.scrollToConversationStart(container, {
+    scrollTo: async () => { virtualNow += 10000; },   // one round blows the budget
+    sleep: async () => {},
+    now: () => virtualNow,
+    maxClimbMs: 1000,
+  });
+
+  assert.equal(result.reachedTop, true,
+    'a conversation already at its start is complete, whatever the clock says');
+  assert.notEqual(result.ranOutOfTime, true,
+    'and it must not be reported as having run out of time');
+  assert.equal(result.rounds, 1, 'positive control: only one round ran');
+});
+
+test('a timed-out climb on a marker-less page is still a partial export', async () => {
+  // The marker-less exemption exists so a renamed attribute does not put a
+  // false warning on every export. It must NOT swallow a climb the clock cut
+  // short: there, turns really are missing. Both conditions hold at once here —
+  // no marker anywhere on the page, and a climb that kept producing new first
+  // turn ids until the ceiling fired — so this is the exact overlap.
+  let n = 0;
+  let virtualNow = 0;
+  const turn = () => ({
+    getAttribute: (k) => (k === 'data-turn-id' ? 't' + n : null),
+    parentElement: null,
+  });
+  const container = {
+    scrollTop: 0, scrollHeight: 40000, clientHeight: 900,
+    // Answers nothing for the marker: this layout has no such mechanism.
+    querySelector(sel) {
+      return String(sel).indexOf('paginated-root') !== -1 ? null : turn();
+    },
+    querySelectorAll() { return [turn()]; },
+  };
+
+  const start = await parser.scrollToConversationStart(container, {
+    scrollTo: async () => { n += 1; virtualNow += 400; },
+    sleep: async () => {},
+    now: () => virtualNow,
+  });
+  assert.equal(start.ranOutOfTime, true, 'positive control: the clock fired');
+  assert.equal(start.markerAbsentFromPage, false,
+    'a timed-out climb never claims the marker-less exemption');
+
+  // And the flag reaches the export, which is the part the user sees.
+  const meta = {};
+  const scanTarget = {
+    scrollTop: 0, clientHeight: 100, scrollHeight: 100, scrollTo() {},
+    querySelector: () => turn(),
+    querySelectorAll: () => [{ turnId: 't1', order: 1, role: 'user', markdown: 'hi' }],
+  };
+  await parser.scanTurns(scanTarget, {
+    extractTurn: (t) => t,
+    settle: async () => {},
+    scanMeta: meta,
+    maxSteps: 5,
+    scrollToStart: async () => start,
+  });
+  assert.equal(meta.partial, true, 'the export says it is partial');
+  assert.equal(meta.reason, 'never reached the start');
 });
 
 test('a slow history fetch is never mistaken for the end of the conversation', async () => {

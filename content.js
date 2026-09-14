@@ -1079,17 +1079,62 @@ async function scrollToConversationStart(container, options) {
   // conversation id. Note it is present in the DOM even while scrolled to the
   // bottom, so its EXISTENCE proves nothing — what proves arrival is that the
   // FIRST MOUNTED TURN is the one inside it.
+  //
+  // The attribute sits on an ANCESTOR of the turn, not on the turn itself.
+  // Measured from the live DOM (2026-09-14), the shape is:
+  //
+  //   <div data-turn-id-container="paginated-root:<conversation id>">
+  //     ...
+  //     <section data-turn-id="bbb21ebf-…" data-turn-id-container="bbb21ebf-…">
+  //
+  // Reading it off the `[data-turn-id]` element returns that element's OWN id,
+  // never the marker — so the first version of this check could not return true
+  // on any real page, and every climb silently fell through to the timing
+  // fallback it was written to replace. Worse, the same change had stopped that
+  // fallback from flagging a partial export, so a 82%-truncated conversation
+  // came out with no notice at all. Walk up instead.
+  const markerFromAncestors = function(node) {
+    let el = node;
+    for (let depth = 0; el && depth < 12; depth += 1) {
+      const value = el.getAttribute ? el.getAttribute('data-turn-id-container') : null;
+      if (typeof value === 'string' && value.indexOf('paginated-root') === 0) return value;
+      el = el.parentElement || null;
+    }
+    return null;
+  };
   const readsAtStart = opts.readsAtStart || function(target) {
     const first = readFirstTurn(target);
-    if (!first || !first.getAttribute) return false;
-    const marker = first.getAttribute('data-turn-id-container');
-    return typeof marker === 'string' && marker.indexOf('paginated-root') === 0;
+    if (!first) return false;
+    if (markerFromAncestors(first)) return true;
+    // The marker may also be a SIBLING container rather than an ancestor: the
+    // measured page carried it on a separate div placed before the first turn.
+    // Accept it only when the first mounted turn is genuinely the one it marks,
+    // which is what `closest`-style walking above cannot see.
+    if (!target.querySelector) return false;
+    const marked = target.querySelector('[data-turn-id-container^="paginated-root"]');
+    if (!marked) return false;
+    const inside = marked.querySelector ? marked.querySelector('[data-turn-id]') : null;
+    if (!inside) return false;
+    // Same NODE is the strongest answer and needs no attribute at all; falling
+    // back to the id covers a re-rendered turn. Comparing ids alone would call
+    // two attribute-less nodes equal on their shared `null`.
+    if (inside === first) return true;
+    const a = inside.getAttribute ? inside.getAttribute('data-turn-id') : null;
+    const b = first.getAttribute ? first.getAttribute('data-turn-id') : null;
+    return !!a && a === b;
   };
   // Whether this page uses the marker mechanism AT ALL. A turn that carries the
   // attribute with some other value is a page where the marker is meaningful and
   // simply has not been reached; a turn with no such attribute is a layout that
   // does not publish one, and no amount of climbing will change that.
   const publishesMarker = opts.publishesMarker || function(target) {
+    // Asked of the DOCUMENT, not of the first turn: the marker container exists
+    // in the page whether or not the climb has reached it, and that is exactly
+    // the question here — "does this layout have the mechanism at all".
+    if (target.querySelector &&
+        target.querySelector('[data-turn-id-container^="paginated-root"]')) {
+      return true;
+    }
     const first = readFirstTurn(target);
     if (!first || !first.getAttribute) return false;
     return typeof first.getAttribute('data-turn-id-container') === 'string';
@@ -1114,6 +1159,23 @@ async function scrollToConversationStart(container, options) {
   const noProgressRounds = opts.noProgressRounds === undefined ? 40 : opts.noProgressRounds;
   const noMarkerRounds = opts.noMarkerRounds === undefined ? 6 : opts.noMarkerRounds;
   const maxRounds = opts.maxRounds === undefined ? 0 : opts.maxRounds;
+  // An UNBOUNDED loop, which is what removing the fixed round ceiling created.
+  // Found by mutation testing: a page whose first turn id changes every round
+  // while the marker never matches resets the patience budget forever, and the
+  // climb never returns — the tab is held open with no export and no error.
+  // That is not a contrived shape; a re-rendering list produces it.
+  //
+  // So the ceiling comes back, but measured in TIME rather than in rounds,
+  // because rounds are a length limit on the conversation and seconds are not.
+  // The climb spends ~400 ms per round and needs about one round per three
+  // turns, so 10 minutes covers roughly 4500 turns — well past the longest
+  // thread measured here (1146) and past the 3000-turn simulator run, which
+  // completes in 1000 rounds. A climb still making progress at that point is
+  // pathological, and stopping it yields a FLAGGED partial export rather than
+  // a tab that never answers.
+  const maxClimbMs = opts.maxClimbMs === undefined ? 600000 : opts.maxClimbMs;
+  const clock = opts.now || (typeof Date !== 'undefined' ? Date.now : function() { return 0; });
+  const startedAt = clock();
 
   const countTurns = opts.countTurns || function(target) {
     const all = target.querySelectorAll ? target.querySelectorAll('[data-turn-id]') : [];
@@ -1128,6 +1190,7 @@ async function scrollToConversationStart(container, options) {
   let sinceProgress = 0;
   let bestFirstId = null;
   let seenTurnIds = 0;
+  let ranOutOfTime = false;
   for (let i = 0; maxRounds === 0 || i < maxRounds; i += 1) {
     rounds = i + 1;
     await scrollTo(container, 0, 'auto');
@@ -1160,6 +1223,12 @@ async function scrollToConversationStart(container, options) {
     // marker at all settles for far less: there is nothing to wait for.
     const budget = publishesMarker(container) ? noProgressRounds : noMarkerRounds;
     if (sinceProgress >= budget) break;
+    // The backstop. Deliberately checked LAST, so a climb that would finish on
+    // its own always does; this only catches the loop that never would.
+    if (maxClimbMs > 0 && clock() - startedAt >= maxClimbMs) {
+      ranOutOfTime = true;
+      break;
+    }
   }
 
   // Reported rather than thrown: a scan that starts below the beginning is still
@@ -1173,6 +1242,13 @@ async function scrollToConversationStart(container, options) {
     reachedTop: confirmed,
     confirmedByMarker: confirmed,
     quietedWithoutMarker: !confirmed && steady >= stableRounds,
+    // Whether the page has the marker mechanism at all. Only a page WITHOUT one
+    // may treat a quiet climb as good enough; a page that has one and did not
+    // reach it is a truncated export and must say so.
+    // A climb cut off by the clock is ALWAYS incomplete, whatever the page's
+    // markup does — so it must never qualify for the marker-less exemption.
+    markerAbsentFromPage: !ranOutOfTime && !publishesMarker(container),
+    ranOutOfTime: ranOutOfTime,
     rounds: rounds,
   };
 }
@@ -1512,7 +1588,15 @@ async function scanTurns(container, options) {
     //     export the moment ChatGPT renames an attribute — a false warning is
     //     a real cost, not a safe default;
     //   - still moving, or never at the top -> genuinely partial.
-    if (!start.reachedTop && !start.quietedWithoutMarker) {
+    //
+    // The exemption is ONLY for a page with no marker mechanism at all. Scoping
+    // it to `quietedWithoutMarker` alone was a defect of its own: a page that
+    // does publish a marker the climb failed to reach also quiets down, so an
+    // export missing 82% of its conversation came out unflagged. Silence about
+    // a real hole is far worse than a needless warning — the user cannot even
+    // know to re-run.
+    if (!start.reachedTop &&
+        !(start.quietedWithoutMarker && start.markerAbsentFromPage)) {
       markPartialScan(settings, 'never reached the start');
     }
     await settings.settle(container);

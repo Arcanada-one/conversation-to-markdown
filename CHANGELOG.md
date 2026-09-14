@@ -5,6 +5,104 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.7] — 2026-09-14
+
+### Fixed
+
+- **A slow connection silently truncated the start of a conversation.** The
+  climb to the beginning stopped on SILENCE — three rounds of 400ms with an
+  unchanged first turn at position zero. A history fetch slower than that looks
+  exactly like the end of the thread: the first turn id does not change because
+  the next page has not arrived, and scrollTop is already zero because ChatGPT
+  holds the viewport still while prepending. Both arrival conditions were
+  satisfied by a page that was merely waiting for the network. A real export
+  lost 299 lines — 11% of the conversation, its opening question included — and
+  carried no partial notice.
+
+  Measured by running the real `scrollToConversationStart` against a simulated
+  virtualized page, so the delay is exact rather than incidental:
+
+  | history fetch delay | turns lost, silently |
+  |---|---|
+  | 1200 ms | 0 |
+  | 1300 ms | 12 |
+  | 1700 ms | 132 of 142 |
+
+  The threshold is this function's own arithmetic: `stableRounds(3) x
+  settleMs(400) = 1200 ms`. Arrival is now a POSITIVE FACT — the first mounted
+  turn sits in the container the page marks `paginated-root:<conversation id>`.
+  Absence of that fact means keep climbing, however long the silence lasts,
+  which is exactly what a slow link needs. Zero turns lost at every delay
+  measured, up to 8 seconds per fetch.
+
+- **The round ceiling was a length limit on the conversation in disguise.** The
+  climb needs about one round per three turns (measured: 142 -> 45, 600 -> 200,
+  3000 -> 1000), so any fixed budget caps the thread it can reach. At the
+  retired ceiling a 1200-turn conversation stopped 290 turns short — and 1146
+  turns is a real, previously measured size. The budget now derives from the
+  work: a climb ends when it stops producing history, not when a counter runs
+  out. 3000 turns arrive with zero loss.
+
+- **A page without the start marker cost 16.4 seconds of every export.** The
+  full patience budget was spent waiting for a marker that a layout without one
+  will never show (measured: 41 rounds x 400 ms). "Not there yet" and "not a
+  thing here" are now distinguished by whether the attribute exists at all —
+  2.8 seconds instead of 16.4.
+
+- **A page without the marker no longer reports a false partial export.** Such a
+  page can still satisfy the old quiet-at-the-top criterion, which is all that
+  layout can offer; flagging it partial would stamp "your data is
+  untrustworthy" on every complete export the moment ChatGPT renames an
+  attribute. The three outcomes — confirmed by marker, quiet without a marker,
+  and genuinely still moving — are kept apart, because collapsing any two of
+  them has already shipped a defect in one direction or the other.
+
+- **Generated archives were never fetched, through five releases of fixing the
+  wrong layer.** A conversation's `.zip` and `.diff` were named in the export
+  and never downloaded. Every reader looked somewhere the paths are not:
+
+  | reader | looked in | found |
+  |---|---|---|
+  | attachment chips | the DOM | nothing — the buttons carry no `href` |
+  | `sandboxFilesFromMarkdown` | the exported markdown | nothing — **zero** `/mnt/data` occurrences in the file |
+  | artefact panel | the panel rows | only the `.md`/`.txt` siblings — a `.zip` has no viewer, so it gets no row |
+  | `fetchConversationArtifacts` | `metadata.attachments`, `part.asset_pointer` | nothing — interpreter output is neither |
+
+  The paths were in the API response the extension **already downloads on every
+  export**, written in the message text as bare paths, and that text was never
+  read. Measured on the failing conversation: all six generated files appear
+  there, and all six resolve through the endpoint the panel files already use.
+
+  Two separate reasons the old code could not see them, both fixed:
+  the paths are **bare** (`/mnt/data/x.zip`), while the pattern required the
+  `sandbox:` scheme; and they live in messages — including the `tool` role —
+  that never reach the markdown, so no pattern applied to the exported text
+  could have matched regardless of how it was written.
+
+  Files now arrive without a click. Clicking remains as a fallback, and is
+  skipped for anything already resolved.
+
+- **The same archive was about to be downloaded twice.** The exclusion that
+  stops a resolved file from being clicked compared the label to the file name
+  by substring, and the two spell the same name differently: the file is
+  `canon-consilium-prompt-bundle-v1.zip`, the button says "Скачать готовый Canon
+  Consilium Prompt Bundle v1" — hyphens against spaces, so the match failed.
+  Both sides are now folded to a common form before comparing. Unfixed, the new
+  API path would have fetched the bytes AND clicked the button, re-opening the
+  viewer-over-panel regression the exclusion exists to prevent.
+
+### Notes
+
+- A path stated by the **user** is not fetched: it is a request, not a produced
+  file, and asking the backend for one costs a request per mention to be told
+  there is no such file. Covered by a test with a positive control — the same
+  sentence from the assistant IS collected, so the empty result proves the role
+  check rather than a pattern that matches nothing.
+
+- Success is the presence of a `download_url`, **never** the HTTP status.
+  Measured: a path for a file that does not exist answers `200` with no link.
+  A status check would have reported success for any nonsense path.
+
 ## [1.5.6] — 2026-09-13
 
 ### Changed

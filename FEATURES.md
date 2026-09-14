@@ -96,10 +96,22 @@ conversation. Verify that a normal complete export is **not** flagged — a fals
 "partial" is worse than none.
 
 **Files offered as links in the answer.** ChatGPT often gives a generated file
-as a plain link in its reply rather than as an artefact-panel row — this is the
-only way a `.zip` arrives, since the panel lists what its viewer can open.
-Verify on a conversation whose answer links a generated archive: the file must
-land in the folder, not merely be named in the `.md`.
+as a plain link in its reply rather than as an artefact-panel row, since the
+panel lists only what its viewer can open. Verify on a conversation whose answer
+links a generated archive: the file must land in the folder, not merely be named
+in the `.md`.
+
+**Files the answer only mentions by path.** An archive can reach the reader with
+no link, no panel row and no attachment — named in the conversation only as
+`/mnt/data/name.zip`, sometimes in a `tool` message the export never shows. The
+conversation API carries those paths and each one resolves to a real download,
+so the file arrives without any click. Verify on a conversation where ChatGPT
+built a `.zip` or a `.diff`: it must land in the folder alongside the `.md`
+documents, and exactly once — before 1.5.7 five releases of click-interception
+work never fetched it, because every reader searched text that does not contain
+the path. A file that cannot be resolved must still be NAMED in the export with
+a "Could not retrieve" note; silence there would present a partial export as a
+complete one.
 
 **No errors on the extension's own page.** The content script is injected both
 declaratively and by the popup, so it must tolerate running twice in one
@@ -120,13 +132,24 @@ the generated file attached to a dropped turn went with it.
 **A scroll to the top is not the top.** A conversation loads its history in
 chunks, so scrolling to position 0 lands mid-thread and the scan then walks
 DOWN from there — everything above is lost with no gap between bands to detect,
-because the hole is before the first one. The scan now climbs repeatedly and
-only begins when it is both at zero and the first turn has stopped changing;
-failing to arrive is reported as partial. Verify by exporting a long
+because the hole is before the first one. Verify by exporting a long
 conversation from the bottom: the first turn of the thread must be the first
 turn of the file. Measured before the fix on a live thread: the climb settled at
 2850 of 0 while the document shrank 6900 → 5750 mid-flight, and a 126KB
 conversation exported as 26KB carrying only the last turn's attachment.
+
+**Silence is not the beginning.** The climb stops on a fact, not a timeout: the
+first mounted turn must sit in the container ChatGPT marks
+`paginated-root:<conversation id>`. Until that is true it keeps climbing, for as
+long as the history keeps arriving. This is the slow-connection case, and it is
+the one that bites hardest: a fetch slower than the old patience window looked
+identical to the end of the thread — unchanged first turn, position already
+zero — so the export stopped there and said nothing. A real export lost 299
+lines (11%), its opening question included. Verify on a long conversation over a
+throttled connection: the first turn of the thread must still be the first turn
+of the file, and the export must carry no partial notice when it is. *(The
+simulated-delay measurements are fixture-only; the live check is the throttled
+export.)*
 
 **Markdown fidelity.** Paragraphs, headings, lists, blockquotes, links, code,
 tables and visible generated images survive. Multiple segments of one turn are
@@ -352,7 +375,7 @@ match the CHANGELOG's top entry, and users must never see a gap. The last entry
 below is the version being shipped; a test checks this line against the CHANGELOG
 so a release cannot be added without revisiting this file.
 
-Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6
+Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7
 
 **Changelog coupling.** A version bump with no dated CHANGELOG entry fails the
 build, because releases 1.1.6 and 1.1.7 reached the store leaving no record of

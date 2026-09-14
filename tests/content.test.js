@@ -76,6 +76,25 @@ function createVirtualizedFixture(pages, originalScrollTop) {
       );
       return pages[Math.max(0, pageIndex)];
     },
+    // The page's own start marker, which the climb now waits for. At position 0
+    // the first page is mounted, so its first turn IS the root of pagination.
+    // Without this the climb cannot confirm arrival on any of these fixtures and
+    // spends its whole no-progress budget before every scan — measured at 16s
+    // per test across the suite.
+    querySelector(selector) {
+      const list = this.querySelectorAll(selector);
+      const node = list && list.length ? list[0] : null;
+      if (!node) return null;
+      const atStart = this.scrollTop <= 1;
+      return {
+        getAttribute(name) {
+          if (name === 'data-turn-id-container') {
+            return atStart ? 'paginated-root:conv-fixture' : 'container-mid';
+          }
+          return node.getAttribute ? node.getAttribute(name) : null;
+        },
+      };
+    },
   };
   container.scrollCalls = calls;
   return container;
@@ -295,15 +314,34 @@ test('elapsed time alone never ends a healthy scan', async () => {
 function createPrependingConversation(options) {
   const opts = options || {};
   const chunks = opts.chunks === undefined ? 3 : opts.chunks;
+  // Whether the page ever exposes its own start marker. A fixture that cannot
+  // produce one cannot express arrival at all under the current criterion —
+  // which is how seven tests came to drive the silence fallback instead of the
+  // behaviour they were written for.
+  const marks = opts.marksStart !== false;
   let loaded = 0;
   const container = {
     scrollTop: 50000,
     scrollHeight: 6900,
     clientHeight: 900,
     firstTurnId: 'turn-latest',
-    querySelector() {
-      return { getAttribute: () => container.firstTurnId };
+    atStart: false,
+    firstTurnNode() {
+      return {
+        getAttribute(name) {
+          if (name === 'data-turn-id') return container.firstTurnId;
+          // The page marks the root of pagination only on the turn that really
+          // is the first one. Everything else carries its own id.
+          if (name === 'data-turn-id-container') {
+            return (marks && container.atStart)
+              ? 'paginated-root:conv-fixture' : container.firstTurnId;
+          }
+          return null;
+        },
+      };
     },
+    querySelector() { return container.firstTurnNode(); },
+    querySelectorAll() { return [container.firstTurnNode()]; },
   };
   container.jumpToTop = function() {
     if (loaded < chunks) {
@@ -316,6 +354,7 @@ function createPrependingConversation(options) {
       return;
     }
     container.scrollTop = 0;
+    container.atStart = true;
   };
   return container;
 }
@@ -341,28 +380,254 @@ test('the scan reaches the true beginning of a conversation that prepends histor
   assert.notEqual(single.scrollTop, 0);
 });
 
-test('arrival needs a steady first turn, not merely position zero', async () => {
+test('position zero while history is still arriving is not the beginning', async () => {
   // Position 0 on a thread still prepending history is not the beginning. This
-  // fixture parks at 0 on every jump while older turns keep arriving; accepting
-  // position alone would start the scan above nothing and lose the history.
+  // fixture parks at 0 on EVERY jump while older turns keep arriving, so a
+  // position check — and the old steady-first-turn check with it — would stop
+  // above nothing and lose the history.
   const container = createPrependingConversation({ chunks: 2, settlesAtZero: true });
-  const firstIds = [];
+  const seen = [];
 
   const result = await parser.scrollToConversationStart(container, {
     scrollTo: async (target) => { target.jumpToTop(); },
     sleep: async () => {},
     settleMs: 0,
-    readFirstTurnId: (target) => {
-      firstIds.push(target.firstTurnId);
-      return target.firstTurnId;
-    },
+    readFirstTurnId: (target) => { seen.push(target.firstTurnId); return target.firstTurnId; },
   });
 
   assert.equal(result.reachedTop, true);
-  // It kept going while the top was still changing rather than stopping at the
-  // first zero it saw.
-  assert.ok(firstIds.length > 3, 'expected more rounds than a position-only check would take');
-  assert.equal(firstIds[firstIds.length - 1], firstIds[firstIds.length - 2]);
+  assert.equal(result.confirmedByMarker, true, 'arrival must come from the page marker');
+  // Positive control: the fixture really does sit at zero before it is done, so
+  // the assertion above is not vacuous — a position-only check would have
+  // stopped on the very first round.
+  const early = createPrependingConversation({ chunks: 2, settlesAtZero: true });
+  early.jumpToTop();
+  assert.equal(early.scrollTop, 0, 'fixture parks at zero while still loading');
+  assert.equal(early.atStart, false, 'yet it is NOT at the start');
+});
+
+test('history still arriving keeps resetting the patience budget', async () => {
+  // The climb gives up only when it stops producing history. That reset is what
+  // separates "slow" from "finished", and without it the budget runs out while
+  // pages are still arriving: measured on the simulator, deleting the reset lost
+  // 434 turns of 600 at a 2s fetch delay. A SHORT conversation is unharmed,
+  // which is why this needs its own test — the slow-fetch test above stays green
+  // under that mutation.
+  //
+  // The fixture delivers one page per round, slower than the budget, forever
+  // until the start. Each page is progress; only a working reset survives it.
+  // The fixture mirrors what the virtualizer really does: the FIRST MOUNTED
+  // TURN changes only when a new page of history lands, and it takes several
+  // rounds of climbing to pull each one. In between, every observable is
+  // identical — same id, same count — which is exactly the state the budget is
+  // counting. Only resetting on the page that does land keeps the climb alive.
+  const roundsPerPage = 12;          // slower than nothing, faster than never
+  const pages = 8;                   // 96 rounds total, > twice the 40 budget
+  let round = 0;
+  const container = {
+    scrollTop: 9000, scrollHeight: 90000, clientHeight: 900, atStart: false,
+    pagesIn: 0,
+    node() {
+      return {
+        getAttribute: (n) => n === 'data-turn-id'
+          // Stays put between arrivals — this is the whole difficulty.
+          ? 'turn-page-' + container.pagesIn
+          : (container.atStart ? 'paginated-root:c' : 'mid'),
+      };
+    },
+    querySelector() { return container.node(); },
+    querySelectorAll() { return [container.node()]; },
+    climb() {
+      round += 1;
+      if (round % roundsPerPage === 0) {
+        container.pagesIn += 1;      // a page of history finally arrives
+        if (container.pagesIn >= pages) {
+          container.atStart = true;
+          container.scrollTop = 0;
+        }
+      }
+    },
+  };
+
+  const result = await parser.scrollToConversationStart(container, {
+    scrollTo: async (target) => { target.climb(); },
+    sleep: async () => {},
+    settleMs: 0,
+  });
+
+  assert.equal(result.reachedTop, true,
+    'the climb must not give up while history is still arriving');
+  assert.ok(result.rounds >= pages * roundsPerPage - roundsPerPage,
+    `expected a climb of ~${pages * roundsPerPage} rounds, took ${result.rounds}`);
+});
+
+test('a long conversation is not cut short by a fixed round ceiling', async () => {
+  // A constant ceiling is a length limit on the conversation wearing a disguise,
+  // and it survived the first round of mutation testing unnoticed: restoring
+  // `maxRounds = 40` left every test green while the simulator lost 36 turns.
+  //
+  // Measured on the simulator: the climb needs about one round per three turns
+  // (142 -> 45, 600 -> 200, 3000 -> 1000). So a thread long enough to exceed any
+  // fixed budget must still arrive. 1146 turns is a real size — this operator's
+  // own thread — and at the retired ceiling of 40 it would stop 290 turns short.
+  const pagesNeeded = 120;          // 3x the retired ceiling of 40
+  let page = 0;
+  const container = {
+    scrollTop: 5000, scrollHeight: 90000, clientHeight: 900, atStart: false,
+    node() {
+      return {
+        getAttribute: (n) => n === 'data-turn-id'
+          ? 'turn-' + page
+          : (container.atStart ? 'paginated-root:c' : 'mid-' + page),
+      };
+    },
+    querySelector() { return container.node(); },
+    querySelectorAll() { return [container.node()]; },
+    climb() {
+      page += 1;                     // each round really does pull more history
+      if (page >= pagesNeeded) { container.atStart = true; container.scrollTop = 0; }
+    },
+  };
+
+  const result = await parser.scrollToConversationStart(container, {
+    scrollTo: async (target) => { target.climb(); },
+    sleep: async () => {},
+    settleMs: 0,
+  });
+
+  assert.equal(result.reachedTop, true, 'a long climb must still reach the start');
+  assert.ok(result.rounds >= pagesNeeded,
+    `needed ${pagesNeeded} rounds of history, took ${result.rounds}`);
+  // Positive control: the fixture genuinely requires more rounds than the old
+  // ceiling allowed, so this is not vacuously true.
+  assert.ok(pagesNeeded > 40, 'fixture must exceed the retired ceiling to prove the point');
+});
+
+test('a page that publishes no marker settles quickly instead of waiting it out', async () => {
+  // Waiting the full patience budget for a marker that this layout will never
+  // show cost 16.4 seconds of EVERY export (measured: 41 rounds x 400ms). It is
+  // not a data defect, which is exactly why it survived the first mutation pass
+  // — no turns are lost, only the user's time.
+  const turn = { getAttribute: (n) => (n === 'data-turn-id' ? 'turn-1' : null) };
+  const container = {
+    scrollTop: 0, scrollHeight: 5000, clientHeight: 900,
+    querySelector: () => turn, querySelectorAll: () => [turn],
+  };
+
+  const result = await parser.scrollToConversationStart(container, {
+    scrollTo: async () => {}, sleep: async () => {},
+  });
+
+  assert.equal(result.reachedTop, false, 'no marker means arrival is unconfirmed');
+  assert.equal(result.quietedWithoutMarker, true, 'but the old criterion was met');
+  assert.ok(result.rounds <= 10,
+    `a marker-less page must settle cheaply, took ${result.rounds} rounds`);
+
+  // Positive control: a page that DOES publish the attribute still gets the full
+  // patience, so the cheap exit cannot swallow a slow-but-marked page.
+  let round = 0;
+  const marked = {
+    scrollTop: 0, scrollHeight: 5000, clientHeight: 900,
+    node: () => ({
+      getAttribute: (n) => n === 'data-turn-id' ? 'turn-1'
+        : (round > 20 ? 'paginated-root:c' : 'mid'),
+    }),
+    querySelector() { return marked.node(); },
+    querySelectorAll() { return [marked.node()]; },
+  };
+  const slow = await parser.scrollToConversationStart(marked, {
+    scrollTo: async () => { round += 1; }, sleep: async () => {},
+  });
+  assert.equal(slow.reachedTop, true, 'a marked page is waited for, not cut off');
+  assert.ok(slow.rounds > 20, 'and it took longer than the cheap exit allows');
+});
+
+test('a quiet climb on a marker-less page is not reported as a partial export', async () => {
+  // A false "partial" tells the user their good data is untrustworthy. If
+  // ChatGPT renames the attribute, EVERY export would carry that notice while
+  // being perfectly complete. The three outcomes stay distinct.
+  const turn = { getAttribute: (n) => (n === 'data-turn-id' ? 't1' : null) };
+  const container = {
+    scrollTop: 0, clientHeight: 100, scrollHeight: 100,
+    scrollTo() {}, querySelector: () => turn,
+    querySelectorAll: () => [{ turnId: 't1', order: 1, role: 'user', markdown: 'hi' }],
+  };
+  const meta = {};
+
+  await parser.scanTurns(container, {
+    extractTurn: (t) => t,
+    settle: async () => {},
+    scanMeta: meta,
+    maxSteps: 5,
+    scrollToStart: async () => ({
+      reachedTop: false, confirmedByMarker: false,
+      quietedWithoutMarker: true, rounds: 7,
+    }),
+  });
+  assert.notEqual(meta.partial, true, 'a quiet marker-less climb is not partial');
+
+  // Negative control: a climb that was still MOVING must still flag partial —
+  // the relaxation must not swallow the real failure it was carved out of.
+  const meta2 = {};
+  await parser.scanTurns(container, {
+    extractTurn: (t) => t,
+    settle: async () => {},
+    scanMeta: meta2,
+    maxSteps: 5,
+    scrollToStart: async () => ({
+      reachedTop: false, confirmedByMarker: false,
+      quietedWithoutMarker: false, rounds: 40,
+    }),
+  });
+  assert.equal(meta2.partial, true, 'a climb that never settled IS partial');
+  assert.equal(meta2.reason, 'never reached the start');
+});
+
+test('a slow history fetch is never mistaken for the end of the conversation', async () => {
+  // THE DEFECT, in the form it reached a user: 299 lines (11%) of a real
+  // conversation lost with no partial notice. Measured against a simulated
+  // virtualized page, the threshold was exact and was this function's own
+  // arithmetic — stableRounds(3) x settleMs(400) = 1200ms:
+  //
+  //     fetch delay 1200ms ->   0 turns lost
+  //     fetch delay 1300ms ->  12 turns lost
+  //     fetch delay 1700ms -> 132 of 142 lost
+  //
+  // Here the fixture stays SILENT for more rounds than the old criterion would
+  // wait, then finally delivers the rest of the history. Stopping during that
+  // silence is the defect; waiting through it is the fix.
+  const silentRounds = 12;      // 4x the old patience of 3 rounds
+  let round = 0;
+  const container = {
+    scrollTop: 0, scrollHeight: 40000, clientHeight: 900,
+    firstTurnId: 'turn-mid', atStart: false,
+    node() {
+      return {
+        getAttribute: (n) => n === 'data-turn-id'
+          ? container.firstTurnId
+          : (container.atStart ? 'paginated-root:c' : 'mid'),
+      };
+    },
+    querySelector() { return container.node(); },
+    querySelectorAll() { return [container.node()]; },
+    scrollTo() {
+      round += 1;
+      // Nothing at all changes while the fetch is in flight: same id, same
+      // height, already at zero. Every condition the old criterion checked is
+      // satisfied by a page that is merely waiting for the network.
+      if (round > silentRounds) { container.atStart = true; }
+    },
+  };
+
+  const result = await parser.scrollToConversationStart(container, {
+    scrollTo: async (target) => { target.scrollTo(); },
+    sleep: async () => {},
+    settleMs: 0,
+  });
+
+  assert.equal(result.reachedTop, true, 'the climb must wait out a slow fetch');
+  assert.ok(result.rounds > silentRounds,
+    `must keep climbing through ${silentRounds} silent rounds (took ${result.rounds})`);
 });
 
 test('a conversation that never reaches its start exports as partial', async () => {
@@ -1337,17 +1602,23 @@ test('a degraded re-mount never overwrites a good capture', async () => {
   // over a longer degraded one once we have real content.
   const good = 'The answer.';
   const degraded = 'Thinking… gathering sources… expanding citations…';
-  let call = 0;
+  let scanCall = 0;
   const container = {
     scrollTop: 0,
     clientHeight: 100,
     scrollHeight: 200,
     scrollTo(options) { this.scrollTop = Math.max(0, Math.min(options.top, 100)); },
     querySelectorAll() {
-      call += 1;
+      scanCall += 1;
       // First mount yields the real answer, later mounts yield longer chrome.
-      const markdown = call === 1 ? good : degraded;
+      const markdown = scanCall === 1 ? good : degraded;
       return [{ turnId: 'd1', order: 1, role: 'assistant', markdown }];
+    },
+    // The climb reads the page too, and counting ITS reads as mounts made this
+    // fixture hand the good capture to the climb instead of to the scan. The
+    // scan is what this test is about, so the climb is settled separately.
+    querySelector() {
+      return { getAttribute: () => 'paginated-root:conv-fixture' };
     },
   };
 
@@ -1356,6 +1627,7 @@ test('a degraded re-mount never overwrites a good capture', async () => {
     settle: async () => {},
     stablePasses: 2,
     maxSteps: 30,
+    scrollToStart: async () => ({ reachedTop: true, confirmedByMarker: true, rounds: 1 }),
   });
 
   assert.equal(turns.length, 1);
@@ -2010,6 +2282,113 @@ test('artefacts are enumerated from the conversation API, with message ids', asy
   assert.equal(asset.fileId, 'file_gen9', 'the file id is parsed out of the asset pointer');
 });
 
+/* ------------------------------------------------------------------------- *
+ * Files the API NAMES but never attaches.
+ *
+ * Measured on a production conversation (2026-09-13). Six generated files; the
+ * two archives among them survived six releases of click-interception work
+ * because every reader looked in the wrong place. Both are named in the API
+ * response as bare `/mnt/data/…` paths and resolve through the ordinary
+ * interpreter/download endpoint — no click, no main world, no prototype patch.
+ * ------------------------------------------------------------------------- */
+
+test('bare /mnt/data paths in message text are read as artefacts', async () => {
+  // Verbatim shapes from the measured response: the assistant states the path
+  // in prose, and a `tool` message — which NEVER reaches the markdown — states
+  // the others. Searching the exported file could not have found any of them.
+  const fetchImpl = stubFetch([
+    ['/api/auth/session', jsonOk({ accessToken: 'tok-123' })],
+    ['/backend-api/conversation/conv-1', jsonOk({
+      mapping: {
+        n1: { message: { id: 'msg-a', author: { role: 'assistant' }, metadata: {},
+          content: { parts: ['Готово: /mnt/data/canon-consilium-prompt-bundle-v1.zip — забирайте.'] } } },
+        n2: { message: { id: 'msg-tool', author: { role: 'tool' }, metadata: {},
+          content: { parts: ['wrote /mnt/data/Canon_Arcana_v0.2_to_v0.3.diff'] } } },
+      },
+    })],
+  ]);
+
+  const found = await parser.fetchConversationArtifacts('conv-1', { fetchImpl });
+  const paths = found.map((a) => a.sandboxPath).sort();
+  assert.deepEqual(paths, [
+    '/mnt/data/Canon_Arcana_v0.2_to_v0.3.diff',
+    '/mnt/data/canon-consilium-prompt-bundle-v1.zip',
+  ], 'both archives are found, and the tool message is read like any other');
+  const zip = found.find((a) => a.sandboxPath.endsWith('.zip'));
+  assert.equal(zip.kind, 'sandbox');
+  assert.equal(zip.name, 'canon-consilium-prompt-bundle-v1.zip');
+  assert.equal(zip.messageId, 'msg-a', 'the id travels with the path');
+});
+
+test('a path the USER typed is not fetched as an artefact', async () => {
+  // A path in the user's own message is a request, not a produced file. Asking
+  // the backend for it spends a request per mention to be told there is none.
+  const fetchImpl = stubFetch([
+    ['/api/auth/session', jsonOk({ accessToken: 'tok-123' })],
+    ['/backend-api/conversation/conv-1', jsonOk({
+      mapping: {
+        n1: { message: { id: 'msg-u', author: { role: 'user' }, metadata: {},
+          content: { parts: ['положи результат в /mnt/data/wanted.zip'] } } },
+      },
+    })],
+  ]);
+  assert.deepEqual(await parser.fetchConversationArtifacts('conv-1', { fetchImpl }), []);
+
+  // POSITIVE CONTROL: the identical text from the assistant IS collected, so the
+  // empty result above is the role check and not a pattern that matches nothing.
+  const fromAssistant = stubFetch([
+    ['/api/auth/session', jsonOk({ accessToken: 'tok-123' })],
+    ['/backend-api/conversation/conv-1', jsonOk({
+      mapping: {
+        n1: { message: { id: 'msg-a', author: { role: 'assistant' }, metadata: {},
+          content: { parts: ['положи результат в /mnt/data/wanted.zip'] } } },
+      },
+    })],
+  ]);
+  const found = await parser.fetchConversationArtifacts('conv-1', { fetchImpl: fromAssistant });
+  assert.equal(found.length, 1, 'the same sentence from the assistant IS an artefact');
+});
+
+test('sandbox paths are parsed in both the bare and the scheme-prefixed shape', () => {
+  const found = parser.sandboxPathsFromApiMessage({
+    content: { parts: [
+      'bare /mnt/data/a.zip and scheme sandbox:/mnt/data/b.diff here',
+      // Trailing punctuation is sentence punctuation, not part of the name.
+      'end of line /mnt/data/c.txt.',
+      // A Cyrillic label may follow with no separator at all.
+      '[Скачать](sandbox:/mnt/data/d.zip)',
+      // A bare directory names no file.
+      'see /mnt/data/ for details',
+    ] },
+  });
+  assert.deepEqual(found.map((f) => f.sandboxPath), [
+    '/mnt/data/a.zip', '/mnt/data/b.diff', '/mnt/data/c.txt', '/mnt/data/d.zip',
+  ]);
+  assert.deepEqual(found.map((f) => f.name), ['a.zip', 'b.diff', 'c.txt', 'd.zip']);
+});
+
+test('the same path stated twice yields one artefact', () => {
+  const found = parser.sandboxPathsFromApiMessage({
+    content: { parts: ['/mnt/data/x.zip', 'again: /mnt/data/x.zip'] },
+  });
+  assert.equal(found.length, 1);
+});
+
+test('a button is not clicked for a file the API already resolved', () => {
+  // The stem spells with hyphens what the label spells with spaces. Before the
+  // fold, indexOf() was -1 and the archive was fetched AND clicked: the same
+  // bytes twice, plus the viewer-over-panel regression this exclusion exists to
+  // prevent.
+  const buttons = [
+    { label: 'Скачать готовый Canon Consilium Prompt Bundle v1', archive: true },
+    { label: 'Скачать чужой архив', archive: true },
+  ];
+  const kept = parser.filterButtonsAgainstPanel(
+    buttons, ['canon-consilium-prompt-bundle-v1.zip']);
+  assert.deepEqual(kept.map((b) => b.label), ['Скачать чужой архив'],
+    'the resolved file is excluded, the unresolved one survives');
+});
+
 test('an unreadable API returns null, never an empty artefact list', async () => {
   // "No artefacts" and "could not tell" must not collapse into the same value:
   // a 401 that reads as an empty list turns a failed export into a clean one.
@@ -2176,6 +2555,69 @@ test('an artefact that cannot be resolved is disclosed, not dropped', async () =
   assert.ok(out.indexOf('Could not retrieve') !== -1, 'the failure must be visible');
   assert.ok(out.indexOf('conversation API was unreachable') !== -1,
     'an unreadable API must be distinguished from a failed single file');
+});
+
+test('an archive named only in the API is exported with no panel and no link', async () => {
+  // THE MEASURED CASE, end to end. The archive has:
+  //   no panel row      (a .zip has no viewer, so the panel never lists it)
+  //   no sandbox: link  (the markdown contains ZERO occurrences — measured)
+  //   no attachment     (it is interpreter output, not an upload)
+  // Its ONLY trace is the path in the API message text. Six releases of
+  // click-interception work missed it because nothing read that text.
+  const doc = { querySelectorAll() { return []; } };
+  const fetchImpl = stubFetch([
+    ['/interpreter/download', (url) => {
+      // The endpoint selects the file by sandbox_path, so the path must arrive.
+      assert.ok(url.indexOf(encodeURIComponent('/mnt/data/bundle-v1.zip')) !== -1,
+        'the sandbox path must be sent');
+      return { ok: true, status: 200, json: async () => ({
+        download_url: 'https://chatgpt.com/backend-api/estuary/content?id=file_z&fn=bundle-v1.zip',
+        file_name: 'bundle-v1.zip',
+      }) };
+    }],
+  ]);
+
+  const out = await parser.appendPanelArtifacts('# Chat\n\nbody with no link at all', {
+    doc,
+    conversationId: 'conv-1',
+    artifacts: [{
+      kind: 'sandbox', messageId: 'msg-a', name: 'bundle-v1.zip',
+      fileId: null, mimeType: null, size: null,
+      sandboxPath: '/mnt/data/bundle-v1.zip',
+    }],
+    clickDownloads: false,     // prove it needs no click whatsoever
+    fetchImpl,
+    token: 'tok',
+  });
+
+  assert.ok(out.indexOf('[bundle-v1.zip](https://chatgpt.com/backend-api/estuary/content') !== -1,
+    'the archive must reach the markdown as a downloadable link, without a click');
+});
+
+test('an API-named file that does not resolve is disclosed, never invented', async () => {
+  // The negative control that made this design safe: a path for a file that does
+  // not exist answered 200 WITH NO LINK. Checking the status instead of the link
+  // would have reported success for any nonsense path.
+  const doc = { querySelectorAll() { return []; } };
+  const noLink = stubFetch([
+    ['/interpreter/download', jsonOk({ file_name: 'ghost.tar' })],   // 200, no url
+  ]);
+
+  const out = await parser.appendPanelArtifacts('body', {
+    doc,
+    conversationId: 'conv-1',
+    artifacts: [{
+      kind: 'sandbox', messageId: 'msg-a', name: 'ghost.tar',
+      sandboxPath: '/mnt/data/ghost.tar',
+    }],
+    clickDownloads: false,
+    fetchImpl: noLink,
+    token: 'tok',
+  });
+
+  assert.ok(out.indexOf('ghost.tar') !== -1, 'the file must still be named');
+  assert.ok(out.indexOf('Could not retrieve') !== -1,
+    'a 200 without a link is a failure, not a success');
 });
 
 test('a conversation with no panel artefacts is left byte-identical', async () => {

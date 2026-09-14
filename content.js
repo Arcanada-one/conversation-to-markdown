@@ -492,6 +492,63 @@ async function fetchConversationMetadata(conversationId, options) {
   }
 }
 
+/** Sandbox paths written in the TEXT of an API message.
+ *
+ *  Measured on a production conversation (2026-09-13) whose .zip and .diff had
+ *  survived six releases of click-interception work: all six generated files —
+ *  both archives included — are named in the API response as bare paths
+ *
+ *    /mnt/data/canon-consilium-prompt-bundle-v1.zip
+ *    /mnt/data/Canon_Arcana_v0.2_to_v0.3.diff
+ *
+ *  and every one resolves through the ordinary interpreter/download endpoint.
+ *  No click, no world boundary, no prototype patch: the answer was already in a
+ *  response the extension downloads on every export and then read only for
+ *  `metadata.attachments` and `part.asset_pointer`.
+ *
+ *  Two reasons the existing readers miss them, and this function answers both:
+ *    - the paths are BARE. `sandboxFilesFromMarkdown` requires the `sandbox:`
+ *      scheme, so it matched zero of the six;
+ *    - the paths live in messages that never reach the markdown at all — the
+ *      `tool` role among them — so searching the exported text cannot find them
+ *      no matter how the pattern is written (measured: zero occurrences in the
+ *      exported file, six in the API response).
+ *
+ *  Reads only `role`s that can name a produced file. The USER's text is skipped
+ *  on purpose: a path the user typed is a request, not an artefact, and asking
+ *  the backend for it costs a request per mention and answers "no such file".
+ */
+function sandboxPathsFromApiMessage(message) {
+  const content = (message && message.content) || {};
+  const parts = Array.isArray(content.parts) ? content.parts : [];
+  const chunks = [];
+  for (const part of parts) {
+    if (typeof part === 'string') chunks.push(part);
+  }
+  if (typeof content.text === 'string') chunks.push(content.text);
+  const text = chunks.join('\n');
+  const out = [];
+  const seen = new Set();
+  // Accepts both shapes at once: the optional `sandbox:` scheme, then the path.
+  // Stops at whitespace, quote, backtick, or a closing bracket — a Cyrillic
+  // label frequently follows the path with no separator.
+  const pattern = /(?:sandbox:)?(\/mnt\/data\/[^\s`)\]}"'\\,;]+)/g;
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    // A trailing period is sentence punctuation far more often than part of a
+    // file name; a path that really ends in one resolves to nothing anyway, and
+    // the unresolved-file notice keeps that visible instead of silent.
+    const sandboxPath = match[1].replace(/[.]+$/, '');
+    if (!sandboxPath || seen.has(sandboxPath)) continue;
+    const name = sandboxPath.split('/').pop();
+    // A bare directory ("/mnt/data/") names no file.
+    if (!name) continue;
+    seen.add(sandboxPath);
+    out.push({ name: name, sandboxPath: sandboxPath });
+  }
+  return out;
+}
+
 /** Enumerate a conversation's artefacts from the API.
  *
  *  Returns null — not an empty list — when the API could not be read. The
@@ -526,6 +583,27 @@ async function fetchConversationArtifacts(conversationId, options) {
     if (!message) continue;
     const messageId = message.id || null;
     const metadata = message.metadata || {};
+    const role = ((message.author || {}).role) || '';
+
+    // Files the answer NAMES rather than attaches. See
+    // sandboxPathsFromApiMessage: this is the only source that carried the
+    // archives, and the `tool` role is half of it.
+    if (role !== 'user') {
+      for (const found of sandboxPathsFromApiMessage(message)) {
+        const key = 'sbx:' + found.sandboxPath;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        artifacts.push({
+          kind: 'sandbox',
+          messageId: messageId,
+          name: found.name,
+          fileId: null,
+          mimeType: null,
+          size: null,
+          sandboxPath: found.sandboxPath,
+        });
+      }
+    }
 
     for (const attachment of metadata.attachments || []) {
       const key = 'att:' + (attachment.id || attachment.name);
@@ -952,6 +1030,36 @@ async function scrollToConversationPosition(target, top, behavior) {
  * Arrival needs BOTH conditions, because either alone lies: position 0 on a
  * thread that is still prepending history is not the beginning, and a steady
  * first turn while the page sits at 40000 is just a stalled scroll.
+ *
+ * THE DEFECT THAT BOTH OF THOSE STILL ALLOWED, and what replaced them
+ * (measured 2026-09-14 by running this very function against a simulated
+ * virtualized page, so the network delay is exact rather than incidental):
+ *
+ *     delay of the history fetch   turns lost, silently
+ *       1000 ms                      0
+ *       1200 ms                      0
+ *       1300 ms                     12       <- threshold
+ *       1700 ms                    132 of 142
+ *
+ * The threshold is not a coincidence, it is this function's own arithmetic:
+ * stableRounds(3) x settleMs(400) = 1200 ms. A history fetch slower than that
+ * looks EXACTLY like the end of the conversation — the first turn id does not
+ * change because the next page has not arrived yet, and scrollTop is already 0
+ * because ChatGPT holds the viewport still while prepending. Both "arrival"
+ * conditions are satisfied by a page that is merely waiting for the network.
+ * A user on a slow link lost 299 lines (11%) of a real conversation this way,
+ * with no partial notice, because silence was read as completion.
+ *
+ * So arrival is no longer inferred from silence. It is a POSITIVE FACT:
+ *
+ *     the first mounted turn sits in the container the page itself marks as
+ *     the root of pagination — data-turn-id-container="paginated-root:<id>"
+ *
+ * Absence of that fact means "keep climbing", however long the silence lasts,
+ * which is precisely what a slow connection needs. The timing constants remain
+ * only as the fallback for a page that never exposes the marker (a layout
+ * change, an A/B variant), and that fallback is reported separately so it can
+ * never be mistaken for a confirmed arrival.
  */
 async function scrollToConversationStart(container, options) {
   const opts = options || {};
@@ -959,32 +1067,114 @@ async function scrollToConversationStart(container, options) {
     return new Promise(function(r) { return setTimeout(r, ms); });
   };
   const scrollTo = opts.scrollTo || scrollToConversationPosition;
+  const readFirstTurn = opts.readFirstTurn || function(target) {
+    return target.querySelector ? target.querySelector('[data-turn-id]') : null;
+  };
   const readFirstTurnId = opts.readFirstTurnId || function(target) {
-    const first = target.querySelector ? target.querySelector('[data-turn-id]') : null;
+    const first = readFirstTurn(target);
     return first && first.getAttribute ? first.getAttribute('data-turn-id') : null;
+  };
+  // The page's own marker for "nothing exists above this". Measured on a live
+  // conversation: exactly one such container among 150, its suffix being the
+  // conversation id. Note it is present in the DOM even while scrolled to the
+  // bottom, so its EXISTENCE proves nothing — what proves arrival is that the
+  // FIRST MOUNTED TURN is the one inside it.
+  const readsAtStart = opts.readsAtStart || function(target) {
+    const first = readFirstTurn(target);
+    if (!first || !first.getAttribute) return false;
+    const marker = first.getAttribute('data-turn-id-container');
+    return typeof marker === 'string' && marker.indexOf('paginated-root') === 0;
+  };
+  // Whether this page uses the marker mechanism AT ALL. A turn that carries the
+  // attribute with some other value is a page where the marker is meaningful and
+  // simply has not been reached; a turn with no such attribute is a layout that
+  // does not publish one, and no amount of climbing will change that.
+  const publishesMarker = opts.publishesMarker || function(target) {
+    const first = readFirstTurn(target);
+    if (!first || !first.getAttribute) return false;
+    return typeof first.getAttribute('data-turn-id-container') === 'string';
   };
   const settleMs = opts.settleMs === undefined ? 400 : opts.settleMs;
   const stableRounds = opts.stableRounds === undefined ? 3 : opts.stableRounds;
-  // Bounded so a thread that prepends forever cannot hang the export; the
-  // measured run needed 4 rounds, so 40 is an order of magnitude of headroom.
-  const maxRounds = opts.maxRounds === undefined ? 40 : opts.maxRounds;
+  // A FIXED ceiling is a length limit on the conversation wearing a disguise.
+  // Measured on the simulator: the climb needs almost exactly one round per
+  // three turns (142 -> 45, 600 -> 200), so any constant silently caps the
+  // thread it can reach. At a fixed 300 a 1200-turn conversation stopped 290
+  // turns short — and 1146 turns is a real size, measured on this operator's
+  // own thread. So the budget is DERIVED from the work to be done, and
+  // `noProgressRounds` below is what actually ends a hopeless climb.
+  //
+  // TWO budgets, because "no marker yet" and "no marker ever" are different
+  // situations and charging the same wait for both is what made every scan on a
+  // marker-less page pay 16.4 seconds for nothing (measured: 41 rounds x 400ms).
+  //   - a page that HAS shown the marker shape at least once, or is still
+  //     producing history, gets the full patience;
+  //   - a page whose first turn never carries the attribute at all is a layout
+  //     the marker does not exist in. Waiting cannot make it appear.
+  const noProgressRounds = opts.noProgressRounds === undefined ? 40 : opts.noProgressRounds;
+  const noMarkerRounds = opts.noMarkerRounds === undefined ? 6 : opts.noMarkerRounds;
+  const maxRounds = opts.maxRounds === undefined ? 0 : opts.maxRounds;
+
+  const countTurns = opts.countTurns || function(target) {
+    const all = target.querySelectorAll ? target.querySelectorAll('[data-turn-id]') : [];
+    return all.length || 0;
+  };
 
   let steady = 0;
   let previousFirstId = null;
   let rounds = 0;
-  for (let i = 0; i < maxRounds && steady < stableRounds; i += 1) {
+  let confirmed = false;
+  // Progress is measured by the climb producing NEW history, not by time.
+  let sinceProgress = 0;
+  let bestFirstId = null;
+  let seenTurnIds = 0;
+  for (let i = 0; maxRounds === 0 || i < maxRounds; i += 1) {
     rounds = i + 1;
     await scrollTo(container, 0, 'auto');
     await sleep(settleMs);
+
+    if (readsAtStart(container)) { confirmed = true; break; }
+
     const firstId = readFirstTurnId(container);
+    const mounted = countTurns(container);
+    // A new first turn, or more turns mounted, means history is still arriving:
+    // the climb is working and must not be cut off, however long it takes.
+    if (firstId !== bestFirstId || mounted > seenTurnIds) {
+      sinceProgress = 0;
+      bestFirstId = firstId;
+      if (mounted > seenTurnIds) seenTurnIds = mounted;
+    } else {
+      sinceProgress += 1;
+    }
+
     const atTop = container.scrollTop <= 1;
     steady = atTop && firstId === previousFirstId ? steady + 1 : 0;
     previousFirstId = firstId;
+    // The silence fallback no longer ENDS the climb — it only records that the
+    // old conditions were met. Stopping here is what lost 132 turns of 142.
+    //
+    // What DOES end it is a climb that stopped producing history entirely.
+    // At the default 400 ms settle the full budget is 16 seconds of no new turn
+    // and no new first id, an order of magnitude over the slowest fetch measured
+    // (8 s, which the climb survived with zero loss). A page that publishes no
+    // marker at all settles for far less: there is nothing to wait for.
+    const budget = publishesMarker(container) ? noProgressRounds : noMarkerRounds;
+    if (sinceProgress >= budget) break;
   }
+
   // Reported rather than thrown: a scan that starts below the beginning is still
   // worth running, and the coverage-gap check turns it into a visible partial
   // export. Failing here would trade a flagged partial for nothing at all.
-  return { reachedTop: steady >= stableRounds, rounds: rounds };
+  //
+  // `confirmed` is the marker; `quiet` is the old timing guess. They are kept
+  // apart on purpose — collapsing them is exactly how a wait for the network
+  // came to be reported as a complete conversation.
+  return {
+    reachedTop: confirmed,
+    confirmedByMarker: confirmed,
+    quietedWithoutMarker: !confirmed && steady >= stableRounds,
+    rounds: rounds,
+  };
 }
 
 function waitForRenderQuiet(target) {
@@ -1313,7 +1503,18 @@ async function scanTurns(container, options) {
     // Reach the actual beginning before walking down, or everything above the
     // landing position is lost silently. See scrollToConversationStart.
     const start = await settings.scrollToStart(container);
-    if (!start.reachedTop) markPartialScan(settings, 'never reached the start');
+    // Three outcomes, and collapsing any two of them is a defect that has
+    // already shipped in one direction or the other:
+    //   - confirmed by the page's own start marker -> complete, say nothing;
+    //   - no marker on this page, but the climb went quiet at the top -> the
+    //     old criterion, which is all such a layout can offer. Flagging it
+    //     partial would put a "your data is untrustworthy" notice on every
+    //     export the moment ChatGPT renames an attribute — a false warning is
+    //     a real cost, not a safe default;
+    //   - still moving, or never at the top -> genuinely partial.
+    if (!start.reachedTop && !start.quietedWithoutMarker) {
+      markPartialScan(settings, 'never reached the start');
+    }
     await settings.settle(container);
     for (let step = 0; settings.maxSteps === 0 || step < settings.maxSteps; step += 1) {
       if (settings.isCancelled()) {
@@ -1507,6 +1708,45 @@ function sandboxFilesFromMarkdown(markdown) {
  *  (.md, .txt, images, video, PDF) and only downloads what it cannot. */
 var UNPREVIEWABLE_FORMATS = /(^|[^a-z0-9])(zip|diff|patch|tar|gz|tgz|bz2|xz|7z|rar|whl|jar|exe|dmg|pkg|bin|iso|sqlite|db|parquet|pickle|pkl)([^a-z0-9]|$)/i;
 
+/** Fold a name or label to a comparable form: lowercase, and every run of
+ *  separators collapsed to one space.
+ *
+ *  A raw substring test cannot match a file name against the prose that offers
+ *  it. Measured on the conversation this was built for:
+ *
+ *    panel/API name   canon-consilium-prompt-bundle-v1.zip
+ *    button label     Скачать готовый Canon Consilium Prompt Bundle v1
+ *
+ *  The stem is spelled with hyphens and the label with spaces, so
+ *  `indexOf(stem)` is -1 and the button reads as "not in the panel". Before this
+ *  fix the archive would have been fetched by the API AND clicked — downloading
+ *  the same bytes twice and re-opening the exact viewer-over-panel regression
+ *  that the exclusion exists to prevent. */
+function foldForNameMatching(value) {
+  return String(value || '').toLowerCase().replace(/[\s_\-.]+/g, ' ').trim();
+}
+
+/** Folded, extension-stripped stems of the names already resolved elsewhere. */
+function panelStemsForMatching(panelNames) {
+  const stems = [];
+  for (const name of Array.from(panelNames || [])) {
+    const stem = foldForNameMatching(
+      String(name || '').replace(/\.[A-Za-z0-9]{1,8}$/, ''));
+    if (stem) stems.push(stem);
+  }
+  return stems;
+}
+
+/** Whether a button label names a file some other source already resolved. */
+function labelMatchesAnyStem(label, stems) {
+  const folded = foldForNameMatching(label);
+  if (!folded) return false;
+  for (const stem of Array.from(stems || [])) {
+    if (stem && folded.indexOf(stem) !== -1) return true;
+  }
+  return false;
+}
+
 /** Buttons that offer a file download and carry no link of their own.
  *
  *  Three conditions, all required — the first alone is what broke the export:
@@ -1527,15 +1767,12 @@ function downloadButtonsInPage(doc, panelNames) {
   } catch (_e) {
     return [];
   }
-  // Stems of the names the panel already resolved, so "Скачать полное ТЗ
-  // Canon Arcana v0.3" can be matched against the panel's
-  // "Canon_Arcana_Consilium_Context_Selection_TZ_v0.3.md". Compared on the
-  // extension-stripped name because the label never carries one.
-  const known = [];
-  for (const name of Array.from(panelNames || [])) {
-    const stem = String(name || '').replace(/\.[A-Za-z0-9]{1,8}$/, '').toLowerCase();
-    if (stem) known.push(stem);
-  }
+  // Stems of the names already resolved without a click, so "Скачать готовый
+  // Canon Consilium Prompt Bundle v1" matches
+  // "canon-consilium-prompt-bundle-v1.zip". Extension-stripped because the
+  // label never carries one, and separator-folded because the name spells with
+  // hyphens what the label spells with spaces.
+  const known = panelStemsForMatching(panelNames);
 
   const out = [];
   for (const node of Array.from(nodes)) {
@@ -1557,12 +1794,7 @@ function downloadButtonsInPage(doc, panelNames) {
     }
     // Already resolved without a click — the panel supplies it for free, and
     // clicking it is what opened the viewer over the panel in the first place.
-    const labelLower = label.toLowerCase();
-    let seenInPanel = false;
-    for (const stem of known) {
-      if (labelLower.indexOf(stem) !== -1) { seenInPanel = true; break; }
-    }
-    if (seenInPanel) continue;
+    if (labelMatchesAnyStem(label, known)) continue;
     out.push({ button: node, label: label, archive: UNPREVIEWABLE_FORMATS.test(label) });
   }
   // MEASURED (2026-09-10, probe 7): the markup cannot tell a download button
@@ -1679,20 +1911,11 @@ function dismissViewerOverlay(doc, win, options) {
  * one, so the exclusion has to happen — just later than the collection.
  */
 function filterButtonsAgainstPanel(buttons, panelNames) {
-  const known = [];
-  for (const name of Array.from(panelNames || [])) {
-    const stem = String(name || '').replace(/\.[A-Za-z0-9]{1,8}$/, '').toLowerCase();
-    if (stem) known.push(stem);
-  }
+  const known = panelStemsForMatching(panelNames);
   const out = [];
   for (const entry of Array.from(buttons || [])) {
     if (!entry || !entry.label) continue;
-    const labelLower = String(entry.label).toLowerCase();
-    let seenInPanel = false;
-    for (const stem of known) {
-      if (labelLower.indexOf(stem) !== -1) { seenInPanel = true; break; }
-    }
-    if (!seenInPanel) out.push(entry);
+    if (!labelMatchesAnyStem(entry.label, known)) out.push(entry);
   }
   // Archives first: the files that can ONLY be had by clicking are fetched
   // before any viewer has a chance to interfere. Same rule as the selector.
@@ -1970,6 +2193,15 @@ async function appendPanelArtifacts(markdown, options) {
   // path the file actually has, subdirectory and all.
   const bodyFiles = sandboxFilesFromMarkdown(markdown);
 
+  // Paths the API names in message text. This is the source that carries files
+  // with no panel row, no attachment and no link — measured: the .zip and the
+  // .diff of the conversation this was built for appear NOWHERE else.
+  const apiFiles = (artifacts || [])
+    .filter(function(a) { return a && a.sandboxPath; })
+    .map(function(a) {
+      return { name: a.name, sandboxPath: a.sandboxPath, fromApi: true };
+    });
+
   let files = opts.files;
   if (!files) {
     // A sandbox link in the body is proof a generated file exists — better
@@ -1989,6 +2221,10 @@ async function appendPanelArtifacts(markdown, options) {
   for (const file of scannedFiles) bySandboxPath.set(file.sandboxPath, file);
   for (const file of files) bySandboxPath.set(file.sandboxPath, file);
   for (const file of bodyFiles) bySandboxPath.set(file.sandboxPath, file);
+  // Last, so a path the API states verbatim wins over one the panel rebuilt
+  // from a row label. Both are keyed by path, so this adds the files that have
+  // no other source and overwrites nothing that disagrees.
+  for (const file of apiFiles) bySandboxPath.set(file.sandboxPath, file);
   files = Array.from(bySandboxPath.values());
 
   // Files behind a button handler are gathered BEFORE the early return below:
@@ -2034,6 +2270,18 @@ async function appendPanelArtifacts(markdown, options) {
     messageIds = artifacts
       ? artifacts.map(function(a) { return a.messageId; }).filter(Boolean)
       : [];
+    // Sandbox artefacts first: a `tool` message that produced a file is the id
+    // most likely to be accepted for it, and the loop in
+    // resolveArtifactPanelFiles keeps the first id that works.
+    messageIds.sort(function(a, b) {
+      const rank = function(id) {
+        for (const art of artifacts || []) {
+          if (art.messageId === id) return art.sandboxPath ? 0 : 1;
+        }
+        return 1;
+      };
+      return rank(a) - rank(b);
+    });
     if (!messageIds.length) {
       // Fall back to the ids the DOM carries; the panel is outside the message
       // tree but the turns themselves are still in the page.
@@ -3174,6 +3422,8 @@ if (typeof module !== 'undefined' && module.exports) {
     resolveArtifactPanelFiles: resolveArtifactPanelFiles,
     appendPanelArtifacts: appendPanelArtifacts,
     sandboxFilesFromMarkdown: sandboxFilesFromMarkdown,
+    sandboxPathsFromApiMessage: sandboxPathsFromApiMessage,
+    foldForNameMatching: foldForNameMatching,
     downloadButtonsInPage: downloadButtonsInPage,
     filterButtonsAgainstPanel: filterButtonsAgainstPanel,
     collectButtonDownloads: collectButtonDownloads,

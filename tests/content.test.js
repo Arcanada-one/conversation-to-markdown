@@ -115,17 +115,18 @@ function createSentinelConversation(options = {}) {
   let markerGone = !!options.complete;
   const calls = [];
   const attrNode = (attrs, querySelector = () => null) => ({
-    getAttribute: name => attrs[name] ?? null, querySelector,
+    tagName: 'DIV', getAttribute: name => attrs[name] ?? null, querySelector,
   });
   let first = attrNode({ 'data-turn-id': 'first-' + loaded });
-  const root = attrNode({ 'data-turn-id-container': 'client-created-root' });
+  const root = attrNode({ 'data-turn-id-container': options.paginatedRoot ? 'paginated-root:fixture' : 'client-created-root' });
   const sentinel = attrNode({ 'data-testid': 'conversation-pagination-sentinel' },
     sel => sel === 'svg' && options.loading ? {} : null);
   const container = {
     scrollTop: 40000, scrollHeight: 55000, clientHeight: 855,
     querySelector(selector) {
       if (selector === '[data-testid="conversation-pagination-sentinel"]') return markerGone ? null : sentinel;
-      if (selector === '[data-turn-id-container="client-created-root"]') return root;
+      if (selector === '[data-turn-id-container="client-created-root"]') return options.paginatedRoot ? null : root;
+      if (selector === 'div[data-turn-id-container^="paginated-root:"]') return options.paginatedRoot ? root : null;
       if (selector === '[data-turn-id]') return first;
       return null;
     },
@@ -168,34 +169,40 @@ test('sentinel re-entry loads the full history after repeated top assignments st
 });
 
 test('an already fully loaded pagination layout confirms its first mounted holder', async () => {
-  const page = createSentinelConversation({ complete: true });
-  const result = await parser.scrollToConversationStart(page.container, {
-    scrollTo: page.scrollTo, sleep: async () => {},
-  });
-  assert.equal(result.reachedTop, true);
-  assert.equal(result.rounds, 1);
+  for (const paginatedRoot of [false, true]) {
+    const page = createSentinelConversation({ complete: true, paginatedRoot });
+    const result = await parser.scrollToConversationStart(page.container, {
+      scrollTo: page.scrollTo, sleep: async () => {},
+    });
+    assert.equal(result.reachedTop, true);
+    assert.equal(result.rounds, 1);
+  }
 });
 
 test('sentinel disappearance cannot confirm a later mounted turn above an empty first holder', async () => {
-  const page = createSentinelConversation({ complete: true, firstUnmounted: true });
-  const result = await parser.scrollToConversationStart(page.container, {
-    scrollTo: page.scrollTo, sleep: async () => {}, noProgressRounds: 4,
-  });
-  assert.equal(result.reachedTop, false);
-  assert.equal(result.markerAbsentFromPage, false);
-});
-
-test('a pending sentinel never receives the marker-less completeness exemption', async () => {
-  for (const loading of [false, true]) {
-    const page = createSentinelConversation({ stalled: true, loading });
+  for (const paginatedRoot of [false, true]) {
+    const page = createSentinelConversation({ complete: true, firstUnmounted: true, paginatedRoot });
     const result = await parser.scrollToConversationStart(page.container, {
       scrollTo: page.scrollTo, sleep: async () => {}, noProgressRounds: 4,
     });
     assert.equal(result.reachedTop, false);
     assert.equal(result.markerAbsentFromPage, false);
-    assert.ok(result.rounds <= 6, 're-entry does not replenish the failure budget');
-    assert.equal(page.calls.some(top => top > 0), !loading,
-      'an active loading indicator prevents re-entry until the request finishes');
+  }
+});
+
+test('a pending sentinel never receives the marker-less completeness exemption', async () => {
+  for (const paginatedRoot of [false, true]) {
+    for (const loading of [false, true]) {
+      const page = createSentinelConversation({ stalled: true, loading, paginatedRoot });
+      const result = await parser.scrollToConversationStart(page.container, {
+        scrollTo: page.scrollTo, sleep: async () => {}, noProgressRounds: 4,
+      });
+      assert.equal(result.reachedTop, false);
+      assert.equal(result.markerAbsentFromPage, false);
+      assert.ok(result.rounds <= 6, 're-entry does not replenish the failure budget');
+      assert.equal(page.calls.some(top => top > 0), !loading,
+        'an active loading indicator prevents re-entry until the request finishes');
+    }
   }
 });
 

@@ -1085,8 +1085,15 @@ async function scrollToConversationStart(container, options) {
     const sentinel = candidate && candidate.getAttribute &&
       candidate.getAttribute('data-testid') === 'conversation-pagination-sentinel' ? candidate : null;
     const root = target.querySelector('[data-turn-id-container="client-created-root"]');
-    const knownLayout = root && root.getAttribute &&
-      root.getAttribute('data-turn-id-container') === 'client-created-root';
+    const paginatedRoot = target.querySelector('div[data-turn-id-container^="paginated-root:"]');
+    // A freshly navigated page used client-created-root; the same conversation
+    // after export used an EMPTY paginated-root sibling. Neither root has to
+    // contain the first turn. The first real holder below it must do so.
+    const knownLayout = (root && root.getAttribute &&
+      root.getAttribute('data-turn-id-container') === 'client-created-root') ||
+      (paginatedRoot && paginatedRoot.tagName === 'DIV' &&
+       paginatedRoot.getAttribute('data-turn-id-container').indexOf('paginated-root:') === 0 &&
+       !paginatedRoot.querySelector('[data-turn-id]'));
     if (!sentinel && !knownLayout) return null;
     const holders = Array.from(target.querySelectorAll('div[data-turn-id-container]')).filter(function(el) {
       const id = el.getAttribute('data-turn-id-container');

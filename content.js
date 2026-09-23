@@ -1074,6 +1074,36 @@ async function scrollToConversationStart(container, options) {
     const first = readFirstTurn(target);
     return first && first.getAttribute ? first.getAttribute('data-turn-id') : null;
   };
+  // Live measurement: paging stalled at 71 and 91 containers while the
+  // sentinel stayed visible. Leaving the viewport and returning loaded ten
+  // more each time. At the actual beginning (221 containers), the sentinel
+  // disappeared. Mounted sections and their relative test indices are NOT a
+  // history count: empty height-preserving containers represent unmounted turns.
+  const readPagination = function(target) {
+    if (!target.querySelector || !target.querySelectorAll) return null;
+    const candidate = target.querySelector('[data-testid="conversation-pagination-sentinel"]');
+    const sentinel = candidate && candidate.getAttribute &&
+      candidate.getAttribute('data-testid') === 'conversation-pagination-sentinel' ? candidate : null;
+    const root = target.querySelector('[data-turn-id-container="client-created-root"]');
+    const knownLayout = root && root.getAttribute &&
+      root.getAttribute('data-turn-id-container') === 'client-created-root';
+    if (!sentinel && !knownLayout) return null;
+    const holders = Array.from(target.querySelectorAll('div[data-turn-id-container]')).filter(function(el) {
+      const id = el.getAttribute('data-turn-id-container');
+      return id && id !== 'client-created-root' && id.indexOf('paginated-root') !== 0;
+    });
+    const first = readFirstTurn(target);
+    const held = holders[0] && holders[0].querySelector('[data-turn-id]');
+    const atFirstHolder = !!first && !!held && (held === first ||
+      (!!held.getAttribute('data-turn-id') &&
+       held.getAttribute('data-turn-id') === first.getAttribute('data-turn-id')));
+    return {
+      pending: !!sentinel,
+      loading: !!(sentinel && sentinel.querySelector('svg')),
+      count: holders.length,
+      complete: !sentinel && !!knownLayout && atFirstHolder && target.scrollTop <= 1,
+    };
+  };
   // The page's own marker for "nothing exists above this". Measured on a live
   // conversation: exactly one such container among 150, its suffix being the
   // conversation id. Note it is present in the DOM even while scrolled to the
@@ -1186,6 +1216,8 @@ async function scrollToConversationStart(container, options) {
   let previousFirstId = null;
   let rounds = 0;
   let confirmed = false;
+  let confirmedByPagination = false;
+  let sawPagination = false;
   // Progress is measured by the climb producing NEW history, not by time.
   let sinceProgress = 0;
   let bestFirstId = null;
@@ -1196,10 +1228,18 @@ async function scrollToConversationStart(container, options) {
     await scrollTo(container, 0, 'auto');
     await sleep(settleMs);
 
-    if (readsAtStart(container)) { confirmed = true; break; }
+    const pagination = readPagination(container);
+    if (pagination) sawPagination = true;
+    if (pagination && pagination.complete) {
+      confirmed = true;
+      confirmedByPagination = true;
+      break;
+    }
+    // A live pagination sentinel takes precedence over legacy root markers.
+    if (!(pagination && pagination.pending) && readsAtStart(container)) { confirmed = true; break; }
 
     const firstId = readFirstTurnId(container);
-    const mounted = countTurns(container);
+    const mounted = pagination ? pagination.count : countTurns(container);
     // A new first turn, or more turns mounted, means history is still arriving:
     // the climb is working and must not be cut off, however long it takes.
     if (firstId !== bestFirstId || mounted > seenTurnIds) {
@@ -1221,13 +1261,23 @@ async function scrollToConversationStart(container, options) {
     // and no new first id, an order of magnitude over the slowest fetch measured
     // (8 s, which the climb survived with zero loss). A page that publishes no
     // marker at all settles for far less: there is nothing to wait for.
-    const budget = publishesMarker(container) ? noProgressRounds : noMarkerRounds;
+    const budget = sawPagination || publishesMarker(container) ? noProgressRounds : noMarkerRounds;
     if (sinceProgress >= budget) break;
     // The backstop. Deliberately checked LAST, so a climb that would finish on
     // its own always does; this only catches the loop that never would.
     if (maxClimbMs > 0 && clock() - startedAt >= maxClimbMs) {
       ranOutOfTime = true;
       break;
+    }
+    // Re-arm an edge-triggered sentinel instead of repeatedly assigning the
+    // same top position. Do not disturb an in-flight request. Two viewport
+    // heights clear the sentinel; the next round re-enters it. This movement
+    // never resets the no-progress or elapsed-time budgets.
+    if (pagination && pagination.pending && !pagination.loading &&
+        sinceProgress >= 2 && atTop) {
+      await scrollTo(container, Math.min(container.clientHeight * 2,
+        Math.max(0, container.scrollHeight - container.clientHeight)), 'auto');
+      await sleep(settleMs);
     }
   }
 
@@ -1240,14 +1290,15 @@ async function scrollToConversationStart(container, options) {
   // came to be reported as a complete conversation.
   return {
     reachedTop: confirmed,
-    confirmedByMarker: confirmed,
+    confirmedByMarker: confirmed && !confirmedByPagination,
+    confirmedByPagination: confirmedByPagination,
     quietedWithoutMarker: !confirmed && steady >= stableRounds,
     // Whether the page has the marker mechanism at all. Only a page WITHOUT one
     // may treat a quiet climb as good enough; a page that has one and did not
     // reach it is a truncated export and must say so.
     // A climb cut off by the clock is ALWAYS incomplete, whatever the page's
     // markup does — so it must never qualify for the marker-less exemption.
-    markerAbsentFromPage: !ranOutOfTime && !publishesMarker(container),
+    markerAbsentFromPage: !ranOutOfTime && !sawPagination && !publishesMarker(container),
     ranOutOfTime: ranOutOfTime,
     rounds: rounds,
   };
@@ -3537,4 +3588,3 @@ if (typeof module !== 'undefined' && module.exports) {
     waitForConversationReady: waitForConversationReady,
   };
 }
-

@@ -95,6 +95,9 @@ function createVirtualizedFixture(pages, originalScrollTop) {
           querySelector: () => (atStart && first ? first : null),
         };
       }
+      // This fixture models the legacy marker layout, not the separate
+      // pagination sentinel. Unknown selectors match nothing, as in a DOM.
+      if (selector !== '[data-turn-id]') return null;
       const list = this.querySelectorAll(selector);
       return list && list.length ? list[0] : null;
     },
@@ -102,6 +105,99 @@ function createVirtualizedFixture(pages, originalScrollTop) {
   container.scrollCalls = calls;
   return container;
 }
+
+// Measured DOM shape: an empty root, a separate pagination sentinel, and
+// height-preserving containers. The sentinel needs to LEAVE and RE-ENTER;
+// assigning scrollTop=0 again never loads a third page on its own.
+function createSentinelConversation(options = {}) {
+  let loaded = options.complete ? 220 : 20;
+  let intersecting = false;
+  let markerGone = !!options.complete;
+  const calls = [];
+  const attrNode = (attrs, querySelector = () => null) => ({
+    getAttribute: name => attrs[name] ?? null, querySelector,
+  });
+  let first = attrNode({ 'data-turn-id': 'first-' + loaded });
+  const root = attrNode({ 'data-turn-id-container': 'client-created-root' });
+  const sentinel = attrNode({ 'data-testid': 'conversation-pagination-sentinel' },
+    sel => sel === 'svg' && options.loading ? {} : null);
+  const container = {
+    scrollTop: 40000, scrollHeight: 55000, clientHeight: 855,
+    querySelector(selector) {
+      if (selector === '[data-testid="conversation-pagination-sentinel"]') return markerGone ? null : sentinel;
+      if (selector === '[data-turn-id-container="client-created-root"]') return root;
+      if (selector === '[data-turn-id]') return first;
+      return null;
+    },
+    querySelectorAll(selector) {
+      if (selector === '[data-turn-id]') return [first];
+      if (selector !== 'div[data-turn-id-container]') return [];
+      return [root, ...Array.from({ length: loaded }, (_, i) =>
+        attrNode({ 'data-turn-id-container': i === 0 ? 'first-' + loaded : 'holder-' + i },
+          () => i === 0 && !options.firstUnmounted ? first : null))];
+    },
+  };
+  const scrollTo = async (target, top) => {
+    calls.push(top);
+    target.scrollTop = top;
+    const nextIntersecting = top < 855;
+    if (nextIntersecting && !intersecting && !options.stalled && !options.loading && !markerGone) {
+      loaded = Math.min(220, loaded + 10);
+      target.scrollHeight += 4000;
+      first = attrNode({ 'data-turn-id': 'first-' + loaded });
+      markerGone = loaded === 220;
+    }
+    intersecting = nextIntersecting;
+  };
+  return { container, scrollTo, calls, loaded: () => loaded };
+}
+
+test('sentinel re-entry loads the full history after repeated top assignments stall', async () => {
+  const control = createSentinelConversation();
+  for (let i = 0; i < 50; i++) await control.scrollTo(control.container, 0);
+  assert.equal(control.loaded(), 30, 'positive control: repeated zero really stalls');
+  const page = createSentinelConversation();
+  const result = await parser.scrollToConversationStart(page.container, {
+    scrollTo: page.scrollTo, sleep: async () => {}, noProgressRounds: 6,
+  });
+  assert.equal(page.loaded(), 220);
+  assert.equal(result.reachedTop, true);
+  assert.equal(result.confirmedByPagination, true);
+  assert.equal(result.confirmedByMarker, false);
+  assert.ok(page.calls.some(top => top >= page.container.clientHeight));
+});
+
+test('an already fully loaded pagination layout confirms its first mounted holder', async () => {
+  const page = createSentinelConversation({ complete: true });
+  const result = await parser.scrollToConversationStart(page.container, {
+    scrollTo: page.scrollTo, sleep: async () => {},
+  });
+  assert.equal(result.reachedTop, true);
+  assert.equal(result.rounds, 1);
+});
+
+test('sentinel disappearance cannot confirm a later mounted turn above an empty first holder', async () => {
+  const page = createSentinelConversation({ complete: true, firstUnmounted: true });
+  const result = await parser.scrollToConversationStart(page.container, {
+    scrollTo: page.scrollTo, sleep: async () => {}, noProgressRounds: 4,
+  });
+  assert.equal(result.reachedTop, false);
+  assert.equal(result.markerAbsentFromPage, false);
+});
+
+test('a pending sentinel never receives the marker-less completeness exemption', async () => {
+  for (const loading of [false, true]) {
+    const page = createSentinelConversation({ stalled: true, loading });
+    const result = await parser.scrollToConversationStart(page.container, {
+      scrollTo: page.scrollTo, sleep: async () => {}, noProgressRounds: 4,
+    });
+    assert.equal(result.reachedTop, false);
+    assert.equal(result.markerAbsentFromPage, false);
+    assert.ok(result.rounds <= 6, 're-entry does not replenish the failure budget');
+    assert.equal(page.calls.some(top => top > 0), !loading,
+      'an active loading indicator prevents re-entry until the request finishes');
+  }
+});
 
 function textNode(value) {
   return { nodeType: 3, textContent: value };

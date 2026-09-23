@@ -18,6 +18,19 @@ so the gap is visible rather than assumed away.
 
 ## Checking against the live site
 
+### Pending verification: pagination re-entry
+
+On a long conversation, history loading can stop while its pagination sentinel
+remains visible. The climb now moves it out of view and returns, without
+extending the failure budget or disturbing an active loading indicator. The
+known layout confirms the beginning only when the sentinel is gone and the
+first real container has its turn mounted at the top. A stalled pagination
+layout remains partial. Live browser measurements reproduced stalls at 71 and
+91 containers, recovered them to 81 and 101, and reached 221 containers with
+the original first message and no sentinel. These measurements exercise browser
+gestures; the updated extension's complete export is still awaiting live
+verification. No release is claimed by this entry.
+
 Four things waste an hour each time they are rediscovered:
 
 - `waitForSelector('[data-turn-id]')` times out on a perfectly healthy page.

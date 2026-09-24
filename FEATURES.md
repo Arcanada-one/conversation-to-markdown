@@ -267,6 +267,12 @@ files plus an archive. Every retrievable file must arrive beside the Markdown.
 Unavailable files must be named, and no file viewer or native download may be
 triggered by the scan.
 
+**Offered files come first.** Explicit sandbox links outrank intermediate paths
+in tool output. A repeated path is promoted when a later answer offers it, and
+its own message context is used for retrieval. After a completed scan, known
+API links do not wait for a missing viewer panel. A fixture with 70 intermediate
+paths verifies ordering; live download remains a separate acceptance check.
+
 **Partial lookup preserves progress.** If lookup resolves one file and hangs on
 another, the first link remains in the Markdown and reaches the downloader.
 Each distinct message id is attempted once per file. Incomplete lookup reports
@@ -422,7 +428,7 @@ match the CHANGELOG's top entry, and users must never see a gap. The last entry
 below is the version being shipped; a test checks this line against the CHANGELOG
 so a release cannot be added without revisiting this file.
 
-Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8, 1.6.0, 1.6.1, 1.6.2, 1.6.3
+Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8, 1.6.0, 1.6.1, 1.6.2, 1.6.3, 1.6.4
 
 The latest entry identifies the prepared local build; it does not imply Chrome
 Web Store publication. Attachment retrieval is unchanged in 1.6.0.

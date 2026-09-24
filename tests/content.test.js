@@ -5094,3 +5094,81 @@ test('a later lookup timeout preserves earlier file links and safe diagnostics',
     }
   }
 });
+
+test('an offered archive outranks seventy intermediate paths and retains its message context', async () => {
+  const mapping = {};
+  for (let i = 0; i < 70; i++) {
+    mapping['tool-' + i] = { message: { id: 'tool-message', author: { role: 'tool' }, content: { parts: ['/mnt/data/work/item-' + i + '.py'] } } };
+  }
+  mapping.created = { message: { id: 'tool-message', author: { role: 'tool' }, content: { parts: ['/mnt/data/result.zip'] } } };
+  mapping.offered = { message: { id: 'answer-message', author: { role: 'assistant' }, content: { parts: ['[Download result](sandbox:/mnt/data/result.zip)'] } } };
+  const artifacts = await parser.fetchConversationArtifacts('fixture', {
+    token: 'tok', fetchImpl: async () => ({ ok: true, json: async () => ({ mapping }) }),
+  });
+  assert.equal(artifacts.length, 71, 'intermediate paths remain available as fallbacks');
+  const attempts = [];
+  const out = await parser.appendPanelArtifacts('Captured conversation', {
+    conversationId: 'fixture', token: 'tok', artifacts, files: [], clickDownloads: false,
+    fetchImpl: async url => {
+      const u = new URL(url, 'https://chatgpt.com');
+      const file = u.searchParams.get('sandbox_path');
+      const message = u.searchParams.get('message_id');
+      attempts.push({ file, message });
+      return file === '/mnt/data/result.zip' ? { ok: true, json: async () => ({ download_url: 'https://chatgpt.com/backend-api/estuary/content?id=file_result' }) } : { ok: false, status: 404 };
+    },
+  });
+  assert.deepEqual(attempts[0], { file: '/mnt/data/result.zip', message: 'answer-message' });
+  assert.equal(attempts.length, 71, 'one request per path carrying its own message context');
+  assert.match(out, /\[result.zip\]\(https:/);
+});
+
+test('HTTP 200 file-link failures are classified without exposing signed addresses', async () => {
+  for (const [body, expected] of [
+    [{ status: 'error' }, 'missing-url'],
+    [{ download_url: 'https://untrusted.example/file' }, 'rejected-url'],
+  ]) {
+    const failures = [];
+    const result = await parser.resolveSandboxDownloadUrl('fixture', 'message', '/mnt/data/file.zip', {
+      token: 'tok', fetchImpl: async () => ({ ok: true, status: 200, json: async () => body }),
+      onFailure: (kind, host) => failures.push({ kind, host }),
+    });
+    assert.equal(result, null);
+    assert.equal(failures[0].kind, expected);
+    if (expected === 'rejected-url') assert.equal(failures[0].host, 'untrusted.example');
+    assert.doesNotMatch(JSON.stringify(failures), /https:|\/file/);
+  }
+  let failure;
+  await parser.resolveSandboxDownloadUrl('fixture', 'message', '/mnt/data/file.zip', {
+    token: 'tok', fetchImpl: async () => ({ ok: true, json: async () => { throw new Error('private response'); } }),
+    onFailure: kind => { failure = kind; },
+  });
+  assert.equal(failure, 'unreadable-json');
+});
+
+test('an explicitly offered API file after the scan does not wait for an absent viewer panel', async () => {
+  const out = await parser.appendPanelArtifacts('Captured text', {
+    conversationId: 'fixture', token: 'tok', scannedPanelFiles: [], clickDownloads: false,
+    artifacts: [{ name: 'result.zip', sandboxPath: '/mnt/data/result.zip', messageId: 'answer', priority: 0 }],
+    doc: { querySelectorAll: () => [] },
+    sleep: async () => { throw new Error('unexpected panel wait'); },
+    fetchImpl: async () => ({ ok: true, json: async () => ({ download_url: 'https://chatgpt.com/backend-api/estuary/content?id=file_result' }) }),
+  });
+  assert.match(out, /\[result.zip\]\(https:/);
+});
+
+test('a visible panel path retains priority when API metadata enriches it', async () => {
+  const attempts = [];
+  await parser.appendPanelArtifacts('Text', {
+    conversationId: 'fixture', token: 'tok', clickDownloads: false,
+    files: [{ name: 'visible.pdf', sandboxPath: '/mnt/data/visible.pdf' }],
+    artifacts: [
+      { name: 'visible.pdf', sandboxPath: '/mnt/data/visible.pdf', messageId: 'tool', priority: 2 },
+      { name: 'other.txt', sandboxPath: '/mnt/data/other.txt', messageId: 'answer', priority: 1 },
+    ],
+    fetchImpl: async url => {
+      attempts.push(new URL(url, 'https://chatgpt.com').searchParams.get('sandbox_path'));
+      return { ok: true, json: async () => ({ download_url: 'https://chatgpt.com/backend-api/estuary/content?id=file_fixture' }) };
+    },
+  });
+  assert.equal(attempts[0], '/mnt/data/visible.pdf');
+});

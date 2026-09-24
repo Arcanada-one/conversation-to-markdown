@@ -5,6 +5,26 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.4] — 2026-09-24
+
+### Fixed
+
+- Resolve explicitly offered sandbox files before intermediate paths found in
+  technical messages. When a later reply offers an earlier-created path, promote
+  it and retain the offering message's identifier.
+- Use the message context carried by each API file instead of retrying unrelated
+  message identifiers. Panel-only paths retain their fallback lookup.
+- After a scan, explicit API links no longer wait for an absent viewer panel.
+  Other layouts retain the bounded late-panel wait.
+
+### Diagnostics
+
+- Distinguish missing URLs, rejected URLs, unreadable JSON and request failures
+  even when an endpoint returns HTTP 200. Include rejected hostnames only, never
+  the full signed addresses, in incomplete-export diagnostics.
+- Local verification build; automatic retrieval on the reported conversation
+  still requires a new export before this issue can be called resolved.
+
 ## [1.6.3] — 2026-09-24
 
 ### Fixed

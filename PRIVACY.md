@@ -26,7 +26,8 @@ through ChatGPT's conversation API when available and names unresolved files in
 the saved Markdown. File lookup has a bounded wait; failure preserves the
 captured conversation and marks the export incomplete. Incomplete lookups add
 local diagnostics to the Markdown: stage names, request counts, HTTP status
-counts, candidate count and resolved count. This diagnostic line contains no
+counts, candidate count, resolved count, failure categories and rejected
+hostnames (without paths or query strings). This diagnostic line contains no
 URLs, headers, response bodies or session tokens. Already resolved file links
 are preserved separately, under the signed-link handling described below.
 

@@ -16,7 +16,8 @@ one exists because ignoring it shipped a defect or would have.
   not what the repository says. They diverge exactly when this rule is broken.
 - `manifest.json`, `package.json` and the top `CHANGELOG.md` entry move together.
   Tests enforce the coupling; that is a backstop, not permission to bump freely.
-- Published so far: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.2.0.
+- Do not infer store publication from CHANGELOG.md or local version history.
+  Check the store listing and pending publisher-dashboard submissions separately.
 
 ## FEATURES.md is part of every feature
 

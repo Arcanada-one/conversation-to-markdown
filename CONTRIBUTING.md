@@ -5,7 +5,7 @@ Thanks for helping make conversation exports more reliable.
 ## Before opening a pull request
 
 1. Keep the extension dependency-free unless a dependency is essential and discussed first.
-2. Preserve local-only processing: no telemetry, remote service, storage, or new host access.
+2. Preserve local-only processing: no telemetry or developer-operated remote service. Review any additional storage or host access explicitly against PRIVACY.md. Existing local metadata storage must never contain conversation text or file bytes.
 3. Add or update a regression test for every behavior change.
 4. Run the complete checks:
 

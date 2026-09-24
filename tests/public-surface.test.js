@@ -280,14 +280,14 @@ test('a release cannot add a version without touching the feature checklist', ()
   const features = read('FEATURES.md');
   const releases = [...changelog.matchAll(/^## \[(\d+\.\d+\.\d+)\] — \d{4}-\d{2}-\d{2}$/gm)];
 
-  const declared = (features.match(/^Published history:.*$/m) || [])[0]
+  const declared = (features.match(/^Version history:.*$/m) || [])[0]
     || (features.match(/^Published so far:.*$/m) || [])[0]
     || '';
   const listedVersions = [...declared.matchAll(/\d+\.\d+\.\d+/g)].map((m) => m[0]);
 
   assert.ok(
     listedVersions.length > 0,
-    'FEATURES.md must record the published version history under "Published history:"',
+    'FEATURES.md must record the published version history under "Version history:"',
   );
   assert.equal(
     listedVersions.length, releases.length,

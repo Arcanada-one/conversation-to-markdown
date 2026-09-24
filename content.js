@@ -588,13 +588,37 @@ async function fetchConversationArtifacts(conversationId, options) {
     // Files the answer NAMES rather than attaches. See
     // sandboxPathsFromApiMessage: this is the only source that carried the
     // archives, and the `tool` role is half of it.
-    if (role !== 'user') {
+    // Tool instructions and private planning name intended paths, not files
+    // produced for the user. In an observed failed website fetch, the command
+    // named an HTML output but DNS failed before open(..., 'w') ran. Treating
+    // that input as output produced a false missing-attachment warning.
+    // Keep actual tool RESULTS and user-facing answers as independent sources;
+    // metadata attachments below are deliberately outside this filter.
+    const isAssistantInstruction = role === 'assistant' && (
+      (message.recipient && message.recipient !== 'all') ||
+      ((message.content || {}).content_type === 'code') ||
+      message.channel === 'analysis');
+    if (role !== 'user' && !isAssistantInstruction) {
       for (const found of sandboxPathsFromApiMessage(message)) {
         const key = 'sbx:' + found.sandboxPath;
-        if (seen.has(key)) continue;
+        const parts = (message.content || {}).parts || [];
+        const chunks = (Array.isArray(parts) ? parts : []).concat((message.content || {}).text || '');
+        const offered = chunks.some(function(part) {
+          return typeof part === 'string' && part.indexOf('sandbox:' + found.sandboxPath) !== -1;
+        });
+        const priority = offered ? 0 : (role === 'assistant' ? 1 : 2);
+        if (seen.has(key)) {
+          const existing = artifacts.find(function(a) { return a.sandboxPath === found.sandboxPath; });
+          if (existing && priority < existing.priority) {
+            existing.priority = priority;
+            existing.messageId = messageId;
+          }
+          continue;
+        }
         seen.add(key);
         artifacts.push({
           kind: 'sandbox',
+          priority: priority,
           messageId: messageId,
           name: found.name,
           fileId: null,
@@ -654,15 +678,44 @@ async function resolveSandboxDownloadUrl(conversationId, messageId, sandboxPath,
   const url = '/backend-api/conversation/' + conversationId +
     '/interpreter/download?message_id=' + encodeURIComponent(messageId) +
     '&sandbox_path=' + encodeURIComponent(sandboxPath);
+  return requestArtifactDownloadUrl(url, doFetch, token, opts);
+}
+
+/** Uploaded files use the file service, not the interpreter sandbox.
+ * Request path and response fields were observed on a manual document download.
+ * Never derive a sandbox path from an uploaded filename. */
+async function resolveUploadedDownloadUrl(conversationId, fileId, options) {
+  const opts = options || {};
+  const doFetch = opts.fetchImpl || (typeof fetch === 'function' ? fetch : null);
+  if (!doFetch || !conversationId || !fileId) return null;
+  const token = opts.token !== undefined ? opts.token : await fetchSessionToken(doFetch);
+  if (!token) return null;
+  const url = '/backend-api/files/download/' + encodeURIComponent(fileId) +
+    '?conversation_id=' + encodeURIComponent(conversationId) + '&download_intent=true';
+  return requestArtifactDownloadUrl(url, doFetch, token, opts);
+}
+
+async function requestArtifactDownloadUrl(url, doFetch, token, opts) {
+  const fail = function(kind, host) {
+    if (typeof opts.onFailure === 'function') opts.onFailure(kind, host);
+    return null;
+  };
+  let step = 'request';
   try {
     const response = await doFetch(url, {
       credentials: 'include',
       headers: { accept: 'application/json', authorization: 'Bearer ' + token },
     });
-    if (!response || !response.ok) return null;
+    if (!response || !response.ok) return fail('http-error');
+    step = 'json';
     const body = await response.json();
     const resolved = body && (body.download_url || body.url);
-    if (!resolved || !isConversationFileUrl(resolved)) return null;
+    if (typeof resolved !== 'string' || !resolved) return fail('missing-url');
+    if (!isConversationFileUrl(resolved)) {
+      let host = '';
+      try { host = new URL(resolved).hostname; } catch (_e) { /* invalid URL */ }
+      return fail('rejected-url', host);
+    }
     return {
       url: resolved,
       fileName: (body && body.file_name) || null,
@@ -672,7 +725,7 @@ async function resolveSandboxDownloadUrl(conversationId, messageId, sandboxPath,
         : null,
     };
   } catch (_e) {
-    return null;
+    return fail(step === 'json' ? 'unreadable-json' : 'request-error');
   }
 }
 
@@ -696,26 +749,29 @@ async function resolveArtifactPanelFiles(conversationId, options) {
     : await fetchSessionToken(doFetch);
   if (!token) return files.map((f) => ({ file: f, resolved: null }));
 
-  const messageIds = opts.messageIds || [];
+  const messageIds = Array.from(new Set(opts.messageIds || []));
   let workingId = opts.messageId || null;
   const out = [];
   for (const file of files) {
     let resolved = null;
-    if (workingId) {
-      resolved = await resolveSandboxDownloadUrl(
-        conversationId, workingId, file.sandboxPath,
-        { fetchImpl: doFetch, token: token });
+    // An API path carries its own message context. Retrying every unrelated
+    // message id for the same path starves subsequent files without changing
+    // which file the endpoint selects. Panel-only paths retain the legacy search.
+    const candidates = file.messageId ? [file.messageId] :
+      Array.from(new Set([workingId].concat(messageIds).filter(Boolean)));
+    if (file.kind === 'attachment') {
+      resolved = await resolveUploadedDownloadUrl(conversationId, file.fileId,
+        { fetchImpl: doFetch, token: token, onFailure: opts.onFailure });
     }
-    if (!resolved) {
-      // No id known to work yet (or it stopped working): find one, once.
-      for (const candidate of messageIds) {
-        const attempt = await resolveSandboxDownloadUrl(
-          conversationId, candidate, file.sandboxPath,
-          { fetchImpl: doFetch, token: token });
-        if (attempt) { workingId = candidate; resolved = attempt; break; }
-      }
+    for (const candidate of file.kind === 'attachment' ? [] : candidates) {
+      const attempt = await resolveSandboxDownloadUrl(
+        conversationId, candidate, file.sandboxPath,
+        { fetchImpl: doFetch, token: token, onFailure: opts.onFailure });
+      if (attempt) { workingId = candidate; resolved = attempt; break; }
     }
-    out.push({ file: file, resolved: resolved });
+    const entry = { file: file, resolved: resolved };
+    out.push(entry);
+    if (typeof opts.onResolved === 'function') opts.onResolved(entry);
   }
   return out;
 }
@@ -1074,6 +1130,43 @@ async function scrollToConversationStart(container, options) {
     const first = readFirstTurn(target);
     return first && first.getAttribute ? first.getAttribute('data-turn-id') : null;
   };
+  // Live measurement: paging stalled at 71 and 91 containers while the
+  // sentinel stayed visible. Leaving the viewport and returning loaded ten
+  // more each time. At the actual beginning (221 containers), the sentinel
+  // disappeared. Mounted sections and their relative test indices are NOT a
+  // history count: empty height-preserving containers represent unmounted turns.
+  const readPagination = function(target) {
+    if (!target.querySelector || !target.querySelectorAll) return null;
+    const candidate = target.querySelector('[data-testid="conversation-pagination-sentinel"]');
+    const sentinel = candidate && candidate.getAttribute &&
+      candidate.getAttribute('data-testid') === 'conversation-pagination-sentinel' ? candidate : null;
+    const root = target.querySelector('[data-turn-id-container="client-created-root"]');
+    const paginatedRoot = target.querySelector('div[data-turn-id-container^="paginated-root:"]');
+    // A freshly navigated page used client-created-root; the same conversation
+    // after export used an EMPTY paginated-root sibling. Neither root has to
+    // contain the first turn. The first real holder below it must do so.
+    const knownLayout = (root && root.getAttribute &&
+      root.getAttribute('data-turn-id-container') === 'client-created-root') ||
+      (paginatedRoot && paginatedRoot.tagName === 'DIV' &&
+       paginatedRoot.getAttribute('data-turn-id-container').indexOf('paginated-root:') === 0 &&
+       !paginatedRoot.querySelector('[data-turn-id]'));
+    if (!sentinel && !knownLayout) return null;
+    const holders = Array.from(target.querySelectorAll('div[data-turn-id-container]')).filter(function(el) {
+      const id = el.getAttribute('data-turn-id-container');
+      return id && id !== 'client-created-root' && id.indexOf('paginated-root') !== 0;
+    });
+    const first = readFirstTurn(target);
+    const held = holders[0] && holders[0].querySelector('[data-turn-id]');
+    const atFirstHolder = !!first && !!held && (held === first ||
+      (!!held.getAttribute('data-turn-id') &&
+       held.getAttribute('data-turn-id') === first.getAttribute('data-turn-id')));
+    return {
+      pending: !!sentinel,
+      loading: !!(sentinel && sentinel.querySelector('svg')),
+      count: holders.length,
+      complete: !sentinel && !!knownLayout && atFirstHolder && target.scrollTop <= 1,
+    };
+  };
   // The page's own marker for "nothing exists above this". Measured on a live
   // conversation: exactly one such container among 150, its suffix being the
   // conversation id. Note it is present in the DOM even while scrolled to the
@@ -1186,6 +1279,8 @@ async function scrollToConversationStart(container, options) {
   let previousFirstId = null;
   let rounds = 0;
   let confirmed = false;
+  let confirmedByPagination = false;
+  let sawPagination = false;
   // Progress is measured by the climb producing NEW history, not by time.
   let sinceProgress = 0;
   let bestFirstId = null;
@@ -1196,10 +1291,18 @@ async function scrollToConversationStart(container, options) {
     await scrollTo(container, 0, 'auto');
     await sleep(settleMs);
 
-    if (readsAtStart(container)) { confirmed = true; break; }
+    const pagination = readPagination(container);
+    if (pagination) sawPagination = true;
+    if (pagination && pagination.complete) {
+      confirmed = true;
+      confirmedByPagination = true;
+      break;
+    }
+    // A live pagination sentinel takes precedence over legacy root markers.
+    if (!(pagination && pagination.pending) && readsAtStart(container)) { confirmed = true; break; }
 
     const firstId = readFirstTurnId(container);
-    const mounted = countTurns(container);
+    const mounted = pagination ? pagination.count : countTurns(container);
     // A new first turn, or more turns mounted, means history is still arriving:
     // the climb is working and must not be cut off, however long it takes.
     if (firstId !== bestFirstId || mounted > seenTurnIds) {
@@ -1221,13 +1324,23 @@ async function scrollToConversationStart(container, options) {
     // and no new first id, an order of magnitude over the slowest fetch measured
     // (8 s, which the climb survived with zero loss). A page that publishes no
     // marker at all settles for far less: there is nothing to wait for.
-    const budget = publishesMarker(container) ? noProgressRounds : noMarkerRounds;
+    const budget = sawPagination || publishesMarker(container) ? noProgressRounds : noMarkerRounds;
     if (sinceProgress >= budget) break;
     // The backstop. Deliberately checked LAST, so a climb that would finish on
     // its own always does; this only catches the loop that never would.
     if (maxClimbMs > 0 && clock() - startedAt >= maxClimbMs) {
       ranOutOfTime = true;
       break;
+    }
+    // Re-arm an edge-triggered sentinel instead of repeatedly assigning the
+    // same top position. Do not disturb an in-flight request. Two viewport
+    // heights clear the sentinel; the next round re-enters it. This movement
+    // never resets the no-progress or elapsed-time budgets.
+    if (pagination && pagination.pending && !pagination.loading &&
+        sinceProgress >= 2 && atTop) {
+      await scrollTo(container, Math.min(container.clientHeight * 2,
+        Math.max(0, container.scrollHeight - container.clientHeight)), 'auto');
+      await sleep(settleMs);
     }
   }
 
@@ -1240,14 +1353,15 @@ async function scrollToConversationStart(container, options) {
   // came to be reported as a complete conversation.
   return {
     reachedTop: confirmed,
-    confirmedByMarker: confirmed,
+    confirmedByMarker: confirmed && !confirmedByPagination,
+    confirmedByPagination: confirmedByPagination,
     quietedWithoutMarker: !confirmed && steady >= stableRounds,
     // Whether the page has the marker mechanism at all. Only a page WITHOUT one
     // may treat a quiet climb as good enough; a page that has one and did not
     // reach it is a truncated export and must say so.
     // A climb cut off by the clock is ALWAYS incomplete, whatever the page's
     // markup does — so it must never qualify for the marker-less exemption.
-    markerAbsentFromPage: !ranOutOfTime && !publishesMarker(container),
+    markerAbsentFromPage: !ranOutOfTime && !sawPagination && !publishesMarker(container),
     ranOutOfTime: ranOutOfTime,
     rounds: rounds,
   };
@@ -2256,6 +2370,8 @@ async function appendPanelArtifacts(markdown, options) {
     ? opts.artifacts
     : await fetchConversationArtifacts(conversationId, opts);
 
+  if (typeof opts.onInventory === 'function') opts.onInventory(artifacts);
+
   // Ask the API FIRST, then decide whether waiting for the panel is worth it.
   // Most conversations have no generated files, and paying the panel-wait budget
   // on every one of them would slow every export for nothing. When the API says
@@ -2283,8 +2399,13 @@ async function appendPanelArtifacts(markdown, options) {
   const apiFiles = (artifacts || [])
     .filter(function(a) { return a && a.sandboxPath; })
     .map(function(a) {
-      return { name: a.name, sandboxPath: a.sandboxPath, fromApi: true };
+      return { name: a.name, sandboxPath: a.sandboxPath, fromApi: true,
+        priority: a.priority === undefined ? 1 : a.priority, messageId: a.messageId };
     });
+
+  const uploadedFiles = (artifacts || []).filter(function(a) {
+    return a && a.kind === 'attachment' && a.name;
+  }).map(function(a) { return Object.assign({}, a, { priority: 0 }); });
 
   let files = opts.files;
   if (!files) {
@@ -2293,7 +2414,12 @@ async function appendPanelArtifacts(markdown, options) {
     // for such a conversation. Wait for the panel when either source says so.
     const mayHaveFiles = artifacts === null || artifacts.length > 0 ||
       bodyFiles.length > 0 || scannedFiles.length > 0;
-    files = mayHaveFiles
+    // A completed scan plus an explicit API link already supplies the file's
+    // real path. Do not spend half the lookup budget waiting for a viewer panel
+    // that archives do not render. Other layouts retain the late-panel wait.
+    const offeredAfterScan = Array.isArray(opts.scannedPanelFiles) &&
+      (uploadedFiles.length > 0 || apiFiles.some(function(file) { return file.priority === 0; }));
+    files = mayHaveFiles && !offeredAfterScan
       ? await waitForArtifactPanel(doc, opts)
       : listArtifactPanelFiles(doc);
   }
@@ -2308,8 +2434,13 @@ async function appendPanelArtifacts(markdown, options) {
   // Last, so a path the API states verbatim wins over one the panel rebuilt
   // from a row label. Both are keyed by path, so this adds the files that have
   // no other source and overwrites nothing that disagrees.
-  for (const file of apiFiles) bySandboxPath.set(file.sandboxPath, file);
-  files = Array.from(bySandboxPath.values());
+  for (const file of apiFiles) {
+    const visible = bySandboxPath.has(file.sandboxPath);
+    bySandboxPath.set(file.sandboxPath, visible ? Object.assign({}, file, { priority: 0 }) : file);
+  }
+  files = uploadedFiles.concat(Array.from(bySandboxPath.values())).sort(function(a, b) {
+    return (a.priority || 0) - (b.priority || 0);
+  });
 
   // Files behind a button handler are gathered BEFORE the early return below:
   // such a file has no sandbox path at all, so `files` is empty for a
@@ -2327,7 +2458,11 @@ async function appendPanelArtifacts(markdown, options) {
     ? filterButtonsAgainstPanel(opts.scannedButtons, panelNames)
     : null;
   const buttonFiles = opts.clickDownloads === false
-    ? []
+    ? (opts.reportUnresolvedButtons
+      ? (scannedButtons || downloadButtonsInPage(doc, panelNames)).map(function(entry) {
+        return { name: entry.label, url: null };
+      })
+      : [])
     : (opts.buttonFiles !== undefined
       ? opts.buttonFiles
       : await collectButtonDownloads(Object.assign({}, opts, {
@@ -2337,7 +2472,10 @@ async function appendPanelArtifacts(markdown, options) {
         buttons: scannedButtons === null ? undefined : scannedButtons,
       })));
 
-  if (!files.length && !buttonFiles.length) return markdown;
+  // An unreadable inventory can hide uploads with no DOM download link.
+  // Preserve that uncertainty even if there are no visible candidates.
+  const inventoryUnavailable = artifacts === null;
+  if (!files.length && !buttonFiles.length && !inventoryUnavailable) return markdown;
 
   // Candidate message ids for the download call. Measured: the endpoint requires
   // a message_id but does NOT use it to select the file — 12 different ids
@@ -2384,6 +2522,8 @@ async function appendPanelArtifacts(markdown, options) {
     messageIds: messageIds,
     fetchImpl: opts.fetchImpl,
     token: opts.token,
+    onResolved: opts.onResolved,
+    onFailure: opts.onFailure,
   });
 
   const lines = [];
@@ -2417,10 +2557,17 @@ async function appendPanelArtifacts(markdown, options) {
   // guard is therefore harmless to output and survives the suite — recorded in
   // MUTATION-EVIDENCE.md as redundant-by-design rather than an untested branch,
   // so it is not "fixed" by deleting one of the two.
-  if (!lines.length && !unresolved.length) return markdown;
+  if (!lines.length && !unresolved.length && !inventoryUnavailable) return markdown;
 
   const block = ['## Files'];
   if (lines.length) block.push(lines.join('\n'));
+  if (unresolved.length || inventoryUnavailable) {
+    if (typeof opts.onIncomplete === 'function') opts.onIncomplete();
+  }
+  if (inventoryUnavailable) {
+    block.push('> Could not enumerate attachments: the conversation API was unreachable. ' +
+      'Visible file links were preserved, but attachment completeness is unknown.');
+  }
   if (unresolved.length) {
     block.push('> Could not retrieve a download link for: ' +
       unresolved.join(', ') +
@@ -3434,24 +3581,98 @@ async function getConversationMarkdown(settings) {
     // tree with no href and no testid, so the per-turn scan above cannot see
     // them. Appending them here puts them in the markdown, which is where the
     // popup's downloader looks for artefacts.
+    let attachmentsIncomplete = false;
     if (wantFiles) {
       // What the walk saw wins: those rows were read while their own turn was
       // mounted. appendPanelArtifacts still reads the panel itself, and merges,
       // so a conversation whose panel IS a sidebar keeps working unchanged.
-      md = await appendPanelArtifacts(md, {
-        scannedPanelFiles: Array.from(panelFilesDuringScan.values()),
-        // Only when a scan actually ran. The legacy path has no walk behind it,
-        // so it must keep its own traversal rather than be told "none found".
-        scannedButtons: firstSection ? Array.from(buttonsDuringScan.values()) : undefined,
-      });
+      // Content scripts execute in an isolated world. Patching that world's
+      // anchor.click/window.open cannot intercept a handler owned by the page.
+      // Never click its download buttons: an escaped native download can close
+      // the popup before the conversation is saved. Keep unresolved names.
+      const controller = typeof AbortController === 'function' ? new AbortController() : null;
+      const phaseBudget = settings && settings.artifactTimeoutMs !== undefined
+        ? settings.artifactTimeoutMs : 30000;
+      let phaseTimer;
+      const resolvedSoFar = [];
+      const lookup = { stage: 'starting', requests: 0, statuses: {}, candidates: null, offered: 0, failures: {}, rejectedHosts: [], reason: 'unresolved' };
+      try {
+        md = await Promise.race([
+          appendPanelArtifacts(md, {
+            scannedPanelFiles: firstSection ? Array.from(panelFilesDuringScan.values()) : undefined,
+            scannedButtons: firstSection ? Array.from(buttonsDuringScan.values()) : undefined,
+            clickDownloads: false,
+            reportUnresolvedButtons: true,
+            onInventory: function(artifacts) {
+              lookup.candidates = artifacts === null ? null : artifacts.length;
+              lookup.offered = (artifacts || []).filter(function(a) { return a.priority === 0; }).length;
+              lookup.stage = 'panel';
+            },
+            onResolved: function(entry) { resolvedSoFar.push(entry); },
+            onFailure: function(kind, host) {
+              lookup.failures[kind] = (lookup.failures[kind] || 0) + 1;
+              if (host && lookup.rejectedHosts.indexOf(host) === -1) lookup.rejectedHosts.push(host);
+            },
+            onIncomplete: function() { attachmentsIncomplete = true; },
+            fetchImpl: typeof fetch === 'function' ? async function(url, init) {
+              // Only stage names and status counts leave this wrapper. Never
+              // include URLs, headers, response bodies or exception messages.
+              if (controller && controller.signal.aborted) throw new Error('lookup cancelled');
+              lookup.stage = String(url).indexOf('/api/auth/session') !== -1 ? 'session' :
+                ((String(url).indexOf('/interpreter/download') !== -1 ||
+                  String(url).indexOf('/files/download/') !== -1) ? 'file-link' : 'conversation');
+              lookup.requests += 1;
+              const response = await fetch(url, Object.assign({}, init, controller ? { signal: controller.signal } : {}));
+              const code = response && Number.isInteger(response.status) ? response.status : 0;
+              lookup.statuses[code] = (lookup.statuses[code] || 0) + 1;
+              return response;
+            } : undefined,
+          }),
+          new Promise(function(_resolve, reject) {
+            phaseTimer = setTimeout(function() {
+              lookup.reason = 'timeout';
+              if (controller) controller.abort();
+              reject(new Error('attachment lookup timed out'));
+            }, phaseBudget);
+          }),
+        ]);
+      } catch (_error) {
+        attachmentsIncomplete = true;
+        if (lookup.reason !== 'timeout') lookup.reason = 'exception';
+        // The text was already captured. Attachment failure must not erase it.
+        const names = Array.from(new Set(
+          Array.from(panelFilesDuringScan.values()).map(function(f) { return f.name; })
+            .concat(Array.from(buttonsDuringScan.values()).map(function(b) { return b.label; }))));
+        const available = resolvedSoFar.filter(function(entry) { return entry.resolved && entry.resolved.url; });
+        const recoveredLinks = available.map(function(entry) { return markdownLink(entry.file.name, entry.resolved.url); });
+        const recoveredNames = new Set(available.map(function(entry) { return entry.file.name; }));
+        const missingNames = names.filter(function(name) { return !recoveredNames.has(name); });
+        md += '\n\n---\n\n## Files' +
+          (recoveredLinks.length ? '\n\n' + recoveredLinks.join('\n') : '') +
+          '\n\n> Attachment lookup failed or timed out; ' +
+          'the conversation text was preserved. Re-run to retrieve files.' +
+          (missingNames.length ? '\n\n> Could not retrieve a download link for: ' + missingNames.join(', ') : '');
+      } finally {
+        clearTimeout(phaseTimer);
+      }
+      if (attachmentsIncomplete) {
+        md += '\n\n> Attachment diagnostics: reason=' + lookup.reason +
+          '; stage=' + lookup.stage + '; requests=' + lookup.requests +
+          '; HTTP=' + JSON.stringify(lookup.statuses) +
+          '; candidates=' + (lookup.candidates === null ? 'unknown' : lookup.candidates) +
+          '; resolved=' + resolvedSoFar.filter(function(entry) { return entry.resolved; }).length +
+          '; offered=' + lookup.offered + '; linkFailures=' + JSON.stringify(lookup.failures) +
+          '; rejectedHosts=' + JSON.stringify(lookup.rejectedHosts) + '.';
+      }
     }
     const title = extractConversationTitle();
     if (title) md = '# ' + title + '\n\n' + md;
     return {
       ok: true,
       md: md,
-      partial: !!scanMeta && scanMeta.partial === true,
-      partialReason: scanMeta && scanMeta.reason ? scanMeta.reason : null,
+      partial: (!!scanMeta && scanMeta.partial === true) || attachmentsIncomplete,
+      partialReason: scanMeta && scanMeta.partial ? scanMeta.reason :
+        (attachmentsIncomplete ? 'attachments-unavailable' : null),
       title: title,
       slug: slugifyTitle(title),
       lines: md.split('\n').length,
@@ -3537,4 +3758,3 @@ if (typeof module !== 'undefined' && module.exports) {
     waitForConversationReady: waitForConversationReady,
   };
 }
-

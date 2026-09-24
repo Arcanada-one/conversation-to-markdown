@@ -5,6 +5,143 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.6] — 2026-09-24
+
+### Fixed
+
+- Do not treat intended output paths inside assistant tool commands, executable
+  code messages, or private analysis as produced attachments. An observed
+  website-fetch command failed before writing its HTML output; the old parser
+  incorrectly reported that nonexistent output as a missing attachment.
+- Preserve file candidates from successful tool results and user-facing answer
+  links, even when the associated creation command was excluded.
+- Mark an unreadable attachment inventory as incomplete, including conversations
+  with no visible file controls and those whose visible downloads all resolve.
+  A confirmed empty inventory remains complete.
+
+### Verification
+
+- Root cause confirmed in the live conversation's expanded tool record.
+- Source filtering and inventory-failure handling have integration regressions,
+  successful-output controls, and negative controls against the old behavior.
+- The 1.6.5 uploaded-document byte comparison remains valid for its tested flow.
+  Current complete live batch coverage is not claimed by the regression tests.
+
+## [1.6.5] — 2026-09-24
+
+### Fixed
+
+- Resolve named uploaded attachments using their file identifiers and the
+  observed file-service download endpoint. Keep unresolved uploads in the file
+  warnings instead of silently filtering out entries without sandbox paths.
+- Reuse download-host validation, authenticated request handling, and progressive
+  result preservation for uploaded files.
+
+### Documentation
+
+- Add separate installation, unpacked-update, packaging, and Web Store update
+  guides. Correct delivery defaults, overwrite behavior, session-token handling,
+  and the distinction between source builds and published releases.
+
+### Verification status
+
+- Local verification build. The upload request and response contract was
+  captured from a successful manual download. A fresh extension export saved
+  the uploaded document with identical bytes to the manual reference and
+  preserved all 218 conversation role blocks. Generated-file lookup failures
+  and redundant missing-button warnings remain open.
+
+## [1.6.4] — 2026-09-24
+
+### Fixed
+
+- Resolve explicitly offered sandbox files before intermediate paths found in
+  technical messages. When a later reply offers an earlier-created path, promote
+  it and retain the offering message's identifier.
+- Use the message context carried by each API file instead of retrying unrelated
+  message identifiers. Panel-only paths retain their fallback lookup.
+- After a scan, explicit API links no longer wait for an absent viewer panel.
+  Other layouts retain the bounded late-panel wait.
+
+### Diagnostics
+
+- Distinguish missing URLs, rejected URLs, unreadable JSON and request failures
+  even when an endpoint returns HTTP 200. Include rejected hostnames only, never
+  the full signed addresses, in incomplete-export diagnostics.
+- Local verification build; automatic retrieval on the reported conversation
+  still requires a new export before this issue can be called resolved.
+
+## [1.6.3] — 2026-09-24
+
+### Fixed
+
+- Do not retry the same message identifier repeatedly for one unavailable file.
+- Preserve already-resolved attachment links when a later lookup times out, so
+  the downloader can still save those files beside the conversation.
+
+### Diagnostics
+
+- Incomplete lookups include their stage, request/status counts, candidate count
+  and resolved count in the local Markdown. Diagnostics contain no request
+  URLs, headers, response bodies, session tokens or signed links.
+- This local build provides targeted fixes and evidence for the unresolved
+  attachment issue. Successful manual download proves file availability, but
+  automated retrieval on the reported conversation still needs verification.
+
+## [1.6.2] — 2026-09-24
+
+### Changed
+
+- Enable **Save .md + files to chatgpt-export/** by default whenever the popup
+  opens. Uncheck it to copy Markdown to the clipboard without downloading files.
+- This local build changes the default selection only. Attachment lookup
+  failures remain unresolved; the export preserves text and reports missing
+  files as described in 1.6.1.
+
+## [1.6.1] — 2026-09-24
+
+### Fixed
+
+- Stop invoking page-owned download buttons from the isolated content script.
+  Those handlers could download a lone archive or patch outside the export
+  folder; replacing the content script's JavaScript methods cannot intercept
+  the page's download routines. API-resolvable files still use the existing
+  retrieval path; unresolved button labels are retained as explicit warnings.
+- Bound attachment lookup to 30 seconds after the text scan. If lookup fails or
+  hangs, preserve the captured conversation and report incomplete files instead
+  of losing the Markdown. Incomplete file lookup is not banked as a completed
+  batch export.
+
+### Verification and limitations
+
+- Regression tests exercise page-owned handlers separately from the content
+  script and a lookup that never settles, including after cancellation.
+- This is a local verification build. The reported live conversation must be
+  exported again before this issue can be called resolved. Uploaded-file
+  retrieval and duplicate file links are not changed by this release.
+
+## [1.6.0] — 2026-09-24
+
+### Fixed
+
+- Resume stalled history pagination by moving an idle pagination sentinel out of
+  view and returning to the top. Active loading is left undisturbed, and the
+  failure budget is not extended by repeated movement.
+- Recognize both observed completed pagination layouts, including an empty root
+  sibling. Confirm the beginning only when the sentinel is absent and the first
+  real message holder has its turn mounted at the top.
+
+### Verification and limitations
+
+- A live long-conversation export preserved all 207 turns of its historical
+  reference, with 11 additional turns. A later export saved its conversation,
+  five documents and an intact archive; the five documents matched the archive
+  contents byte for byte.
+- This release does not change attachment retrieval. Uploaded-file omissions,
+  duplicate file links and interrupted attachment exports remain unresolved.
+- Version 1.6.0 identifies the local verification build. Store publication is a
+  separate step; this entry does not claim that the store has been updated.
+
 ## [1.5.8] — 2026-09-14
 
 ### Fixed

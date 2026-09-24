@@ -95,6 +95,9 @@ function createVirtualizedFixture(pages, originalScrollTop) {
           querySelector: () => (atStart && first ? first : null),
         };
       }
+      // This fixture models the legacy marker layout, not the separate
+      // pagination sentinel. Unknown selectors match nothing, as in a DOM.
+      if (selector !== '[data-turn-id]') return null;
       const list = this.querySelectorAll(selector);
       return list && list.length ? list[0] : null;
     },
@@ -102,6 +105,106 @@ function createVirtualizedFixture(pages, originalScrollTop) {
   container.scrollCalls = calls;
   return container;
 }
+
+// Measured DOM shape: an empty root, a separate pagination sentinel, and
+// height-preserving containers. The sentinel needs to LEAVE and RE-ENTER;
+// assigning scrollTop=0 again never loads a third page on its own.
+function createSentinelConversation(options = {}) {
+  let loaded = options.complete ? 220 : 20;
+  let intersecting = false;
+  let markerGone = !!options.complete;
+  const calls = [];
+  const attrNode = (attrs, querySelector = () => null) => ({
+    tagName: 'DIV', getAttribute: name => attrs[name] ?? null, querySelector,
+  });
+  let first = attrNode({ 'data-turn-id': 'first-' + loaded });
+  const root = attrNode({ 'data-turn-id-container': options.paginatedRoot ? 'paginated-root:fixture' : 'client-created-root' });
+  const sentinel = attrNode({ 'data-testid': 'conversation-pagination-sentinel' },
+    sel => sel === 'svg' && options.loading ? {} : null);
+  const container = {
+    scrollTop: 40000, scrollHeight: 55000, clientHeight: 855,
+    querySelector(selector) {
+      if (selector === '[data-testid="conversation-pagination-sentinel"]') return markerGone ? null : sentinel;
+      if (selector === '[data-turn-id-container="client-created-root"]') return options.paginatedRoot ? null : root;
+      if (selector === 'div[data-turn-id-container^="paginated-root:"]') return options.paginatedRoot ? root : null;
+      if (selector === '[data-turn-id]') return first;
+      return null;
+    },
+    querySelectorAll(selector) {
+      if (selector === '[data-turn-id]') return [first];
+      if (selector !== 'div[data-turn-id-container]') return [];
+      return [root, ...Array.from({ length: loaded }, (_, i) =>
+        attrNode({ 'data-turn-id-container': i === 0 ? 'first-' + loaded : 'holder-' + i },
+          () => i === 0 && !options.firstUnmounted ? first : null))];
+    },
+  };
+  const scrollTo = async (target, top) => {
+    calls.push(top);
+    target.scrollTop = top;
+    const nextIntersecting = top < 855;
+    if (nextIntersecting && !intersecting && !options.stalled && !options.loading && !markerGone) {
+      loaded = Math.min(220, loaded + 10);
+      target.scrollHeight += 4000;
+      first = attrNode({ 'data-turn-id': 'first-' + loaded });
+      markerGone = loaded === 220;
+    }
+    intersecting = nextIntersecting;
+  };
+  return { container, scrollTo, calls, loaded: () => loaded };
+}
+
+test('sentinel re-entry loads the full history after repeated top assignments stall', async () => {
+  const control = createSentinelConversation();
+  for (let i = 0; i < 50; i++) await control.scrollTo(control.container, 0);
+  assert.equal(control.loaded(), 30, 'positive control: repeated zero really stalls');
+  const page = createSentinelConversation();
+  const result = await parser.scrollToConversationStart(page.container, {
+    scrollTo: page.scrollTo, sleep: async () => {}, noProgressRounds: 6,
+  });
+  assert.equal(page.loaded(), 220);
+  assert.equal(result.reachedTop, true);
+  assert.equal(result.confirmedByPagination, true);
+  assert.equal(result.confirmedByMarker, false);
+  assert.ok(page.calls.some(top => top >= page.container.clientHeight));
+});
+
+test('an already fully loaded pagination layout confirms its first mounted holder', async () => {
+  for (const paginatedRoot of [false, true]) {
+    const page = createSentinelConversation({ complete: true, paginatedRoot });
+    const result = await parser.scrollToConversationStart(page.container, {
+      scrollTo: page.scrollTo, sleep: async () => {},
+    });
+    assert.equal(result.reachedTop, true);
+    assert.equal(result.rounds, 1);
+  }
+});
+
+test('sentinel disappearance cannot confirm a later mounted turn above an empty first holder', async () => {
+  for (const paginatedRoot of [false, true]) {
+    const page = createSentinelConversation({ complete: true, firstUnmounted: true, paginatedRoot });
+    const result = await parser.scrollToConversationStart(page.container, {
+      scrollTo: page.scrollTo, sleep: async () => {}, noProgressRounds: 4,
+    });
+    assert.equal(result.reachedTop, false);
+    assert.equal(result.markerAbsentFromPage, false);
+  }
+});
+
+test('a pending sentinel never receives the marker-less completeness exemption', async () => {
+  for (const paginatedRoot of [false, true]) {
+    for (const loading of [false, true]) {
+      const page = createSentinelConversation({ stalled: true, loading, paginatedRoot });
+      const result = await parser.scrollToConversationStart(page.container, {
+        scrollTo: page.scrollTo, sleep: async () => {}, noProgressRounds: 4,
+      });
+      assert.equal(result.reachedTop, false);
+      assert.equal(result.markerAbsentFromPage, false);
+      assert.ok(result.rounds <= 6, 're-entry does not replenish the failure budget');
+      assert.equal(page.calls.some(top => top > 0), !loading,
+        'an active loading indicator prevents re-entry until the request finishes');
+    }
+  }
+});
 
 function textNode(value) {
   return { nodeType: 3, textContent: value };
@@ -3025,10 +3128,10 @@ test('an API-named file that does not resolve is disclosed, never invented', asy
     'a 200 without a link is a failure, not a success');
 });
 
-test('a conversation with no panel artefacts is left byte-identical', async () => {
+test('a conversation with a confirmed empty inventory and no panel is left byte-identical', async () => {
   const doc = { querySelectorAll() { return []; } };
   const md = '# Chat\n\nbody';
-  assert.equal(await parser.appendPanelArtifacts(md, { doc, conversationId: 'c' }), md);
+  assert.equal(await parser.appendPanelArtifacts(md, { doc, conversationId: 'c', artifacts: [] }), md);
 });
 
 test('the capture path itself appends panel artefacts', async () => {
@@ -3103,7 +3206,7 @@ test('the capture path itself appends panel artefacts', async () => {
   }
 });
 
-test('the capture path collects a button that is only mounted early in the scan', async () => {
+test('the capture path preserves an early button name without invoking the page download', async () => {
   // The wiring, not the helper. Two mutants survived a suite that drove
   // collectButtonDownloads directly with a hand-supplied list: "do not collect
   // during the scan" and "do not pass what was collected". Both are exactly the
@@ -3147,15 +3250,11 @@ test('the capture path collects a button that is only mounted early in the scan'
       wasAtTop = atTop;
     },
   });
-  const archiveButton = downloadButton('Скачать готовый Canon Consilium Prompt Bundle v1', {
-    onClick() {
-      global.window.HTMLAnchorElement.prototype.click.call({
-        getAttribute: () => 'https://chatgpt.com/backend-api/estuary/content' +
-          '?id=file_9&fn=canon-consilium-prompt-bundle-v1.zip&SIGNED&ts=1',
-        hasAttribute: (n) => n === 'download',
-      });
-    },
-  });
+  // Page handlers belong to another world: the content script cannot replace
+  // this function by patching its own window.HTMLAnchorElement.prototype.
+  let nativeDownloads = 0;
+  const pageDownload = () => { nativeDownloads += 1; };
+  const archiveButton = downloadButton('Скачать Git patch', { onClick: pageDownload });
   // What the landing position shows instead: unrelated suggestions. Two of them,
   // as measured — enough to make a "found nothing here" guard stand down.
   const suggestions = [
@@ -3191,11 +3290,13 @@ test('the capture path collects a button that is only mounted early in the scan'
   try {
     const result = await parser.getConversationMarkdown({ downloadFiles: true });
     assert.equal(result.ok, true, 'capture failed: ' + result.error);
-    assert.equal(archiveButton.clicked, 1,
-      'the button seen only during the scan must still be clicked');
+    assert.equal(archiveButton.clicked, 0, 'page-owned download handlers must not be invoked');
+    assert.equal(nativeDownloads, 0);
+    assert.equal(result.partial, true);
+    assert.equal(result.partialReason, 'attachments-unavailable');
     assert.ok(
-      result.md.indexOf('canon-consilium-prompt-bundle-v1.zip') !== -1,
-      'the archive must reach the markdown the popup downloads from'
+      result.md.indexOf('Could not retrieve a download link for: Скачать Git patch') !== -1,
+      'the unresolved file must be named, not silently dropped'
     );
     // Positive control: the suggestions are present throughout and must never be
     // clicked, or the assertion above could be satisfied by clicking everything.
@@ -4207,7 +4308,7 @@ test('the prose label is used only when the URL carries no name', async () => {
     'a label used as a filename must not carry path separators');
 });
 
-test('the shipped capture path reaches a file offered only as a button', async () => {
+test('the shipped capture path reports a button-only file without a native download', async () => {
   // The wiring, not the helper. A mutation deleting the button collection from
   // appendPanelArtifacts leaves every unit test above green, because they call
   // the helper directly. This drives getConversationMarkdown — the function the
@@ -4274,10 +4375,10 @@ test('the shipped capture path reaches a file offered only as a button', async (
   try {
     const result = await parser.getConversationMarkdown({ downloadFiles: true });
     assert.equal(result.ok, true, 'capture failed: ' + result.error);
-    assert.equal(clicked, 1, 'the shipped path must click the download button');
+    assert.equal(clicked, 0, 'the isolated world must never invoke page download handlers');
     assert.ok(
-      result.md.indexOf('[canon-consilium-prompt-bundle-v1.zip](https://chatgpt.com/backend-api/estuary/') !== -1,
-      'the archive must reach the markdown as a link the popup can fetch',
+      result.md.indexOf('Could not retrieve a download link for: Скачать готовый Canon Consilium Prompt Bundle v1.zip') !== -1,
+      'an unresolved button must stay visible in the exported inventory',
     );
   } finally {
     global.document = previousDocument;
@@ -4910,4 +5011,297 @@ test('a throwing collector does not lose the conversation', async () => {
   });
 
   assert.equal(turns.length, 1, 'the captured turns must survive a failing collector');
+});
+
+
+test('attachment lookup timeout preserves captured text and reports incomplete files', async () => {
+  const previous = { document: global.document, location: global.location, fetch: global.fetch };
+  const message = { getAttribute: () => 'user', querySelector: () => ({ textContent: 'Сохрани разговор даже при отказе файлов.' }) };
+  let started = false;
+  let aborted = false;
+  global.document = {
+    title: 'ChatGPT', querySelector: () => null,
+    querySelectorAll: selector => selector === '[data-message-author-role]' ? [message] : [],
+  };
+  global.location = { pathname: '/c/timeout-fixture', href: 'https://chatgpt.com/' };
+  global.fetch = (_url, options) => {
+    started = true;
+    options.signal.addEventListener('abort', () => { aborted = true; });
+    return new Promise(() => {}); // A server that never returns even after abort.
+  };
+  try {
+    const result = await parser.getConversationMarkdown({ downloadFiles: true, artifactTimeoutMs: 10 });
+    assert.equal(started, true, 'positive control: lookup actually started');
+    assert.equal(aborted, true);
+    assert.equal(result.ok, true);
+    assert.match(result.md, /Сохрани разговор даже при отказе файлов/);
+    assert.match(result.md, /Attachment lookup failed or timed out/);
+    assert.equal(result.partial, true, 'batch must not bank incomplete attachments as complete');
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete global[key]; else global[key] = value;
+    }
+  }
+});
+
+test('failed file lookup tries each distinct message id once', async () => {
+  const attempts = [];
+  await parser.resolveArtifactPanelFiles('fixture', {
+    token: 'tok-fixture', messageId: 'bad', messageIds: ['bad', 'bad', 'next', 'next'],
+    files: [{ name: 'missing.zip', sandboxPath: '/mnt/data/missing.zip' }],
+    fetchImpl: async url => {
+      attempts.push(new URL(url, 'https://chatgpt.com').searchParams.get('message_id'));
+      return { ok: false, status: 404 };
+    },
+  });
+  assert.deepEqual(attempts, ['bad', 'next']);
+});
+
+test('a later lookup timeout preserves earlier file links and safe diagnostics', async () => {
+  const previous = { document: global.document, location: global.location, fetch: global.fetch };
+  const message = { getAttribute: () => 'user', querySelector: () => ({ textContent: 'Keep the text and the first file.' }) };
+  const panel = ['first.zip', 'second.zip'].map(name => ({ getAttribute: key => key === 'aria-label' ? name : null }));
+  global.document = {
+    title: 'ChatGPT', querySelector: () => null,
+    querySelectorAll: selector => selector === '[data-message-author-role]' ? [message] :
+      (/open-file|artifact-row/.test(selector) ? panel : []),
+  };
+  global.location = { pathname: '/c/progress-fixture', href: 'https://chatgpt.com/' };
+  let pendingSecond = false;
+  global.fetch = async url => {
+    if (url === '/api/auth/session') return { ok: true, status: 200, json: async () => ({ accessToken: 'tok-fixture' }) };
+    if (!url.includes('/interpreter/download')) return { ok: true, status: 200, json: async () => ({ mapping: {
+      n: { message: { id: 'message-1', author: { role: 'assistant' }, content: { parts: ['sandbox:/mnt/data/first.zip sandbox:/mnt/data/second.zip'] } } },
+    } }) };
+    if (url.includes('first.zip')) return { ok: true, status: 200, json: async () => ({ download_url: 'https://chatgpt.com/backend-api/estuary/content?id=file_first&fn=first.zip' }) };
+    pendingSecond = true;
+    return new Promise(() => {});
+  };
+  try {
+    const result = await parser.getConversationMarkdown({ downloadFiles: true, artifactTimeoutMs: 1800 });
+    assert.equal(pendingSecond, true, 'positive control: first resolved and second lookup started');
+    assert.equal(result.ok, true);
+    assert.match(result.md, /Keep the text and the first file/);
+    assert.match(result.md, /\[first.zip\]\(https:\/\/chatgpt.com\/backend-api\/estuary\/content/);
+    assert.equal(result.partial, true);
+    const diagnostic = result.md.split('\n').find(line => line.startsWith('> Attachment diagnostics:'));
+    assert.match(diagnostic, /reason=timeout; stage=file-link/);
+    assert.match(diagnostic, /resolved=1/);
+    assert.doesNotMatch(diagnostic, /tok-fixture|first.zip|https:|message-1/);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete global[key]; else global[key] = value;
+    }
+  }
+});
+
+test('an offered archive outranks seventy intermediate paths and retains its message context', async () => {
+  const mapping = {};
+  for (let i = 0; i < 70; i++) {
+    mapping['tool-' + i] = { message: { id: 'tool-message', author: { role: 'tool' }, content: { parts: ['/mnt/data/work/item-' + i + '.py'] } } };
+  }
+  mapping.created = { message: { id: 'tool-message', author: { role: 'tool' }, content: { parts: ['/mnt/data/result.zip'] } } };
+  mapping.offered = { message: { id: 'answer-message', author: { role: 'assistant' }, content: { parts: ['[Download result](sandbox:/mnt/data/result.zip)'] } } };
+  const artifacts = await parser.fetchConversationArtifacts('fixture', {
+    token: 'tok', fetchImpl: async () => ({ ok: true, json: async () => ({ mapping }) }),
+  });
+  assert.equal(artifacts.length, 71, 'intermediate paths remain available as fallbacks');
+  const attempts = [];
+  const out = await parser.appendPanelArtifacts('Captured conversation', {
+    conversationId: 'fixture', token: 'tok', artifacts, files: [], clickDownloads: false,
+    fetchImpl: async url => {
+      const u = new URL(url, 'https://chatgpt.com');
+      const file = u.searchParams.get('sandbox_path');
+      const message = u.searchParams.get('message_id');
+      attempts.push({ file, message });
+      return file === '/mnt/data/result.zip' ? { ok: true, json: async () => ({ download_url: 'https://chatgpt.com/backend-api/estuary/content?id=file_result' }) } : { ok: false, status: 404 };
+    },
+  });
+  assert.deepEqual(attempts[0], { file: '/mnt/data/result.zip', message: 'answer-message' });
+  assert.equal(attempts.length, 71, 'one request per path carrying its own message context');
+  assert.match(out, /\[result.zip\]\(https:/);
+});
+
+test('HTTP 200 file-link failures are classified without exposing signed addresses', async () => {
+  for (const [body, expected] of [
+    [{ status: 'error' }, 'missing-url'],
+    [{ download_url: 'https://untrusted.example/file' }, 'rejected-url'],
+  ]) {
+    const failures = [];
+    const result = await parser.resolveSandboxDownloadUrl('fixture', 'message', '/mnt/data/file.zip', {
+      token: 'tok', fetchImpl: async () => ({ ok: true, status: 200, json: async () => body }),
+      onFailure: (kind, host) => failures.push({ kind, host }),
+    });
+    assert.equal(result, null);
+    assert.equal(failures[0].kind, expected);
+    if (expected === 'rejected-url') assert.equal(failures[0].host, 'untrusted.example');
+    assert.doesNotMatch(JSON.stringify(failures), /https:|\/file/);
+  }
+  let failure;
+  await parser.resolveSandboxDownloadUrl('fixture', 'message', '/mnt/data/file.zip', {
+    token: 'tok', fetchImpl: async () => ({ ok: true, json: async () => { throw new Error('private response'); } }),
+    onFailure: kind => { failure = kind; },
+  });
+  assert.equal(failure, 'unreadable-json');
+});
+
+test('an explicitly offered API file after the scan does not wait for an absent viewer panel', async () => {
+  const out = await parser.appendPanelArtifacts('Captured text', {
+    conversationId: 'fixture', token: 'tok', scannedPanelFiles: [], clickDownloads: false,
+    artifacts: [{ name: 'result.zip', sandboxPath: '/mnt/data/result.zip', messageId: 'answer', priority: 0 }],
+    doc: { querySelectorAll: () => [] },
+    sleep: async () => { throw new Error('unexpected panel wait'); },
+    fetchImpl: async () => ({ ok: true, json: async () => ({ download_url: 'https://chatgpt.com/backend-api/estuary/content?id=file_result' }) }),
+  });
+  assert.match(out, /\[result.zip\]\(https:/);
+});
+
+test('a visible panel path retains priority when API metadata enriches it', async () => {
+  const attempts = [];
+  await parser.appendPanelArtifacts('Text', {
+    conversationId: 'fixture', token: 'tok', clickDownloads: false,
+    files: [{ name: 'visible.pdf', sandboxPath: '/mnt/data/visible.pdf' }],
+    artifacts: [
+      { name: 'visible.pdf', sandboxPath: '/mnt/data/visible.pdf', messageId: 'tool', priority: 2 },
+      { name: 'other.txt', sandboxPath: '/mnt/data/other.txt', messageId: 'answer', priority: 1 },
+    ],
+    fetchImpl: async url => {
+      attempts.push(new URL(url, 'https://chatgpt.com').searchParams.get('sandbox_path'));
+      return { ok: true, json: async () => ({ download_url: 'https://chatgpt.com/backend-api/estuary/content?id=file_fixture' }) };
+    },
+  });
+  assert.equal(attempts[0], '/mnt/data/visible.pdf');
+});
+
+
+test('uploaded metadata reaches the file-service resolver and Markdown without a sandbox path', async () => {
+  const calls = [];
+  const resolved = [];
+  let incomplete = false;
+  const out = await parser.appendPanelArtifacts('Captured text', {
+    conversationId: 'fixture', token: 'tok', files: [], clickDownloads: false,
+    onResolved: entry => resolved.push(entry), onIncomplete: () => { incomplete = true; },
+    fetchImpl: async (url, init) => {
+      calls.push(url);
+      assert.equal(init.credentials, 'include');
+      assert.equal(init.headers.authorization, 'Bearer tok');
+      if (url === '/backend-api/conversation/fixture') return { ok: true, json: async () => ({ mapping: {
+        uploaded: { message: { id: 'user-message', author: { role: 'user' }, metadata: {
+          attachments: [{ id: 'file_fixture', name: 'requirements.md', size: 70936 }],
+        } } },
+      } }) };
+      assert.equal(url, '/backend-api/files/download/file_fixture?conversation_id=fixture&download_intent=true');
+      return { ok: true, json: async () => ({ status: 'success', download_url:
+        'https://chatgpt.com/backend-api/estuary/content?id=file_fixture',
+        metadata: null, file_name: 'requirements.md', creation_time: null,
+        no_auth_user_upload: null, mime_type: null, file_size_bytes: 70936 }) };
+    },
+  });
+  assert.equal(calls.length, 2);
+  assert.equal(resolved.length, 1);
+  assert.equal(resolved[0].resolved.size, 70936);
+  assert.match(out, /\[requirements.md\]\(https:\/\/chatgpt.com\/backend-api\/estuary\/content/);
+  assert.equal(incomplete, false);
+});
+
+test('unresolved uploads stay visible and never become a silently complete export', async () => {
+  for (const response of [
+    { ok: false, status: 404 },
+    { ok: true, json: async () => ({ status: 'success' }) },
+    { ok: true, json: async () => ({ download_url: 'https://untrusted.example/document' }) },
+  ]) {
+    let incomplete = false;
+    const out = await parser.appendPanelArtifacts('Captured text', {
+      conversationId: 'fixture', token: 'tok', files: [], clickDownloads: false,
+      artifacts: [{ kind: 'attachment', name: 'requirements.md', fileId: 'file_fixture', sandboxPath: null }],
+      fetchImpl: async () => response, onIncomplete: () => { incomplete = true; },
+    });
+    assert.equal(incomplete, true);
+    assert.match(out, /Could not retrieve a download link for: requirements.md/);
+    assert.doesNotMatch(out, /untrusted.example/);
+    assert.match(out, /Captured text/);
+  }
+});
+
+test('an uploaded file without an id is reported and does not invent a request', async () => {
+  let incomplete = false;
+  const out = await parser.appendPanelArtifacts('Text', {
+    conversationId: 'fixture', token: 'tok', files: [], clickDownloads: false,
+    artifacts: [{ kind: 'attachment', name: 'requirements.md', fileId: null, sandboxPath: null }],
+    fetchImpl: async () => { throw new Error('must not request an invented path'); },
+    onIncomplete: () => { incomplete = true; },
+  });
+  assert.equal(incomplete, true);
+  assert.match(out, /Could not retrieve a download link for: requirements.md/);
+});
+
+test('tool input paths are not produced files, while output and offered paths remain candidates', async () => {
+  const command = "import requests\nr=requests.get('https://example.com')\nopen('/mnt/data/page.html','w').write(r.text)";
+  for (const source of [
+    { recipient: 'python', content: { parts: [command] } },
+    { recipient: 'container.exec', content: { text: JSON.stringify({ cmd: command }) } },
+    { content: { content_type: 'code', text: command } },
+    { channel: 'analysis', content: { parts: ['I will save /mnt/data/page.html'] } },
+  ]) {
+    const messages = [
+      Object.assign({ id: 'input', author: { role: 'assistant' } }, source),
+      { id: 'failure', author: { role: 'tool' }, content: { parts: ['Traceback (most recent call last): DNS lookup failed before the write'] } },
+      { id: 'upload', author: { role: 'user' }, metadata: { attachments: [{ id: 'file_brief', name: 'brief.md' }] } },
+    ];
+    const requests = [];
+    let incomplete = false;
+    const out = await parser.appendPanelArtifacts('Captured conversation', {
+      conversationId: 'fixture', token: 'tok', files: [], clickDownloads: false,
+      onIncomplete: () => { incomplete = true; },
+      fetchImpl: async url => {
+        requests.push(url);
+        if (url === '/backend-api/conversation/fixture') return jsonOk({ mapping:
+          Object.fromEntries(messages.map((message, i) => ['node' + i, { message }])) })();
+        if (url.startsWith('/backend-api/files/download/')) return jsonOk({ download_url:
+          'https://chatgpt.com/backend-api/estuary/content?id=file_brief' })();
+        return jsonOk({ status: 'error' })();
+      },
+    });
+    assert.match(out, /\[brief.md\]\(https:/, 'the real uploaded file still reaches Markdown');
+    assert.equal(incomplete, false, 'a path in an unexecuted write is not a missing attachment');
+    assert.equal(requests.length, 2, 'only inventory and real uploaded-file lookup');
+    assert.doesNotMatch(out, /page.html|Could not retrieve/);
+
+    // A later successful tool result or user-facing answer independently
+    // establishes a file candidate even when its creation command was ignored.
+    for (const produced of [
+      { id: 'output', author: { role: 'tool' }, content: { parts: ['Wrote /mnt/data/page.html'] } },
+      { id: 'answer', author: { role: 'assistant' }, recipient: 'all', content: { parts: ['[Download](sandbox:/mnt/data/page.html)'] } },
+    ]) {
+      const artifacts = await parser.fetchConversationArtifacts('fixture', { token: 'tok',
+        fetchImpl: async () => jsonOk({ mapping: { command: { message: messages[0] }, result: { message: produced } } })(),
+      });
+      assert.equal(artifacts.length, 1);
+      assert.equal(artifacts[0].messageId, produced.id);
+      assert.equal(artifacts[0].sandboxPath, '/mnt/data/page.html');
+    }
+  }
+});
+
+test('unavailable attachment inventory is incomplete even without visible files or after visible files resolve', async () => {
+  for (const files of [[], [{ name: 'visible.zip', sandboxPath: '/mnt/data/visible.zip' }]]) {
+    let incomplete = false;
+    const out = await parser.appendPanelArtifacts('Captured text', {
+      conversationId: 'fixture', artifacts: null, files, scannedButtons: [],
+      messageIds: ['message'], token: 'tok', clickDownloads: false,
+      onIncomplete: () => { incomplete = true; },
+      fetchImpl: async () => jsonOk({ download_url: 'https://chatgpt.com/backend-api/estuary/content?id=file_visible' })(),
+    });
+    assert.equal(incomplete, true, 'unknown inventory must not be banked as complete');
+    assert.match(out, /Could not enumerate attachments/);
+    assert.match(out, /Captured text/);
+    if (files.length) assert.match(out, /\[visible.zip\]\(https:/);
+  }
+  let incomplete = false;
+  const out = await parser.appendPanelArtifacts('Captured text', {
+    conversationId: 'fixture', artifacts: [], files: [], scannedButtons: [], clickDownloads: false,
+    onIncomplete: () => { incomplete = true; },
+  });
+  assert.equal(incomplete, false, 'a confirmed empty inventory is a complete answer');
+  assert.equal(out, 'Captured text');
 });

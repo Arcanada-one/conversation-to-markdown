@@ -11,18 +11,27 @@ Copying a conversation uses two permissions:
 
 ## Saving files and artifacts
 
-If you tick **Save .md + files to chatgpt-export/** before pressing the button, the extension additionally writes the Markdown file and the conversation's attachments to your Downloads folder. Attachments are not limited to images: any file the conversation carries — PDF, Word, spreadsheet, archive — is saved the same way, because what may be downloaded is decided by the host serving it, never by the file's type. This is the only mode in which it makes network requests, and it uses two permissions:
+**Save .md + files to chatgpt-export/** is checked by default whenever the popup opens. If you leave it checked before pressing the button, the extension additionally writes the Markdown file and the conversation's attachments to your Downloads folder. Supported attachments are not limited to images: they can include documents and archives. Named uploads with file identifiers use the file-service download endpoint. Unsupported or unidentified assets may still be missing. Generated-file lookup can also fail or time out. Saving is not a guarantee that every attachment was archived. This is the only mode in which it makes network requests, and it uses two permissions:
 
 - `downloads` — writes the files to your Downloads folder, and reads download history (see below).
 - Host access to `https://files.oaiusercontent.com/*` — the host that serves files inside ChatGPT conversations.
 
-In this mode the extension requests each file directly from that host, converts the bytes in memory, and hands the result to the browser's own download mechanism. The requests go only to the host already serving the conversation you are reading, carry no identifiers added by the extension, and reach no developer-operated endpoint. Nothing is uploaded anywhere.
+In this mode the extension requests each file directly from that host, converts the bytes in memory, and hands the result to the browser's own download mechanism. Requests go to the declared ChatGPT and file hosts, not to a developer-operated endpoint. API requests include conversation, message, and file-path identifiers needed to locate the files. The extension does not upload conversation text or file bytes.
 
-Files that ChatGPT **generates** for you — a PDF or Word document it produced during the conversation — are not links in the page at all, so saving them needs one additional step in this same mode: the extension asks ChatGPT for the conversation's own file list, exactly as the page does when you click a file yourself, and then requests the file. This uses the session you are already signed in with; the extension does not read, store, or transmit your credentials or session token, and the request goes to `chatgpt.com` and nowhere else.
+To discover generated files and batch metadata, the extension reads the conversation API using your existing signed-in session. It obtains the access token from the same-origin session endpoint and sends it in an Authorization header to same-origin ChatGPT API endpoints. The token is held transiently in memory; it is not persisted, added to Markdown, or sent to a developer server. The extension does not ask for your password. File bytes are downloaded only from supported hosts. API metadata availability does not imply that a file download is supported.
 
-Some generated files are offered by ChatGPT as a **button with a handler** rather than as a link, and their address does not exist anywhere in the page until that handler runs. To save those, the extension clicks the button for you — the same click you would make yourself — and captures the resulting address instead of letting the page download the file, so that it can be written next to its conversation rather than into the root of your Downloads folder. Only buttons whose label offers a download are clicked; buttons that open a viewer are left alone. While a click is in progress the extension temporarily replaces three of the page's own download routines and restores all of them immediately afterwards, including if the page raises an error. Nothing about the click is recorded or transmitted.
+Some generated files are offered as buttons without a downloadable link in the
+page. The export does not invoke those page-owned handlers. It resolves paths
+through ChatGPT's conversation API when available and names unresolved files in
+the saved Markdown. File lookup has a bounded wait; failure preserves the
+captured conversation and marks the export incomplete. Incomplete lookups add
+local diagnostics to the Markdown: stage names, request counts, HTTP status
+counts, candidate count, resolved count, failure categories and rejected
+hostnames (without paths or query strings). This diagnostic line contains no
+URLs, headers, response bodies or session tokens. Already resolved file links
+are preserved separately, under the signed-link handling described below.
 
-This lookup happens **only** when the save checkbox is ticked, and so does any click. A plain **Copy as Markdown** reads the page and nothing more — it makes no network request of any kind and clicks nothing, and both are enforced by tests in the repository, not only by this document.
+This lookup happens **only** when the save checkbox is ticked; the exporter does not click file buttons. With saving unchecked, **Copy as Markdown** reads the page and nothing more — the extension makes no direct network requests and clicks no file buttons (ChatGPT itself may load messages in response to scrolling), and both are enforced by tests in the repository, not only by this document.
 
 ## Exporting a whole Project
 
@@ -59,7 +68,7 @@ This exists because earlier versions recorded nothing at all: a failure part-way
 ## The zip archive
 
 When a batch export is asked to produce a single archive, the `.zip` is built **in the
-page's own memory** by code shipped in this extension and handed to the browser's
+extension popup's memory** by code shipped in this extension and handed to the browser's
 download mechanism like any other file. Nothing is uploaded, no compression service is
 contacted, and no library is fetched at runtime. The archive contains exactly the files
 the export already wrote to your Downloads folder.
@@ -79,7 +88,7 @@ Before a link is added to Markdown, its query parameters are removed, so credent
 
 Links to a conversation's own images and attachments are the deliberate exception: ChatGPT serves them from signed, short-lived links that return nothing without their full query string. Those URLs are kept intact so the file can be fetched. When a file downloads successfully, its link in the saved Markdown is replaced by the local file path and the signed URL does not survive in the document.
 
-A file that could **not** be fetched keeps its original URL, and that URL still carries its signature. It stops working once the link expires — usually within hours — but until then the saved Markdown contains a link that grants access to that file. This applies to attachments of every type, not only images. If you share an export whose downloads did not all succeed, be aware you may be sharing such links; saving with the download option ticked, and checking the reported count, avoids it.
+A file that could **not** be fetched keeps its original URL, and that URL still carries its signature. It stops working once the link expires — usually within hours — but until then the saved Markdown contains a link that grants access to that file. This applies to attachments of every type, not only images. If you share an export whose downloads did not all succeed, be aware you may be sharing such links; inspect failed links and remove them before sharing if you do not want to grant that access.
 
 Your browser, the ChatGPT website, clipboard manager, operating system, and the application where you paste the result may have their own privacy behavior. Those products are outside this extension's control.
 

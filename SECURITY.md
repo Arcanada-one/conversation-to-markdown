@@ -42,7 +42,7 @@ build when any of these appear:
 | `no tracked file carries a credential` | Scans **every** tracked file against known credential shapes — private-key blocks, AWS/GitHub/Google/Slack/Vault/Cloudflare/GitLab/Telegram tokens, JWTs, OpenAI- and Anthropic-style keys, and assigned secret literals. Failures report the file, the rule, and the match length — never the value. |
 | `every tracked file is declared in the allowlist` | Fails when a file is tracked but absent from `public-files.allowlist`, so a new file cannot reach the public surface unreviewed. |
 | `allowlisted text files contain no private or internal material` | Scans allowlisted files for local paths, real conversation URLs, signed-URL parameters, and internal identifiers. |
-| `shipped JavaScript has no network, storage, or analytics calls` | Keeps the extension local-only: no `XMLHttpRequest`, `WebSocket`, `chrome.storage`, or analytics. `fetch` is permitted solely inside `fetchImageDataUrls` in `content.js` for image download. |
+| Network and storage restrictions | Checks for forbidden networking and analytics patterns, restricts content-script persistence, and checks the declared permissions. The exporter does use authenticated ChatGPT API requests, file downloads, and popup-local metadata storage; see [PRIVACY.md](PRIVACY.md). Static pattern checks are not a complete security proof. |
 
 Adding a file means adding it to `public-files.allowlist` in the same commit —
 that is the review point where its contents get checked.

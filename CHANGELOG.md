@@ -5,6 +5,29 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.5] — 2026-09-24
+
+### Fixed
+
+- Resolve named uploaded attachments using their file identifiers and the
+  observed file-service download endpoint. Keep unresolved uploads in the file
+  warnings instead of silently filtering out entries without sandbox paths.
+- Reuse download-host validation, authenticated request handling, and progressive
+  result preservation for uploaded files.
+
+### Documentation
+
+- Add separate installation, unpacked-update, packaging, and Web Store update
+  guides. Correct delivery defaults, overwrite behavior, session-token handling,
+  and the distinction between source builds and published releases.
+
+### Verification status
+
+- Local verification build. The upload request and response contract was
+  captured from a successful manual download. A fresh extension export must
+  still verify the complete upload-to-local-file flow. Generated-file lookup
+  failures and redundant missing-button warnings remain open.
+
 ## [1.6.4] — 2026-09-24
 
 ### Fixed

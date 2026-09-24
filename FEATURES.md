@@ -18,6 +18,23 @@ so the gap is visible rather than assumed away.
 
 ## Checking against the live site
 
+### Current verification status: 1.6.5
+
+A fresh long-conversation export retained all 218 role blocks from the preceding
+reference export and removed the false start warning. That comparison verifies
+text preservation for this case, not universal coverage of ChatGPT layouts.
+A separate generated-file export saved five files; its primary archive and patch
+matched manually downloaded copies byte for byte. Generated-file timeout and
+redundant button warnings still need correction.
+
+The 1.6.4 upload resolver excluded non-sandbox uploads; a fresh export of the
+original long conversation resolved no file links. Build 1.6.5 routes named
+uploaded attachments to the observed file-service endpoint and reports failures
+explicitly. The manual request contract and fixture tests are verified; a fresh
+extension export of the uploaded document is still required. Existing files manually
+placed beside an export are not evidence that the extension downloaded them.
+Do not treat the historical checks below as current release acceptance.
+
 ### Local verification build 1.6.0: pagination re-entry
 
 On a long conversation, history loading can stop while its pagination sentinel
@@ -32,7 +49,7 @@ the original first message and no sentinel. The updated extension exported
 with 11 additional turns. That export still carried
 a false start warning: the completed page used an empty paginated-root sibling
 instead of client-created-root. Both observed layouts are now recognized, with
-the same first-holder guard; this follow-up awaits another live export. File
+the same first-holder guard; the fresh 1.6.4 comparison above verifies the warning removal for that case. File
 retrieval remains unresolved. No release is claimed by this entry.
 
 Four things waste an hour each time they are rediscovered:
@@ -428,7 +445,7 @@ match the CHANGELOG's top entry, and users must never see a gap. The last entry
 below is the version being shipped; a test checks this line against the CHANGELOG
 so a release cannot be added without revisiting this file.
 
-Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8, 1.6.0, 1.6.1, 1.6.2, 1.6.3, 1.6.4
+Version history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8, 1.6.0, 1.6.1, 1.6.2, 1.6.3, 1.6.4, 1.6.5
 
 The latest entry identifies the prepared local build; it does not imply Chrome
 Web Store publication. Attachment retrieval is unchanged in 1.6.0.

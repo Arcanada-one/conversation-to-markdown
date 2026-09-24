@@ -668,6 +668,24 @@ async function resolveSandboxDownloadUrl(conversationId, messageId, sandboxPath,
   const url = '/backend-api/conversation/' + conversationId +
     '/interpreter/download?message_id=' + encodeURIComponent(messageId) +
     '&sandbox_path=' + encodeURIComponent(sandboxPath);
+  return requestArtifactDownloadUrl(url, doFetch, token, opts);
+}
+
+/** Uploaded files use the file service, not the interpreter sandbox.
+ * Request path and response fields were observed on a manual document download.
+ * Never derive a sandbox path from an uploaded filename. */
+async function resolveUploadedDownloadUrl(conversationId, fileId, options) {
+  const opts = options || {};
+  const doFetch = opts.fetchImpl || (typeof fetch === 'function' ? fetch : null);
+  if (!doFetch || !conversationId || !fileId) return null;
+  const token = opts.token !== undefined ? opts.token : await fetchSessionToken(doFetch);
+  if (!token) return null;
+  const url = '/backend-api/files/download/' + encodeURIComponent(fileId) +
+    '?conversation_id=' + encodeURIComponent(conversationId) + '&download_intent=true';
+  return requestArtifactDownloadUrl(url, doFetch, token, opts);
+}
+
+async function requestArtifactDownloadUrl(url, doFetch, token, opts) {
   const fail = function(kind, host) {
     if (typeof opts.onFailure === 'function') opts.onFailure(kind, host);
     return null;
@@ -731,7 +749,11 @@ async function resolveArtifactPanelFiles(conversationId, options) {
     // which file the endpoint selects. Panel-only paths retain the legacy search.
     const candidates = file.messageId ? [file.messageId] :
       Array.from(new Set([workingId].concat(messageIds).filter(Boolean)));
-    for (const candidate of candidates) {
+    if (file.kind === 'attachment') {
+      resolved = await resolveUploadedDownloadUrl(conversationId, file.fileId,
+        { fetchImpl: doFetch, token: token, onFailure: opts.onFailure });
+    }
+    for (const candidate of file.kind === 'attachment' ? [] : candidates) {
       const attempt = await resolveSandboxDownloadUrl(
         conversationId, candidate, file.sandboxPath,
         { fetchImpl: doFetch, token: token, onFailure: opts.onFailure });
@@ -2371,6 +2393,10 @@ async function appendPanelArtifacts(markdown, options) {
         priority: a.priority === undefined ? 1 : a.priority, messageId: a.messageId };
     });
 
+  const uploadedFiles = (artifacts || []).filter(function(a) {
+    return a && a.kind === 'attachment' && a.name;
+  }).map(function(a) { return Object.assign({}, a, { priority: 0 }); });
+
   let files = opts.files;
   if (!files) {
     // A sandbox link in the body is proof a generated file exists — better
@@ -2382,7 +2408,7 @@ async function appendPanelArtifacts(markdown, options) {
     // real path. Do not spend half the lookup budget waiting for a viewer panel
     // that archives do not render. Other layouts retain the late-panel wait.
     const offeredAfterScan = Array.isArray(opts.scannedPanelFiles) &&
-      apiFiles.some(function(file) { return file.priority === 0; });
+      (uploadedFiles.length > 0 || apiFiles.some(function(file) { return file.priority === 0; }));
     files = mayHaveFiles && !offeredAfterScan
       ? await waitForArtifactPanel(doc, opts)
       : listArtifactPanelFiles(doc);
@@ -2402,7 +2428,7 @@ async function appendPanelArtifacts(markdown, options) {
     const visible = bySandboxPath.has(file.sandboxPath);
     bySandboxPath.set(file.sandboxPath, visible ? Object.assign({}, file, { priority: 0 }) : file);
   }
-  files = Array.from(bySandboxPath.values()).sort(function(a, b) {
+  files = uploadedFiles.concat(Array.from(bySandboxPath.values())).sort(function(a, b) {
     return (a.priority || 0) - (b.priority || 0);
   });
 
@@ -3574,7 +3600,8 @@ async function getConversationMarkdown(settings) {
               // include URLs, headers, response bodies or exception messages.
               if (controller && controller.signal.aborted) throw new Error('lookup cancelled');
               lookup.stage = String(url).indexOf('/api/auth/session') !== -1 ? 'session' :
-                (String(url).indexOf('/interpreter/download') !== -1 ? 'file-link' : 'conversation');
+                ((String(url).indexOf('/interpreter/download') !== -1 ||
+                  String(url).indexOf('/files/download/') !== -1) ? 'file-link' : 'conversation');
               lookup.requests += 1;
               const response = await fetch(url, Object.assign({}, init, controller ? { signal: controller.signal } : {}));
               const code = response && Number.isInteger(response.status) ? response.status : 0;

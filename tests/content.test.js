@@ -5172,3 +5172,65 @@ test('a visible panel path retains priority when API metadata enriches it', asyn
   });
   assert.equal(attempts[0], '/mnt/data/visible.pdf');
 });
+
+
+test('uploaded metadata reaches the file-service resolver and Markdown without a sandbox path', async () => {
+  const calls = [];
+  const resolved = [];
+  let incomplete = false;
+  const out = await parser.appendPanelArtifacts('Captured text', {
+    conversationId: 'fixture', token: 'tok', files: [], clickDownloads: false,
+    onResolved: entry => resolved.push(entry), onIncomplete: () => { incomplete = true; },
+    fetchImpl: async (url, init) => {
+      calls.push(url);
+      assert.equal(init.credentials, 'include');
+      assert.equal(init.headers.authorization, 'Bearer tok');
+      if (url === '/backend-api/conversation/fixture') return { ok: true, json: async () => ({ mapping: {
+        uploaded: { message: { id: 'user-message', author: { role: 'user' }, metadata: {
+          attachments: [{ id: 'file_fixture', name: 'requirements.md', size: 70936 }],
+        } } },
+      } }) };
+      assert.equal(url, '/backend-api/files/download/file_fixture?conversation_id=fixture&download_intent=true');
+      return { ok: true, json: async () => ({ status: 'success', download_url:
+        'https://chatgpt.com/backend-api/estuary/content?id=file_fixture',
+        metadata: null, file_name: 'requirements.md', creation_time: null,
+        no_auth_user_upload: null, mime_type: null, file_size_bytes: 70936 }) };
+    },
+  });
+  assert.equal(calls.length, 2);
+  assert.equal(resolved.length, 1);
+  assert.equal(resolved[0].resolved.size, 70936);
+  assert.match(out, /\[requirements.md\]\(https:\/\/chatgpt.com\/backend-api\/estuary\/content/);
+  assert.equal(incomplete, false);
+});
+
+test('unresolved uploads stay visible and never become a silently complete export', async () => {
+  for (const response of [
+    { ok: false, status: 404 },
+    { ok: true, json: async () => ({ status: 'success' }) },
+    { ok: true, json: async () => ({ download_url: 'https://untrusted.example/document' }) },
+  ]) {
+    let incomplete = false;
+    const out = await parser.appendPanelArtifacts('Captured text', {
+      conversationId: 'fixture', token: 'tok', files: [], clickDownloads: false,
+      artifacts: [{ kind: 'attachment', name: 'requirements.md', fileId: 'file_fixture', sandboxPath: null }],
+      fetchImpl: async () => response, onIncomplete: () => { incomplete = true; },
+    });
+    assert.equal(incomplete, true);
+    assert.match(out, /Could not retrieve a download link for: requirements.md/);
+    assert.doesNotMatch(out, /untrusted.example/);
+    assert.match(out, /Captured text/);
+  }
+});
+
+test('an uploaded file without an id is reported and does not invent a request', async () => {
+  let incomplete = false;
+  const out = await parser.appendPanelArtifacts('Text', {
+    conversationId: 'fixture', token: 'tok', files: [], clickDownloads: false,
+    artifacts: [{ kind: 'attachment', name: 'requirements.md', fileId: null, sandboxPath: null }],
+    fetchImpl: async () => { throw new Error('must not request an invented path'); },
+    onIncomplete: () => { incomplete = true; },
+  });
+  assert.equal(incomplete, true);
+  assert.match(out, /Could not retrieve a download link for: requirements.md/);
+});

@@ -76,7 +76,7 @@ Copy it as structured Markdown.
 
 ### Saving files alongside the Markdown
 
-Tick **Save .md + files to chatgpt-export/** before pressing the button — the label says *files* because attachments of every type are saved, not only images. The extension then downloads the conversation and every file it references into your Downloads folder:
+**Save .md + files to chatgpt-export/** is checked by default whenever the popup opens — the label says *files* because attachments of every type are saved, not only images. The extension then downloads the conversation and every file it references into your Downloads folder:
 
 ```
 Downloads/chatgpt-export/How-to-archive-a-conversation/
@@ -97,7 +97,7 @@ The extension asks only for permissions used by the export flow:
 
 - `clipboardWrite` writes the finished Markdown to your clipboard.
 - `scripting` runs the extraction entrypoint in that tab when requested.
-- `downloads` saves the Markdown file and attachments to your Downloads folder — used only when you tick the save checkbox. It also lets a resumed batch export ask the browser which files it already downloaded under `chatgpt-export/`, which is how resume avoids fetching the same conversation twice; the extension keeps no copy of that answer and sends it nowhere.
+- `downloads` saves the Markdown file and attachments to your Downloads folder — used only when the save checkbox is checked. It also lets a resumed batch export ask the browser which files it already downloaded under `chatgpt-export/`, which is how resume avoids fetching the same conversation twice; the extension keeps no copy of that answer and sends it nowhere.
 - `storage` keeps a small index of what has already been exported — for each conversation, its last-updated time, the identifier of its newest message, a message count, a byte count and a file count. That is what lets a re-run tell a conversation that gained messages from one that did not, which no filename can express. No conversation content, no message text, no titles. It uses `chrome.storage.local`, so it stays on this computer and is never synced to your Google account; both restrictions are enforced by tests in this repository.
 - Host access covers `https://chatgpt.com/*`, `https://chat.openai.com/*`, and `https://files.oaiusercontent.com/*`. The third host serves conversation files and is contacted only while downloading them.
 - There is no `activeTab` permission and no background service worker. `scripting` is authorised by the host permissions above, and the popup refuses to run on any other site.

@@ -277,7 +277,8 @@ local path, so the signed URL does not survive in the document.
 keep the parameters their host requires. Verify no `sig=`/`token=` reaches a
 saved page link.
 
-**Files are opt-in.** With the save option unticked, a plain copy makes **no
+**Saving is enabled by default.** Each popup opens with the save option checked.
+Uncheck it for clipboard-only output. With the save option unticked, a plain copy makes **no
 network request of any kind** — enforced by a test as well as by the privacy
 policy.
 
@@ -414,7 +415,7 @@ match the CHANGELOG's top entry, and users must never see a gap. The last entry
 below is the version being shipped; a test checks this line against the CHANGELOG
 so a release cannot be added without revisiting this file.
 
-Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8, 1.6.0, 1.6.1
+Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8, 1.6.0, 1.6.1, 1.6.2
 
 The latest entry identifies the prepared local build; it does not imply Chrome
 Web Store publication. Attachment retrieval is unchanged in 1.6.0.

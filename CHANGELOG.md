@@ -5,6 +5,16 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.2] — 2026-09-24
+
+### Changed
+
+- Enable **Save .md + files to chatgpt-export/** by default whenever the popup
+  opens. Uncheck it to copy Markdown to the clipboard without downloading files.
+- This local build changes the default selection only. Attachment lookup
+  failures remain unresolved; the export preserves text and reports missing
+  files as described in 1.6.1.
+
 ## [1.6.1] — 2026-09-24
 
 ### Fixed

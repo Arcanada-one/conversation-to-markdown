@@ -11,7 +11,7 @@ Copying a conversation uses two permissions:
 
 ## Saving files and artifacts
 
-If you tick **Save .md + files to chatgpt-export/** before pressing the button, the extension additionally writes the Markdown file and the conversation's attachments to your Downloads folder. Attachments are not limited to images: any file the conversation carries — PDF, Word, spreadsheet, archive — is saved the same way, because what may be downloaded is decided by the host serving it, never by the file's type. This is the only mode in which it makes network requests, and it uses two permissions:
+**Save .md + files to chatgpt-export/** is checked by default whenever the popup opens. If you leave it checked before pressing the button, the extension additionally writes the Markdown file and the conversation's attachments to your Downloads folder. Attachments are not limited to images: any file the conversation carries — PDF, Word, spreadsheet, archive — is saved the same way, because what may be downloaded is decided by the host serving it, never by the file's type. This is the only mode in which it makes network requests, and it uses two permissions:
 
 - `downloads` — writes the files to your Downloads folder, and reads download history (see below).
 - Host access to `https://files.oaiusercontent.com/*` — the host that serves files inside ChatGPT conversations.
@@ -26,7 +26,7 @@ through ChatGPT's conversation API when available and names unresolved files in
 the saved Markdown. File lookup has a bounded wait; failure preserves the
 captured conversation and marks the export incomplete.
 
-This lookup happens **only** when the save checkbox is ticked, the exporter does not click file buttons. A plain **Copy as Markdown** reads the page and nothing more — it makes no network request of any kind and clicks nothing, and both are enforced by tests in the repository, not only by this document.
+This lookup happens **only** when the save checkbox is ticked; the exporter does not click file buttons. With saving unchecked, **Copy as Markdown** reads the page and nothing more — it makes no network request of any kind and clicks nothing, and both are enforced by tests in the repository, not only by this document.
 
 ## Exporting a whole Project
 

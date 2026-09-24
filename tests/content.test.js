@@ -3128,10 +3128,10 @@ test('an API-named file that does not resolve is disclosed, never invented', asy
     'a 200 without a link is a failure, not a success');
 });
 
-test('a conversation with no panel artefacts is left byte-identical', async () => {
+test('a conversation with a confirmed empty inventory and no panel is left byte-identical', async () => {
   const doc = { querySelectorAll() { return []; } };
   const md = '# Chat\n\nbody';
-  assert.equal(await parser.appendPanelArtifacts(md, { doc, conversationId: 'c' }), md);
+  assert.equal(await parser.appendPanelArtifacts(md, { doc, conversationId: 'c', artifacts: [] }), md);
 });
 
 test('the capture path itself appends panel artefacts', async () => {
@@ -5233,4 +5233,75 @@ test('an uploaded file without an id is reported and does not invent a request',
   });
   assert.equal(incomplete, true);
   assert.match(out, /Could not retrieve a download link for: requirements.md/);
+});
+
+test('tool input paths are not produced files, while output and offered paths remain candidates', async () => {
+  const command = "import requests\nr=requests.get('https://example.com')\nopen('/mnt/data/page.html','w').write(r.text)";
+  for (const source of [
+    { recipient: 'python', content: { parts: [command] } },
+    { recipient: 'container.exec', content: { text: JSON.stringify({ cmd: command }) } },
+    { content: { content_type: 'code', text: command } },
+    { channel: 'analysis', content: { parts: ['I will save /mnt/data/page.html'] } },
+  ]) {
+    const messages = [
+      Object.assign({ id: 'input', author: { role: 'assistant' } }, source),
+      { id: 'failure', author: { role: 'tool' }, content: { parts: ['Traceback (most recent call last): DNS lookup failed before the write'] } },
+      { id: 'upload', author: { role: 'user' }, metadata: { attachments: [{ id: 'file_brief', name: 'brief.md' }] } },
+    ];
+    const requests = [];
+    let incomplete = false;
+    const out = await parser.appendPanelArtifacts('Captured conversation', {
+      conversationId: 'fixture', token: 'tok', files: [], clickDownloads: false,
+      onIncomplete: () => { incomplete = true; },
+      fetchImpl: async url => {
+        requests.push(url);
+        if (url === '/backend-api/conversation/fixture') return jsonOk({ mapping:
+          Object.fromEntries(messages.map((message, i) => ['node' + i, { message }])) })();
+        if (url.startsWith('/backend-api/files/download/')) return jsonOk({ download_url:
+          'https://chatgpt.com/backend-api/estuary/content?id=file_brief' })();
+        return jsonOk({ status: 'error' })();
+      },
+    });
+    assert.match(out, /\[brief.md\]\(https:/, 'the real uploaded file still reaches Markdown');
+    assert.equal(incomplete, false, 'a path in an unexecuted write is not a missing attachment');
+    assert.equal(requests.length, 2, 'only inventory and real uploaded-file lookup');
+    assert.doesNotMatch(out, /page.html|Could not retrieve/);
+
+    // A later successful tool result or user-facing answer independently
+    // establishes a file candidate even when its creation command was ignored.
+    for (const produced of [
+      { id: 'output', author: { role: 'tool' }, content: { parts: ['Wrote /mnt/data/page.html'] } },
+      { id: 'answer', author: { role: 'assistant' }, recipient: 'all', content: { parts: ['[Download](sandbox:/mnt/data/page.html)'] } },
+    ]) {
+      const artifacts = await parser.fetchConversationArtifacts('fixture', { token: 'tok',
+        fetchImpl: async () => jsonOk({ mapping: { command: { message: messages[0] }, result: { message: produced } } })(),
+      });
+      assert.equal(artifacts.length, 1);
+      assert.equal(artifacts[0].messageId, produced.id);
+      assert.equal(artifacts[0].sandboxPath, '/mnt/data/page.html');
+    }
+  }
+});
+
+test('unavailable attachment inventory is incomplete even without visible files or after visible files resolve', async () => {
+  for (const files of [[], [{ name: 'visible.zip', sandboxPath: '/mnt/data/visible.zip' }]]) {
+    let incomplete = false;
+    const out = await parser.appendPanelArtifacts('Captured text', {
+      conversationId: 'fixture', artifacts: null, files, scannedButtons: [],
+      messageIds: ['message'], token: 'tok', clickDownloads: false,
+      onIncomplete: () => { incomplete = true; },
+      fetchImpl: async () => jsonOk({ download_url: 'https://chatgpt.com/backend-api/estuary/content?id=file_visible' })(),
+    });
+    assert.equal(incomplete, true, 'unknown inventory must not be banked as complete');
+    assert.match(out, /Could not enumerate attachments/);
+    assert.match(out, /Captured text/);
+    if (files.length) assert.match(out, /\[visible.zip\]\(https:/);
+  }
+  let incomplete = false;
+  const out = await parser.appendPanelArtifacts('Captured text', {
+    conversationId: 'fixture', artifacts: [], files: [], scannedButtons: [], clickDownloads: false,
+    onIncomplete: () => { incomplete = true; },
+  });
+  assert.equal(incomplete, false, 'a confirmed empty inventory is a complete answer');
+  assert.equal(out, 'Captured text');
 });

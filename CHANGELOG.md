@@ -5,6 +5,28 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.6] — 2026-09-24
+
+### Fixed
+
+- Do not treat intended output paths inside assistant tool commands, executable
+  code messages, or private analysis as produced attachments. An observed
+  website-fetch command failed before writing its HTML output; the old parser
+  incorrectly reported that nonexistent output as a missing attachment.
+- Preserve file candidates from successful tool results and user-facing answer
+  links, even when the associated creation command was excluded.
+- Mark an unreadable attachment inventory as incomplete, including conversations
+  with no visible file controls and those whose visible downloads all resolve.
+  A confirmed empty inventory remains complete.
+
+### Verification
+
+- Root cause confirmed in the live conversation's expanded tool record.
+- Source filtering and inventory-failure handling have integration regressions,
+  successful-output controls, and negative controls against the old behavior.
+- The 1.6.5 uploaded-document byte comparison remains valid for its tested flow.
+  Current complete live batch coverage is not claimed by the regression tests.
+
 ## [1.6.5] — 2026-09-24
 
 ### Fixed

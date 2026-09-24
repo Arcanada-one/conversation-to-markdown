@@ -588,7 +588,17 @@ async function fetchConversationArtifacts(conversationId, options) {
     // Files the answer NAMES rather than attaches. See
     // sandboxPathsFromApiMessage: this is the only source that carried the
     // archives, and the `tool` role is half of it.
-    if (role !== 'user') {
+    // Tool instructions and private planning name intended paths, not files
+    // produced for the user. In an observed failed website fetch, the command
+    // named an HTML output but DNS failed before open(..., 'w') ran. Treating
+    // that input as output produced a false missing-attachment warning.
+    // Keep actual tool RESULTS and user-facing answers as independent sources;
+    // metadata attachments below are deliberately outside this filter.
+    const isAssistantInstruction = role === 'assistant' && (
+      (message.recipient && message.recipient !== 'all') ||
+      ((message.content || {}).content_type === 'code') ||
+      message.channel === 'analysis');
+    if (role !== 'user' && !isAssistantInstruction) {
       for (const found of sandboxPathsFromApiMessage(message)) {
         const key = 'sbx:' + found.sandboxPath;
         const parts = (message.content || {}).parts || [];
@@ -2462,7 +2472,10 @@ async function appendPanelArtifacts(markdown, options) {
         buttons: scannedButtons === null ? undefined : scannedButtons,
       })));
 
-  if (!files.length && !buttonFiles.length) return markdown;
+  // An unreadable inventory can hide uploads with no DOM download link.
+  // Preserve that uncertainty even if there are no visible candidates.
+  const inventoryUnavailable = artifacts === null;
+  if (!files.length && !buttonFiles.length && !inventoryUnavailable) return markdown;
 
   // Candidate message ids for the download call. Measured: the endpoint requires
   // a message_id but does NOT use it to select the file — 12 different ids
@@ -2544,12 +2557,18 @@ async function appendPanelArtifacts(markdown, options) {
   // guard is therefore harmless to output and survives the suite — recorded in
   // MUTATION-EVIDENCE.md as redundant-by-design rather than an untested branch,
   // so it is not "fixed" by deleting one of the two.
-  if (!lines.length && !unresolved.length) return markdown;
+  if (!lines.length && !unresolved.length && !inventoryUnavailable) return markdown;
 
   const block = ['## Files'];
   if (lines.length) block.push(lines.join('\n'));
-  if (unresolved.length) {
+  if (unresolved.length || inventoryUnavailable) {
     if (typeof opts.onIncomplete === 'function') opts.onIncomplete();
+  }
+  if (inventoryUnavailable) {
+    block.push('> Could not enumerate attachments: the conversation API was unreachable. ' +
+      'Visible file links were preserved, but attachment completeness is unknown.');
+  }
+  if (unresolved.length) {
     block.push('> Could not retrieve a download link for: ' +
       unresolved.join(', ') +
       (artifacts === null ? ' (the conversation API was unreachable)' : ''));

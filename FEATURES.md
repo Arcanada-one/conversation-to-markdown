@@ -18,7 +18,7 @@ so the gap is visible rather than assumed away.
 
 ## Checking against the live site
 
-### Current verification status: 1.6.5
+### Current verification status: 1.6.6
 
 A fresh long-conversation export retained all 218 role blocks from the preceding
 reference export and removed the false start warning. That comparison verifies
@@ -34,9 +34,16 @@ explicitly. A fresh extension export saved the 70,936-byte uploaded document
 under its own generated filename and linked it from Markdown. Its bytes matched
 the separate manual reference exactly, and all 218 conversation role blocks
 were unchanged. A generated HTML candidate still returned no download URL;
-that failure remains unresolved. Existing manually placed files alone are not
+the live tool record subsequently showed that the file-writing instruction
+was never reached because the preceding network request failed. Build 1.6.6
+excludes command inputs and private analysis from file candidates; actual tool
+results and user-facing offers remain eligible. Existing manually placed files alone are not
 evidence that the extension downloaded them.
-Do not treat the historical checks below as current release acceptance.
+When the attachment inventory cannot be read, 1.6.6 reports unknown completeness
+even if no file controls are visible. A confirmed empty inventory is complete.
+These collection changes have regression and mutation checks; a fresh full
+current-version browser checklist has not been repeated. Do not treat the
+historical checks below as current release acceptance.
 
 ### Local verification build 1.6.0: pagination re-entry
 
@@ -448,7 +455,7 @@ match the CHANGELOG's top entry, and users must never see a gap. The last entry
 below is the version being shipped; a test checks this line against the CHANGELOG
 so a release cannot be added without revisiting this file.
 
-Version history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8, 1.6.0, 1.6.1, 1.6.2, 1.6.3, 1.6.4, 1.6.5
+Version history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8, 1.6.0, 1.6.1, 1.6.2, 1.6.3, 1.6.4, 1.6.5, 1.6.6
 
 The latest entry identifies the prepared local build; it does not imply Chrome
 Web Store publication. Attachment retrieval is unchanged in 1.6.0.

@@ -5,10 +5,12 @@ submit or update the Web Store listing.
 
 ## Release acceptance
 
-Do not submit the current development build as a complete attachment backup:
-the uploaded-document resolver has passed a live byte comparison, but
-generated-file lookup failures and warnings still need resolution. Resolve the release scope before publication; disclose any
-accepted limitations in the listing and release notes.
+The uploaded-document resolver has passed a live byte comparison. The remaining
+HTML warning was traced to a failed tool command that never wrote its intended
+output; 1.6.6 corrects that source classification. Do not advertise universal
+attachment coverage: unsupported assets, redundant button warnings, and lookup
+timeouts remain possible. Complete the live checklist for the advertised scope
+before store submission and disclose accepted limitations in the listing.
 
 1. Compare the version in the [store listing](https://chromewebstore.google.com/detail/conversation-to-markdown/jhnhkmnignbhmcjbhoihdbjhjfljpili), the publisher dashboard (including pending submissions), and `manifest.json`. Use a version greater than the preceding store package.
 2. Keep `manifest.json`, `package.json`, `CHANGELOG.md`, and `FEATURES.md` consistent. One release gets one version bump; local verification builds are not evidence of a store release.

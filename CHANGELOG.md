@@ -5,6 +5,28 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] — 2026-09-24
+
+### Fixed
+
+- Stop invoking page-owned download buttons from the isolated content script.
+  Those handlers could download a lone archive or patch outside the export
+  folder; replacing the content script's JavaScript methods cannot intercept
+  the page's download routines. API-resolvable files still use the existing
+  retrieval path; unresolved button labels are retained as explicit warnings.
+- Bound attachment lookup to 30 seconds after the text scan. If lookup fails or
+  hangs, preserve the captured conversation and report incomplete files instead
+  of losing the Markdown. Incomplete file lookup is not banked as a completed
+  batch export.
+
+### Verification and limitations
+
+- Regression tests exercise page-owned handlers separately from the content
+  script and a lookup that never settles, including after cancellation.
+- This is a local verification build. The reported live conversation must be
+  exported again before this issue can be called resolved. Uploaded-file
+  retrieval and duplicate file links are not changed by this release.
+
 ## [1.6.0] — 2026-09-24
 
 ### Fixed

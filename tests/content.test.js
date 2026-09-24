@@ -3206,7 +3206,7 @@ test('the capture path itself appends panel artefacts', async () => {
   }
 });
 
-test('the capture path collects a button that is only mounted early in the scan', async () => {
+test('the capture path preserves an early button name without invoking the page download', async () => {
   // The wiring, not the helper. Two mutants survived a suite that drove
   // collectButtonDownloads directly with a hand-supplied list: "do not collect
   // during the scan" and "do not pass what was collected". Both are exactly the
@@ -3250,15 +3250,11 @@ test('the capture path collects a button that is only mounted early in the scan'
       wasAtTop = atTop;
     },
   });
-  const archiveButton = downloadButton('Скачать готовый Canon Consilium Prompt Bundle v1', {
-    onClick() {
-      global.window.HTMLAnchorElement.prototype.click.call({
-        getAttribute: () => 'https://chatgpt.com/backend-api/estuary/content' +
-          '?id=file_9&fn=canon-consilium-prompt-bundle-v1.zip&SIGNED&ts=1',
-        hasAttribute: (n) => n === 'download',
-      });
-    },
-  });
+  // Page handlers belong to another world: the content script cannot replace
+  // this function by patching its own window.HTMLAnchorElement.prototype.
+  let nativeDownloads = 0;
+  const pageDownload = () => { nativeDownloads += 1; };
+  const archiveButton = downloadButton('Скачать Git patch', { onClick: pageDownload });
   // What the landing position shows instead: unrelated suggestions. Two of them,
   // as measured — enough to make a "found nothing here" guard stand down.
   const suggestions = [
@@ -3294,11 +3290,13 @@ test('the capture path collects a button that is only mounted early in the scan'
   try {
     const result = await parser.getConversationMarkdown({ downloadFiles: true });
     assert.equal(result.ok, true, 'capture failed: ' + result.error);
-    assert.equal(archiveButton.clicked, 1,
-      'the button seen only during the scan must still be clicked');
+    assert.equal(archiveButton.clicked, 0, 'page-owned download handlers must not be invoked');
+    assert.equal(nativeDownloads, 0);
+    assert.equal(result.partial, true);
+    assert.equal(result.partialReason, 'attachments-unavailable');
     assert.ok(
-      result.md.indexOf('canon-consilium-prompt-bundle-v1.zip') !== -1,
-      'the archive must reach the markdown the popup downloads from'
+      result.md.indexOf('Could not retrieve a download link for: Скачать Git patch') !== -1,
+      'the unresolved file must be named, not silently dropped'
     );
     // Positive control: the suggestions are present throughout and must never be
     // clicked, or the assertion above could be satisfied by clicking everything.
@@ -4310,7 +4308,7 @@ test('the prose label is used only when the URL carries no name', async () => {
     'a label used as a filename must not carry path separators');
 });
 
-test('the shipped capture path reaches a file offered only as a button', async () => {
+test('the shipped capture path reports a button-only file without a native download', async () => {
   // The wiring, not the helper. A mutation deleting the button collection from
   // appendPanelArtifacts leaves every unit test above green, because they call
   // the helper directly. This drives getConversationMarkdown — the function the
@@ -4377,10 +4375,10 @@ test('the shipped capture path reaches a file offered only as a button', async (
   try {
     const result = await parser.getConversationMarkdown({ downloadFiles: true });
     assert.equal(result.ok, true, 'capture failed: ' + result.error);
-    assert.equal(clicked, 1, 'the shipped path must click the download button');
+    assert.equal(clicked, 0, 'the isolated world must never invoke page download handlers');
     assert.ok(
-      result.md.indexOf('[canon-consilium-prompt-bundle-v1.zip](https://chatgpt.com/backend-api/estuary/') !== -1,
-      'the archive must reach the markdown as a link the popup can fetch',
+      result.md.indexOf('Could not retrieve a download link for: Скачать готовый Canon Consilium Prompt Bundle v1.zip') !== -1,
+      'an unresolved button must stay visible in the exported inventory',
     );
   } finally {
     global.document = previousDocument;
@@ -5013,4 +5011,35 @@ test('a throwing collector does not lose the conversation', async () => {
   });
 
   assert.equal(turns.length, 1, 'the captured turns must survive a failing collector');
+});
+
+
+test('attachment lookup timeout preserves captured text and reports incomplete files', async () => {
+  const previous = { document: global.document, location: global.location, fetch: global.fetch };
+  const message = { getAttribute: () => 'user', querySelector: () => ({ textContent: 'Сохрани разговор даже при отказе файлов.' }) };
+  let started = false;
+  let aborted = false;
+  global.document = {
+    title: 'ChatGPT', querySelector: () => null,
+    querySelectorAll: selector => selector === '[data-message-author-role]' ? [message] : [],
+  };
+  global.location = { pathname: '/c/timeout-fixture', href: 'https://chatgpt.com/' };
+  global.fetch = (_url, options) => {
+    started = true;
+    options.signal.addEventListener('abort', () => { aborted = true; });
+    return new Promise(() => {}); // A server that never returns even after abort.
+  };
+  try {
+    const result = await parser.getConversationMarkdown({ downloadFiles: true, artifactTimeoutMs: 10 });
+    assert.equal(started, true, 'positive control: lookup actually started');
+    assert.equal(aborted, true);
+    assert.equal(result.ok, true);
+    assert.match(result.md, /Сохрани разговор даже при отказе файлов/);
+    assert.match(result.md, /Attachment lookup failed or timed out/);
+    assert.equal(result.partial, true, 'batch must not bank incomplete attachments as complete');
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete global[key]; else global[key] = value;
+    }
+  }
 });

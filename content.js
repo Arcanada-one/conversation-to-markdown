@@ -2385,7 +2385,11 @@ async function appendPanelArtifacts(markdown, options) {
     ? filterButtonsAgainstPanel(opts.scannedButtons, panelNames)
     : null;
   const buttonFiles = opts.clickDownloads === false
-    ? []
+    ? (opts.reportUnresolvedButtons
+      ? (scannedButtons || downloadButtonsInPage(doc, panelNames)).map(function(entry) {
+        return { name: entry.label, url: null };
+      })
+      : [])
     : (opts.buttonFiles !== undefined
       ? opts.buttonFiles
       : await collectButtonDownloads(Object.assign({}, opts, {
@@ -2480,6 +2484,7 @@ async function appendPanelArtifacts(markdown, options) {
   const block = ['## Files'];
   if (lines.length) block.push(lines.join('\n'));
   if (unresolved.length) {
+    if (typeof opts.onIncomplete === 'function') opts.onIncomplete();
     block.push('> Could not retrieve a download link for: ' +
       unresolved.join(', ') +
       (artifacts === null ? ' (the conversation API was unreachable)' : ''));
@@ -3492,24 +3497,59 @@ async function getConversationMarkdown(settings) {
     // tree with no href and no testid, so the per-turn scan above cannot see
     // them. Appending them here puts them in the markdown, which is where the
     // popup's downloader looks for artefacts.
+    let attachmentsIncomplete = false;
     if (wantFiles) {
       // What the walk saw wins: those rows were read while their own turn was
       // mounted. appendPanelArtifacts still reads the panel itself, and merges,
       // so a conversation whose panel IS a sidebar keeps working unchanged.
-      md = await appendPanelArtifacts(md, {
-        scannedPanelFiles: Array.from(panelFilesDuringScan.values()),
-        // Only when a scan actually ran. The legacy path has no walk behind it,
-        // so it must keep its own traversal rather than be told "none found".
-        scannedButtons: firstSection ? Array.from(buttonsDuringScan.values()) : undefined,
-      });
+      // Content scripts execute in an isolated world. Patching that world's
+      // anchor.click/window.open cannot intercept a handler owned by the page.
+      // Never click its download buttons: an escaped native download can close
+      // the popup before the conversation is saved. Keep unresolved names.
+      const controller = typeof AbortController === 'function' ? new AbortController() : null;
+      const phaseBudget = settings && settings.artifactTimeoutMs !== undefined
+        ? settings.artifactTimeoutMs : 30000;
+      let phaseTimer;
+      try {
+        md = await Promise.race([
+          appendPanelArtifacts(md, {
+            scannedPanelFiles: Array.from(panelFilesDuringScan.values()),
+            scannedButtons: firstSection ? Array.from(buttonsDuringScan.values()) : undefined,
+            clickDownloads: false,
+            reportUnresolvedButtons: true,
+            onIncomplete: function() { attachmentsIncomplete = true; },
+            fetchImpl: typeof fetch === 'function' ? function(url, init) {
+              return fetch(url, Object.assign({}, init, controller ? { signal: controller.signal } : {}));
+            } : undefined,
+          }),
+          new Promise(function(_resolve, reject) {
+            phaseTimer = setTimeout(function() {
+              if (controller) controller.abort();
+              reject(new Error('attachment lookup timed out'));
+            }, phaseBudget);
+          }),
+        ]);
+      } catch (_error) {
+        attachmentsIncomplete = true;
+        // The text was already captured. Attachment failure must not erase it.
+        const names = Array.from(new Set(
+          Array.from(panelFilesDuringScan.values()).map(function(f) { return f.name; })
+            .concat(Array.from(buttonsDuringScan.values()).map(function(b) { return b.label; }))));
+        md += '\n\n---\n\n## Files\n\n> Attachment lookup failed or timed out; ' +
+          'the conversation text was preserved. Re-run to retrieve files.' +
+          (names.length ? '\n\n> Could not retrieve a download link for: ' + names.join(', ') : '');
+      } finally {
+        clearTimeout(phaseTimer);
+      }
     }
     const title = extractConversationTitle();
     if (title) md = '# ' + title + '\n\n' + md;
     return {
       ok: true,
       md: md,
-      partial: !!scanMeta && scanMeta.partial === true,
-      partialReason: scanMeta && scanMeta.reason ? scanMeta.reason : null,
+      partial: (!!scanMeta && scanMeta.partial === true) || attachmentsIncomplete,
+      partialReason: scanMeta && scanMeta.partial ? scanMeta.reason :
+        (attachmentsIncomplete ? 'attachments-unavailable' : null),
       title: title,
       slug: slugifyTitle(title),
       lines: md.split('\n').length,

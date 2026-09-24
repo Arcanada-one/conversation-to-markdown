@@ -18,7 +18,7 @@ so the gap is visible rather than assumed away.
 
 ## Checking against the live site
 
-### Pending verification: pagination re-entry
+### Local verification build 1.6.0: pagination re-entry
 
 On a long conversation, history loading can stop while its pagination sentinel
 remains visible. The climb now moves it out of view and returns, without
@@ -423,7 +423,10 @@ match the CHANGELOG's top entry, and users must never see a gap. The last entry
 below is the version being shipped; a test checks this line against the CHANGELOG
 so a release cannot be added without revisiting this file.
 
-Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8
+Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8, 1.6.0
+
+The latest entry identifies the prepared local build; it does not imply Chrome
+Web Store publication. Attachment retrieval is unchanged in 1.6.0.
 
 **Changelog coupling.** A version bump with no dated CHANGELOG entry fails the
 build, because releases 1.1.6 and 1.1.7 reached the store leaving no record of

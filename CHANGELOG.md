@@ -5,6 +5,28 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] — 2026-09-24
+
+### Fixed
+
+- Resume stalled history pagination by moving an idle pagination sentinel out of
+  view and returning to the top. Active loading is left undisturbed, and the
+  failure budget is not extended by repeated movement.
+- Recognize both observed completed pagination layouts, including an empty root
+  sibling. Confirm the beginning only when the sentinel is absent and the first
+  real message holder has its turn mounted at the top.
+
+### Verification and limitations
+
+- A live long-conversation export preserved all 207 turns of its historical
+  reference, with 11 additional turns. A later export saved its conversation,
+  five documents and an intact archive; the five documents matched the archive
+  contents byte for byte.
+- This release does not change attachment retrieval. Uploaded-file omissions,
+  duplicate file links and interrupted attachment exports remain unresolved.
+- Version 1.6.0 identifies the local verification build. Store publication is a
+  separate step; this entry does not claim that the store has been updated.
+
 ## [1.5.8] — 2026-09-14
 
 ### Fixed

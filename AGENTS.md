@@ -1,7 +1,13 @@
-# Working rules for this repository
+# Agent instructions for this repository
+
+`AGENTS.md` is the single instruction file for every agent runtime working in
+this repository. Do not add a runtime-specific copy of these rules.
 
 Read this before changing anything here. These are not style preferences — each
 one exists because ignoring it shipped a defect or would have.
+
+Use the `Arcanada` account for commits, pushes, and repository administration.
+Do not use a personal account to approve changes authored by the agent.
 
 ## Versioning: one bump per release, never per change
 

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.6.6] — 2026-09-24
 
+### Documentation
+
+- Keep the repository's instructions for all agent runtimes in `AGENTS.md`.
+- Assign repository code ownership to the `Arcanada` account used for autonomous
+  maintenance.
+
 ### Fixed
 
 - Do not treat intended output paths inside assistant tool commands, executable
@@ -700,7 +706,7 @@ silent-failure repair: several defects here reported success while losing data.
 - **Pause, resume and cancel** a long run. Cancelling keeps everything already
   written.
 - **`FEATURES.md`** — a per-feature checklist to walk before each release, and
-  **`CLAUDE.md`** — the working rules for this repository, both coupled to the
+  **`AGENTS.md`** — the working rules for this repository, both coupled to the
   build by tests.
 
 ### Fixed

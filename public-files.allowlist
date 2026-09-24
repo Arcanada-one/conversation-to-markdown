@@ -3,7 +3,7 @@
 .github/workflows/ci.yml
 .gitignore
 CHANGELOG.md
-CLAUDE.md
+AGENTS.md
 CODE_OF_CONDUCT.md
 CONTRIBUTING.md
 FEATURES.md

@@ -338,12 +338,13 @@ test('the feature checklist covers every option the popup offers', () => {
 });
 
 test('the repository rules and the checklist ship with the extension', () => {
-  // Both are part of the public surface: CLAUDE.md records why the rules exist,
+  // Both are part of the public surface: AGENTS.md records why the rules exist,
   // and a rule whose reason is lost gets removed by the next person who finds it
   // inconvenient.
-  assert.ok(fs.existsSync(path.join(root, 'CLAUDE.md')), 'CLAUDE.md must exist');
+  assert.ok(fs.existsSync(path.join(root, 'AGENTS.md')), 'AGENTS.md must exist');
+  assert.ok(!fs.existsSync(path.join(root, 'CLAUDE.md')), 'obsolete runtime-specific rules must not exist');
   assert.ok(fs.existsSync(path.join(root, 'FEATURES.md')), 'FEATURES.md must exist');
-  const rules = read('CLAUDE.md');
+  const rules = read('AGENTS.md');
   // The version rule is the one the operator asked for by name; it must not be
   // softened into a suggestion.
   assert.match(rules, /one bump per release/i);

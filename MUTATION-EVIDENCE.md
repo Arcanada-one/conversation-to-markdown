@@ -1475,7 +1475,7 @@ quota isolates it.
 Every helper had tests. None of them drove `runBatchExport`, so the entire
 feature could be deleted with a green suite. This is the same shape as Wave 6's
 B1 and W1/W4 — the third occurrence, which is why it is now a rule in
-`CLAUDE.md`.
+`AGENTS.md`.
 
 The harness also could not express the failure: its markdown stub answered from a
 blind cursor, pairing one conversation's slug with another's id

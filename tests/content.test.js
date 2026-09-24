@@ -4590,7 +4590,7 @@ test('the panel names actually reach the button selector', async () => {
   // left every test green, because the fixtures above pass panelNames directly
   // to downloadButtonsInPage instead of letting appendPanelArtifacts derive it.
   // Without this, the guard that prevents the measured regression is unverified
-  // wiring — the exact "helper is tested, its use is not" trap in CLAUDE.md.
+  // wiring — the exact "helper is tested, its use is not" trap in AGENTS.md.
   let seenPanelNames = null;
   const panelRow = 'Canon_Arcana_Consilium_Context_Selection_TZ_v0.3.md';
 

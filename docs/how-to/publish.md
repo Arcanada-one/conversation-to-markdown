@@ -66,6 +66,32 @@ with the publisher account that owns **Conversation to Markdown**. Select item
 5. Select **Submit for Review**. Choose deferred publication if you want to control the launch after approval.
 6. After approval, publish if deferred. Verify the public listing version and test a store-installed copy separately from an unpacked copy.
 
+### Complete the permission justifications
+
+The dashboard's **Privacy practices** tab may be called **Privacy** in a
+translated interface. Its permission-justification fields are separate from the
+store description. Complete every field shown for the uploaded package before
+submitting the update. In particular, use this justification for `storage`:
+
+> The storage permission keeps an export metadata index and the latest error in
+> chrome.storage.local. The index supports resuming batch exports and finding
+> conversations updated since their last export. The error record supports
+> troubleshooting. Conversation text, attachment contents, and authentication
+> tokens are not stored. This data stays on the user's device and is not synced
+> or sent to the developer.
+
+The other declared permissions have distinct purposes: `scripting` runs the
+exporter in the ChatGPT tab, `clipboardWrite` copies Markdown when clipboard
+mode is selected, and `downloads` saves exported files and checks export
+download history for batch resume. The declared ChatGPT and file-service hosts
+are used to read conversations and retrieve supported attachments with the
+user's existing session. State the single purpose as exporting ChatGPT
+conversations and supported attachments to local Markdown files or the
+clipboard. Use this release's [privacy policy](../../PRIVACY.md) as the policy
+URL, and disclose locally processed user data too; Google's
+[privacy-fields guide](https://developer.chrome.com/docs/webstore/cws-dashboard-privacy)
+explains the dashboard fields.
+
 Dashboard labels can change. Google's [update guide](https://developer.chrome.com/docs/webstore/update)
 is the reference for upload, review, and publication. Review submission alone
 does not update existing users; the approved update must be published.

@@ -267,6 +267,13 @@ files plus an archive. Every retrievable file must arrive beside the Markdown.
 Unavailable files must be named, and no file viewer or native download may be
 triggered by the scan.
 
+**Partial lookup preserves progress.** If lookup resolves one file and hangs on
+another, the first link remains in the Markdown and reaches the downloader.
+Each distinct message id is attempted once per file. Incomplete lookup reports
+its stage and numeric HTTP/candidate/resolved counts, without credentials or
+signed addresses in the diagnostic line. Verify the actual reported conversation
+before claiming automatic retrieval repaired; fixture success alone is not proof.
+
 **Unretrievable files are named.** A file that could not be fetched is listed
 with the reason, so an incomplete export never looks complete.
 
@@ -415,7 +422,7 @@ match the CHANGELOG's top entry, and users must never see a gap. The last entry
 below is the version being shipped; a test checks this line against the CHANGELOG
 so a release cannot be added without revisiting this file.
 
-Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8, 1.6.0, 1.6.1, 1.6.2
+Published history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8, 1.6.0, 1.6.1, 1.6.2, 1.6.3
 
 The latest entry identifies the prepared local build; it does not imply Chrome
 Web Store publication. Attachment retrieval is unchanged in 1.6.0.

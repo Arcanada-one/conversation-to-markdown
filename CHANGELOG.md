@@ -5,6 +5,23 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.3] — 2026-09-24
+
+### Fixed
+
+- Do not retry the same message identifier repeatedly for one unavailable file.
+- Preserve already-resolved attachment links when a later lookup times out, so
+  the downloader can still save those files beside the conversation.
+
+### Diagnostics
+
+- Incomplete lookups include their stage, request/status counts, candidate count
+  and resolved count in the local Markdown. Diagnostics contain no request
+  URLs, headers, response bodies, session tokens or signed links.
+- This local build provides targeted fixes and evidence for the unresolved
+  attachment issue. Successful manual download proves file availability, but
+  automated retrieval on the reported conversation still needs verification.
+
 ## [1.6.2] — 2026-09-24
 
 ### Changed

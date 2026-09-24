@@ -5043,3 +5043,54 @@ test('attachment lookup timeout preserves captured text and reports incomplete f
     }
   }
 });
+
+test('failed file lookup tries each distinct message id once', async () => {
+  const attempts = [];
+  await parser.resolveArtifactPanelFiles('fixture', {
+    token: 'tok-fixture', messageId: 'bad', messageIds: ['bad', 'bad', 'next', 'next'],
+    files: [{ name: 'missing.zip', sandboxPath: '/mnt/data/missing.zip' }],
+    fetchImpl: async url => {
+      attempts.push(new URL(url, 'https://chatgpt.com').searchParams.get('message_id'));
+      return { ok: false, status: 404 };
+    },
+  });
+  assert.deepEqual(attempts, ['bad', 'next']);
+});
+
+test('a later lookup timeout preserves earlier file links and safe diagnostics', async () => {
+  const previous = { document: global.document, location: global.location, fetch: global.fetch };
+  const message = { getAttribute: () => 'user', querySelector: () => ({ textContent: 'Keep the text and the first file.' }) };
+  const panel = ['first.zip', 'second.zip'].map(name => ({ getAttribute: key => key === 'aria-label' ? name : null }));
+  global.document = {
+    title: 'ChatGPT', querySelector: () => null,
+    querySelectorAll: selector => selector === '[data-message-author-role]' ? [message] :
+      (/open-file|artifact-row/.test(selector) ? panel : []),
+  };
+  global.location = { pathname: '/c/progress-fixture', href: 'https://chatgpt.com/' };
+  let pendingSecond = false;
+  global.fetch = async url => {
+    if (url === '/api/auth/session') return { ok: true, status: 200, json: async () => ({ accessToken: 'tok-fixture' }) };
+    if (!url.includes('/interpreter/download')) return { ok: true, status: 200, json: async () => ({ mapping: {
+      n: { message: { id: 'message-1', author: { role: 'assistant' }, content: { parts: ['sandbox:/mnt/data/first.zip sandbox:/mnt/data/second.zip'] } } },
+    } }) };
+    if (url.includes('first.zip')) return { ok: true, status: 200, json: async () => ({ download_url: 'https://chatgpt.com/backend-api/estuary/content?id=file_first&fn=first.zip' }) };
+    pendingSecond = true;
+    return new Promise(() => {});
+  };
+  try {
+    const result = await parser.getConversationMarkdown({ downloadFiles: true, artifactTimeoutMs: 1800 });
+    assert.equal(pendingSecond, true, 'positive control: first resolved and second lookup started');
+    assert.equal(result.ok, true);
+    assert.match(result.md, /Keep the text and the first file/);
+    assert.match(result.md, /\[first.zip\]\(https:\/\/chatgpt.com\/backend-api\/estuary\/content/);
+    assert.equal(result.partial, true);
+    const diagnostic = result.md.split('\n').find(line => line.startsWith('> Attachment diagnostics:'));
+    assert.match(diagnostic, /reason=timeout; stage=file-link/);
+    assert.match(diagnostic, /resolved=1/);
+    assert.doesNotMatch(diagnostic, /tok-fixture|first.zip|https:|message-1/);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete global[key]; else global[key] = value;
+    }
+  }
+});

@@ -1,6 +1,6 @@
 {
   "name": "conversation-to-markdown",
-  "version": "1.6.2",
+  "version": "1.6.3",
   "private": true,
   "description": "Copy a complete ChatGPT conversation as clean Markdown.",
   "type": "commonjs",

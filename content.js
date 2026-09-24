@@ -696,7 +696,7 @@ async function resolveArtifactPanelFiles(conversationId, options) {
     : await fetchSessionToken(doFetch);
   if (!token) return files.map((f) => ({ file: f, resolved: null }));
 
-  const messageIds = opts.messageIds || [];
+  const messageIds = Array.from(new Set(opts.messageIds || []));
   let workingId = opts.messageId || null;
   const out = [];
   for (const file of files) {
@@ -709,13 +709,16 @@ async function resolveArtifactPanelFiles(conversationId, options) {
     if (!resolved) {
       // No id known to work yet (or it stopped working): find one, once.
       for (const candidate of messageIds) {
+        if (candidate === workingId) continue;
         const attempt = await resolveSandboxDownloadUrl(
           conversationId, candidate, file.sandboxPath,
           { fetchImpl: doFetch, token: token });
         if (attempt) { workingId = candidate; resolved = attempt; break; }
       }
     }
-    out.push({ file: file, resolved: resolved });
+    const entry = { file: file, resolved: resolved };
+    out.push(entry);
+    if (typeof opts.onResolved === 'function') opts.onResolved(entry);
   }
   return out;
 }
@@ -2314,6 +2317,8 @@ async function appendPanelArtifacts(markdown, options) {
     ? opts.artifacts
     : await fetchConversationArtifacts(conversationId, opts);
 
+  if (typeof opts.onInventory === 'function') opts.onInventory(artifacts);
+
   // Ask the API FIRST, then decide whether waiting for the panel is worth it.
   // Most conversations have no generated files, and paying the panel-wait budget
   // on every one of them would slow every export for nothing. When the API says
@@ -2446,6 +2451,7 @@ async function appendPanelArtifacts(markdown, options) {
     messageIds: messageIds,
     fetchImpl: opts.fetchImpl,
     token: opts.token,
+    onResolved: opts.onResolved,
   });
 
   const lines = [];
@@ -3510,6 +3516,8 @@ async function getConversationMarkdown(settings) {
       const phaseBudget = settings && settings.artifactTimeoutMs !== undefined
         ? settings.artifactTimeoutMs : 30000;
       let phaseTimer;
+      const resolvedSoFar = [];
+      const lookup = { stage: 'starting', requests: 0, statuses: {}, candidates: null, reason: 'unresolved' };
       try {
         md = await Promise.race([
           appendPanelArtifacts(md, {
@@ -3517,13 +3525,28 @@ async function getConversationMarkdown(settings) {
             scannedButtons: firstSection ? Array.from(buttonsDuringScan.values()) : undefined,
             clickDownloads: false,
             reportUnresolvedButtons: true,
+            onInventory: function(artifacts) {
+              lookup.candidates = artifacts === null ? null : artifacts.length;
+              lookup.stage = 'panel';
+            },
+            onResolved: function(entry) { resolvedSoFar.push(entry); },
             onIncomplete: function() { attachmentsIncomplete = true; },
-            fetchImpl: typeof fetch === 'function' ? function(url, init) {
-              return fetch(url, Object.assign({}, init, controller ? { signal: controller.signal } : {}));
+            fetchImpl: typeof fetch === 'function' ? async function(url, init) {
+              // Only stage names and status counts leave this wrapper. Never
+              // include URLs, headers, response bodies or exception messages.
+              if (controller && controller.signal.aborted) throw new Error('lookup cancelled');
+              lookup.stage = String(url).indexOf('/api/auth/session') !== -1 ? 'session' :
+                (String(url).indexOf('/interpreter/download') !== -1 ? 'file-link' : 'conversation');
+              lookup.requests += 1;
+              const response = await fetch(url, Object.assign({}, init, controller ? { signal: controller.signal } : {}));
+              const code = response && Number.isInteger(response.status) ? response.status : 0;
+              lookup.statuses[code] = (lookup.statuses[code] || 0) + 1;
+              return response;
             } : undefined,
           }),
           new Promise(function(_resolve, reject) {
             phaseTimer = setTimeout(function() {
+              lookup.reason = 'timeout';
               if (controller) controller.abort();
               reject(new Error('attachment lookup timed out'));
             }, phaseBudget);
@@ -3531,15 +3554,29 @@ async function getConversationMarkdown(settings) {
         ]);
       } catch (_error) {
         attachmentsIncomplete = true;
+        if (lookup.reason !== 'timeout') lookup.reason = 'exception';
         // The text was already captured. Attachment failure must not erase it.
         const names = Array.from(new Set(
           Array.from(panelFilesDuringScan.values()).map(function(f) { return f.name; })
             .concat(Array.from(buttonsDuringScan.values()).map(function(b) { return b.label; }))));
-        md += '\n\n---\n\n## Files\n\n> Attachment lookup failed or timed out; ' +
+        const available = resolvedSoFar.filter(function(entry) { return entry.resolved && entry.resolved.url; });
+        const recoveredLinks = available.map(function(entry) { return markdownLink(entry.file.name, entry.resolved.url); });
+        const recoveredNames = new Set(available.map(function(entry) { return entry.file.name; }));
+        const missingNames = names.filter(function(name) { return !recoveredNames.has(name); });
+        md += '\n\n---\n\n## Files' +
+          (recoveredLinks.length ? '\n\n' + recoveredLinks.join('\n') : '') +
+          '\n\n> Attachment lookup failed or timed out; ' +
           'the conversation text was preserved. Re-run to retrieve files.' +
-          (names.length ? '\n\n> Could not retrieve a download link for: ' + names.join(', ') : '');
+          (missingNames.length ? '\n\n> Could not retrieve a download link for: ' + missingNames.join(', ') : '');
       } finally {
         clearTimeout(phaseTimer);
+      }
+      if (attachmentsIncomplete) {
+        md += '\n\n> Attachment diagnostics: reason=' + lookup.reason +
+          '; stage=' + lookup.stage + '; requests=' + lookup.requests +
+          '; HTTP=' + JSON.stringify(lookup.statuses) +
+          '; candidates=' + (lookup.candidates === null ? 'unknown' : lookup.candidates) +
+          '; resolved=' + resolvedSoFar.filter(function(entry) { return entry.resolved; }).length + '.';
       }
     }
     const title = extractConversationTitle();

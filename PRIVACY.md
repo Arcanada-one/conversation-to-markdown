@@ -24,7 +24,11 @@ Some generated files are offered as buttons without a downloadable link in the
 page. The export does not invoke those page-owned handlers. It resolves paths
 through ChatGPT's conversation API when available and names unresolved files in
 the saved Markdown. File lookup has a bounded wait; failure preserves the
-captured conversation and marks the export incomplete.
+captured conversation and marks the export incomplete. Incomplete lookups add
+local diagnostics to the Markdown: stage names, request counts, HTTP status
+counts, candidate count and resolved count. This diagnostic line contains no
+URLs, headers, response bodies or session tokens. Already resolved file links
+are preserved separately, under the signed-link handling described below.
 
 This lookup happens **only** when the save checkbox is ticked; the exporter does not click file buttons. With saving unchecked, **Copy as Markdown** reads the page and nothing more — it makes no network request of any kind and clicks nothing, and both are enforced by tests in the repository, not only by this document.
 

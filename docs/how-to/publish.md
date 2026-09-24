@@ -6,8 +6,8 @@ submit or update the Web Store listing.
 ## Release acceptance
 
 Do not submit the current development build as a complete attachment backup:
-the new uploaded-document resolver still needs a fresh live export, and
-generated-file warnings need further validation. Resolve the release scope before publication; disclose any
+the uploaded-document resolver has passed a live byte comparison, but
+generated-file lookup failures and warnings still need resolution. Resolve the release scope before publication; disclose any
 accepted limitations in the listing and release notes.
 
 1. Compare the version in the [store listing](https://chromewebstore.google.com/detail/conversation-to-markdown/jhnhkmnignbhmcjbhoihdbjhjfljpili), the publisher dashboard (including pending submissions), and `manifest.json`. Use a version greater than the preceding store package.

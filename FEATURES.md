@@ -30,9 +30,12 @@ redundant button warnings still need correction.
 The 1.6.4 upload resolver excluded non-sandbox uploads; a fresh export of the
 original long conversation resolved no file links. Build 1.6.5 routes named
 uploaded attachments to the observed file-service endpoint and reports failures
-explicitly. The manual request contract and fixture tests are verified; a fresh
-extension export of the uploaded document is still required. Existing files manually
-placed beside an export are not evidence that the extension downloaded them.
+explicitly. A fresh extension export saved the 70,936-byte uploaded document
+under its own generated filename and linked it from Markdown. Its bytes matched
+the separate manual reference exactly, and all 218 conversation role blocks
+were unchanged. A generated HTML candidate still returned no download URL;
+that failure remains unresolved. Existing manually placed files alone are not
+evidence that the extension downloaded them.
 Do not treat the historical checks below as current release acceptance.
 
 ### Local verification build 1.6.0: pagination re-entry

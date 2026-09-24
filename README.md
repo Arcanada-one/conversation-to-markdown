@@ -32,7 +32,7 @@ A typical single-conversation export looks like:
 ```text
 Downloads/chatgpt-export/Example-conversation/
   Example-conversation--20260924-1808.md
-  001-example.zip
+  Example-conversation-001-example.zip
 ```
 
 The Markdown groups messages under `#### You said:` and `#### ChatGPT said:`.
@@ -56,7 +56,7 @@ browser memory. Cancelled or interrupted runs keep files already downloaded.
 
 ## Current limitations
 
-- **Not every attachment is supported.** Generated sandbox files and direct download links can be saved. Build 1.6.5 adds file-service lookup for named uploads with file identifiers. Its request contract is confirmed, but the complete live export still needs verification. Uploads without identifiers are reported as unresolved; unidentified assets can remain unsupported. Check the export inventory yourself.
+- **Not every attachment is supported.** Generated sandbox files and direct download links can be saved. Build 1.6.5 adds file-service lookup for named uploads with file identifiers. A live uploaded-document export was verified byte for byte against a manual download. Uploads without identifiers are reported as unresolved; unidentified assets can remain unsupported. Check the export inventory yourself.
 - Some generated files cannot be resolved. An HTTP success response alone does not prove that a download link exists. Expired or unavailable files cannot be reconstructed by the extension.
 - File lookup is bounded. A timeout preserves captured text and links already resolved, but can leave files missing. Some page button labels can produce redundant missing-file warnings even when the corresponding file was downloaded.
 - Text scanning depends on ChatGPT's live page structure. The extension reports incomplete scans when it cannot establish the conversation boundaries. It does not export every alternate branch, hidden message, or unsupported canvas representation.

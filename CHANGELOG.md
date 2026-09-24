@@ -24,9 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Verification status
 
 - Local verification build. The upload request and response contract was
-  captured from a successful manual download. A fresh extension export must
-  still verify the complete upload-to-local-file flow. Generated-file lookup
-  failures and redundant missing-button warnings remain open.
+  captured from a successful manual download. A fresh extension export saved
+  the uploaded document with identical bytes to the manual reference and
+  preserved all 218 conversation role blocks. Generated-file lookup failures
+  and redundant missing-button warnings remain open.
 
 ## [1.6.4] — 2026-09-24
 

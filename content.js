@@ -1069,19 +1069,43 @@ function findScrollContainer(startElement) {
   return document.scrollingElement || document.documentElement;
 }
 
+// ChatGPT's app shell uses column-reverse: native scrollTop is 0 at the
+// bottom and negative at the start. Keep the scanner's coordinates increasing
+// from the start on both layouts. Measured on 2026-09-27: 6951px content in
+// an 802px viewport, native bottom 0 and native start about -6149px.
+function reverseConversationScroll(target) {
+  const view = target.ownerDocument && target.ownerDocument.defaultView;
+  const style = view && view.getComputedStyle
+    ? view.getComputedStyle(target)
+    : (typeof getComputedStyle === 'function' ? getComputedStyle(target) : null);
+  return !!style && style.flexDirection === 'column-reverse';
+}
+
+function conversationScrollMax(target) {
+  return Math.max(0, target.scrollHeight - target.clientHeight);
+}
+
+function conversationScrollTop(target) {
+  return reverseConversationScroll(target)
+    ? target.scrollTop + conversationScrollMax(target)
+    : target.scrollTop;
+}
+
+function nativeConversationScrollTop(target, top) {
+  const maxTop = conversationScrollMax(target);
+  const logicalTop = Math.max(0, Math.min(top, maxTop));
+  return reverseConversationScroll(target) ? logicalTop - maxTop : logicalTop;
+}
+
 function waitForScrollPosition(target, requestedTop, behavior, timeoutMs) {
   if (typeof requestAnimationFrame !== 'function') return Promise.resolve();
   return new Promise(function(resolve, reject) {
     const startedAt = Date.now();
     let stableFrames = 0;
     let previousTop = target.scrollTop;
-    let lastReachableTop = Math.max(
-      0,
-      Math.min(requestedTop, target.scrollHeight - target.clientHeight)
-    );
+    let lastReachableTop = nativeConversationScrollTop(target, requestedTop);
     function check() {
-      const maxTop = Math.max(0, target.scrollHeight - target.clientHeight);
-      const reachableTop = Math.max(0, Math.min(requestedTop, maxTop));
+      const reachableTop = nativeConversationScrollTop(target, requestedTop);
       const targetChanged = Math.abs(reachableTop - lastReachableTop) >= 1;
       if (targetChanged) {
         lastReachableTop = reachableTop;
@@ -1108,16 +1132,14 @@ function waitForScrollPosition(target, requestedTop, behavior, timeoutMs) {
 }
 
 async function scrollToConversationPosition(target, top, behavior) {
-  const maxTop = Math.max(0, target.scrollHeight - target.clientHeight);
-  const expectedTop = Math.max(0, Math.min(top, maxTop));
+  const expectedTop = nativeConversationScrollTop(target, top);
   target.scrollTo({ top: expectedTop, behavior: behavior });
   try {
     await waitForScrollPosition(target, top, behavior, 8000);
   } catch (_e) {
     // Smooth scroll didn't settle — force instant jump to target so we
     // don't start scanning from mid-conversation. Then wait for the DOM.
-    const curMaxTop = Math.max(0, target.scrollHeight - target.clientHeight);
-    target.scrollTo({ top: Math.max(0, Math.min(top, curMaxTop)), behavior: 'auto' });
+    target.scrollTo({ top: nativeConversationScrollTop(target, top), behavior: 'auto' });
     await new Promise(function(r) { return setTimeout(r, 1500); });
   }
 }
@@ -1221,7 +1243,7 @@ async function scrollToConversationStart(container, options) {
       pending: !!sentinel,
       loading: !!(sentinel && sentinel.querySelector('svg')),
       count: holders.length,
-      complete: !sentinel && !!knownLayout && atFirstHolder && target.scrollTop <= 1,
+      complete: !sentinel && !!knownLayout && atFirstHolder && conversationScrollTop(target) <= 1,
     };
   };
   // The page's own marker for "nothing exists above this". Measured on a live
@@ -1370,7 +1392,7 @@ async function scrollToConversationStart(container, options) {
       sinceProgress += 1;
     }
 
-    const atTop = container.scrollTop <= 1;
+    const atTop = conversationScrollTop(container) <= 1;
     steady = atTop && firstId === previousFirstId ? steady + 1 : 0;
     previousFirstId = firstId;
     // The silence fallback no longer ENDS the climb — it only records that the
@@ -1396,7 +1418,7 @@ async function scrollToConversationStart(container, options) {
     if (pagination && pagination.pending && !pagination.loading &&
         sinceProgress >= 2 && atTop) {
       await scrollTo(container, Math.min(container.clientHeight * 2,
-        Math.max(0, container.scrollHeight - container.clientHeight)), 'auto');
+        conversationScrollMax(container)), 'auto');
       await sleep(settleMs);
     }
   }
@@ -1597,12 +1619,12 @@ function captureMountedTurns(sections, settings, seen, state) {
  *  for a checked invariant.
  */
 function nextScrollTop(container, atBottom, mountedBand) {
-  if (atBottom) return container.scrollTop;
+  if (atBottom) return conversationScrollTop(container);
   const reach = mountedBand > 0
     ? Math.min(mountedBand, container.clientHeight || mountedBand)
     : (container.clientHeight || 0);
   const increment = Math.max(1, Math.floor(reach * 0.75));
-  return Math.min(container.scrollTop + increment, container.scrollHeight - container.clientHeight);
+  return Math.min(conversationScrollTop(container) + increment, conversationScrollMax(container));
 }
 
 /** The widest stretch between two read positions that neither of them covered.
@@ -1720,7 +1742,7 @@ function prefixPartialNotice(md, reason) {
 
 async function scanTurns(container, options) {
   const settings = createScanSettings(options);
-  const originalScrollTop = container.scrollTop;
+  const originalNativeScrollTop = container.scrollTop;
   const seen = new Map();
   const state = {
     discoveryIndex: 0,
@@ -1780,12 +1802,13 @@ async function scanTurns(container, options) {
         return orderCapturedTurns(seen);
       }
       const observation = captureMountedTurns(settings.readSections(container), settings, seen, state);
-      const atBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 1;
+      const logicalTop = conversationScrollTop(container);
+      const atBottom = logicalTop >= conversationScrollMax(container) - 1;
       // Record every position and what it mounted there. Positions that mounted
       // nothing are kept: below the last turn that is legitimate, but between two
       // turns it is the signature of a stretch the virtualizer never rendered
       // while the scan was looking at it.
-      readBands.push([container.scrollTop, observation.mountedBand]);
+      readBands.push([logicalTop, observation.mountedBand]);
       // Read anything that lives inside a turn BEFORE the scan scrolls away and
       // the virtualizer unmounts it. Guarded: a throwing collector must not end
       // a scan that has already captured turns.
@@ -1793,10 +1816,10 @@ async function scanTurns(container, options) {
         try { settings.onMounted(container); } catch (_e) { /* collector failed */ }
       }
 
-      const movedDown = Math.abs(container.scrollTop - lastProgressTop) >= 1;
+      const movedDown = Math.abs(logicalTop - lastProgressTop) >= 1;
       if (observation.newIds > 0 || movedDown) {
         stepsSinceProgress = 0;
-        lastProgressTop = container.scrollTop;
+        lastProgressTop = logicalTop;
       } else {
         stepsSinceProgress += 1;
         // Waiting for a turn to paint is work, so it must not be mistaken for a
@@ -1826,7 +1849,7 @@ async function scanTurns(container, options) {
           captured: seen.size,
           observed: state.observedIds.size,
           elapsedMs: settings.now() - startedAt,
-          scrollTop: container.scrollTop,
+          scrollTop: logicalTop,
           scrollHeight: container.scrollHeight,
         });
       }
@@ -1849,7 +1872,7 @@ async function scanTurns(container, options) {
       }
       lastHeight = container.scrollHeight;
       const target = observation.unresolved > 0
-        ? container.scrollTop : nextScrollTop(container, atBottom, observation.mountedBand);
+        ? logicalTop : nextScrollTop(container, atBottom, observation.mountedBand);
       await settings.scrollTo(container, target, 'auto');
       await settings.settle(container);
     }
@@ -1861,7 +1884,13 @@ async function scanTurns(container, options) {
     }
     throw new Error('Conversation scan exceeded its step limit before reaching a stable bottom.');
   } finally {
-    await settings.scrollTo(container, originalScrollTop, 'auto');
+    // Restore the native offset so a conversation whose height grew during the
+    // walk returns to the same viewport edge (especially native zero/bottom in
+    // the reverse layout), rather than to its old distance from the start.
+    const restoreTop = reverseConversationScroll(container)
+      ? originalNativeScrollTop + conversationScrollMax(container)
+      : originalNativeScrollTop;
+    await settings.scrollTo(container, restoreTop, 'auto');
   }
 }
 

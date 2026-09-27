@@ -29,6 +29,13 @@ been measured, so exports explicitly mark the history start as unverified and
 are not recorded as complete by batch export. File retrieval on this layout
 also still needs a live check.
 
+The app-shell conversation scroller uses `column-reverse`: its native position
+is zero at the bottom and negative at the beginning. The capture walk must reach
+that negative start, then move through every mounted message toward zero and
+finish, including when a single answer spans several viewports. Verify on a
+fresh extension export of the reported two-message conversation; the fixture
+proves the coordinate conversion but does not replace that live check.
+
 ## Checking against the live site
 
 ### Current verification status: 1.6.6

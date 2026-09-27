@@ -5,6 +5,22 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- Scan app-shell conversations with `column-reverse` scrolling from their
+  negative start position to the bottom. Previously the scanner repeatedly
+  requested unreachable positive positions, stayed at two captured messages,
+  and did not reach the download step.
+
+### Verification
+
+- The target page's reverse scroll geometry was measured in Chrome. A regression
+  reproducing Chrome's position clamp fails against 1.6.7 and passes with this
+  change; the full 284-test suite passes with one existing 7z skip. A fresh
+  extension export is still required before release.
+
 ## [1.6.7] — 2026-09-27
 
 ### Fixed

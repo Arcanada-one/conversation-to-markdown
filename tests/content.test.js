@@ -312,6 +312,66 @@ test('captures turns that are never mounted together', async () => {
   assert.equal(container.scrollCalls.at(-1).behavior, 'auto');
 });
 
+test('scans a column-reverse conversation from its negative start to native zero', async () => {
+  // Chrome's current app shell reports scrollTop=0 at the bottom. Positive
+  // scrollTo targets are clamped to zero; the old scanner captured the first
+  // mounted pair and then waited through repeated impossible scrolls.
+  const pages = Array.from({ length: 5 }, (_, index) => [{
+    turnId: 'reverse-' + index,
+    order: index,
+    role: 'user',
+    markdown: 'message ' + index,
+    getAttribute(name) { return name === 'data-turn-id' ? this.turnId : null; },
+    querySelector() { return null; },
+  }]);
+  pages[0][0].parentElement = {
+    getAttribute(name) { return name === 'data-turn-id-container' ? 'paginated-root:fixture' : null; },
+    parentElement: null,
+  };
+  const calls = [];
+  const container = {
+    scrollTop: 0,
+    scrollHeight: 500,
+    clientHeight: 100,
+    ownerDocument: { defaultView: { getComputedStyle: () => ({ flexDirection: 'column-reverse' }) } },
+    scrollTo({ top }) {
+      calls.push(top);
+      this.scrollTop = Math.max(-400, Math.min(0, top));
+    },
+    querySelectorAll(selector) {
+      if (selector !== '[data-turn-id]') return [];
+      const logicalTop = this.scrollTop + 400;
+      return pages[Math.min(4, Math.floor(logicalTop / 100))];
+    },
+    querySelector(selector) {
+      if (selector === '[data-turn-id]') return this.querySelectorAll(selector)[0];
+      if (selector.includes('paginated-root')) return pages[0][0].parentElement;
+      return null;
+    },
+  };
+  const start = await parser.scrollToConversationStart(container, { sleep: async () => {} });
+  assert.equal(start.reachedTop, true);
+  assert.equal(container.scrollTop, -400, 'the real beginning has a negative native scroll position');
+  container.scrollTop = 0; // The user opened the popup while viewing the bottom.
+
+  let grew = false;
+  const turns = await parser.scanTurns(container, {
+    readSections: (target) => target.querySelectorAll('[data-turn-id]'),
+    extractTurn: (turn) => turn,
+    scrollToStart: () => parser.scrollToConversationStart(container, { sleep: async () => {} }),
+    settle: async () => {},
+    onProgress: () => {
+      if (!grew) { container.scrollHeight += 100; grew = true; }
+    },
+    stablePasses: 2,
+    maxSteps: 30,
+  });
+  assert.deepEqual(turns.map((turn) => turn.turnId), pages.map((page) => page[0].turnId));
+  assert.equal(grew, true, 'the test exercised changing scroll height');
+  assert.ok(calls.some((top) => top < 0), 'the walk uses reachable negative scroll positions');
+  assert.equal(container.scrollTop, 0, 'the original bottom is restored after height growth');
+});
+
 test('orders numbered turns and uses discovery order when numbering is absent', () => {
   assert.equal(typeof parser.orderCapturedTurns, 'function');
   const numbered = new Map([

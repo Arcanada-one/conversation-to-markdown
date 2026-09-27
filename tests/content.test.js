@@ -2560,6 +2560,12 @@ test('app-shell code, formula and cited files keep their meaning', () => {
     math.querySelector = selector => selector === 'annotation[encoding="application/x-tex"]'
       ? annotation : null;
     assert.equal(parser.nodeToMarkdown(math), '$$\n' + tex + '\n$$\n\n');
+    const displayWrapper = element('span', [math], { class: 'katex-display' });
+    math.parentElement = displayWrapper;
+    displayWrapper.querySelector = selector => selector === 'annotation[encoding="application/x-tex"]'
+      ? annotation : null;
+    assert.equal(parser.nodeToMarkdown(displayWrapper), '$$\n' + tex + '\n$$\n\n',
+      'the display wrapper must not be treated as an inline KaTeX root');
 
     const citation = element('button', [textNode('Truncated…')], {
       'data-testid': 'chatgpt-library-file-citation',

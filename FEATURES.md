@@ -37,7 +37,8 @@ fresh extension export of the reported two-message conversation; the fixture
 proves the coordinate conversion but does not replace that live check.
 
 Rendered app-shell code blocks keep their line breaks and fenced Markdown;
-formulas keep the TeX annotation rather than a flattened visual string.
+formulas keep the TeX annotation rather than a flattened visual string,
+including when ChatGPT wraps display math in `katex-display`.
 Decorative SVG icons do not appear as missing artefacts. Library file citations
 retain their full filenames with an explicit "not downloaded" note until a
 download link is available. Verify these against the reported conversation's

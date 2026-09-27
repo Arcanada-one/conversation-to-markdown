@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their references. File-saving exports with Library citations stay partial,
   so batch resume cannot mark missing documents as already saved. Library
   citation bytes are not yet downloaded.
+- Preserve display math when ChatGPT wraps a KaTeX formula in a
+  `katex-display` container; the wrapper previously made it inline math.
 
 ### Verification
 
@@ -25,8 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reproducing Chrome's position clamp fails against 1.6.7 and passes with this
   change. A local comparison with a manual download found exact matching bytes
   for the primary Markdown and ZIP but exposed formatting and citation losses
-  in the conversation Markdown. A fresh extension export of the additional
-  rendering changes is required before release.
+  in the conversation Markdown. A parser replay of the target answer's live DOM
+  now retains its code block, display TeX, all three cited filenames, and no
+  decorative SVG placeholders. A fresh installed-extension export of these
+  changes is required before release.
 
 ## [1.6.7] — 2026-09-27
 

@@ -85,7 +85,9 @@ function isKatexMathml(node) {
 
 function isKatexRoot(node) {
   const cls = node.className || '';
-  return typeof cls === 'string' && /\bkatex\b/.test(cls) && !/\bkatex-(?:mathml|html)\b/.test(cls);
+  // `katex-display` wraps the actual `katex` span. A word-boundary check also
+  // matches that wrapper at the hyphen, turning display math into inline math.
+  return typeof cls === 'string' && /(?:^|\s)katex(?:\s|$)/.test(cls);
 }
 
 /** Fixture-derived: live ChatGPT attachment chips use data-testid="file-chip". */

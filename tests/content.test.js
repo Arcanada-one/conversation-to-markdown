@@ -5402,7 +5402,7 @@ test('unavailable attachment inventory is incomplete even without visible files 
 // Shape measured from the operator's DOM on 2026-09-27: a data-turn-key
 // contains BOTH sides, search units own each message, and role attributes,
 // articles, .markdown and .prose are all absent. Text below is synthetic.
-function modernConversationFixture() {
+function modernConversationFixture(options = {}) {
   function dom(tag, children = [], attrs = {}) {
     const node = element(tag, children, attrs);
     function matches(el, selector) {
@@ -5444,6 +5444,10 @@ function modernConversationFixture() {
             dom('p', [textNode('Ответ ' + i), dom('strong', [textNode(' важное')])]),
             dom('div', [textNode('Table controls')], { 'data-block-actions': '' }),
             dom('button', [textNode('Embedded copy')]),
+            ...(options.libraryCitation ? [dom('button', [textNode('Truncated citation')], {
+              'data-testid': 'chatgpt-library-file-citation',
+              'aria-label': 'Open preview of ' + options.libraryCitation,
+            })] : []),
             dom('table', [dom('tr', [dom('th', [textNode('Поле')])]), dom('tr', [dom('td', [textNode('Значение')])])]),
           ], { 'data-markdown-text-style': '' }),
           dom('button', [textNode('Copy reply')]),
@@ -5487,6 +5491,25 @@ test('modern DOM: real export preserves both sides per turn-key without toolbar 
   assert.doesNotMatch(result.md, /Show more|Copy reply|Outside the transcript|Table controls|Embedded copy/);
   assert.equal(result.partial, true, 'new pagination has not been measured');
   assert.match(result.md, /history start.*unverified/i);
+});
+
+test('modern file-saving export stays partial when a Library citation has no bytes', async () => {
+  const { document } = modernConversationFixture({ libraryCitation: 'source-note.md' });
+  const source = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
+  const context = vm.createContext({
+    document, Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 }, URL,
+    location: { pathname: '/c/synthetic', href: 'https://chatgpt.com/' },
+    getComputedStyle: () => ({ overflowY: 'visible' }),
+    fetch: async url => ({ ok: true, json: async () =>
+      String(url).includes('/api/auth/session') ? { accessToken: 'fixture' } : { mapping: {} } }),
+    setTimeout: fn => { fn(); return 0; }, clearTimeout() {},
+  });
+  vm.runInContext(source, context);
+  const result = await context.getConversationMarkdown({ downloadFiles: true });
+  assert.equal(result.ok, true, result.error);
+  assert.equal(result.partial, true);
+  assert.match(result.md, /source-note\.md.*referenced file; not downloaded/);
+  assert.match(result.md, /Library files cited.*were not downloaded/);
 });
 
 test('modern DOM: batch readiness recognizes messages but not empty turn shells', async () => {

@@ -42,6 +42,8 @@ Decorative SVG icons do not appear as missing artefacts. Library file citations
 retain their full filenames with an explicit "not downloaded" note until a
 download link is available. Verify these against the reported conversation's
 manual answer and its cited documents; cited Library files are still not fetched.
+When file saving is requested, those references keep the export partial so a
+batch run cannot record it as complete and silently skip the missing files.
 
 ## Checking against the live site
 

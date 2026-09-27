@@ -15,7 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and did not reach the download step.
 - Preserve app-shell code blocks and TeX formulas, omit decorative SVG icons,
   and name cited Library files as unavailable instead of silently removing
-  their references. Library citation bytes are not yet downloaded.
+  their references. File-saving exports with Library citations stay partial,
+  so batch resume cannot mark missing documents as already saved. Library
+  citation bytes are not yet downloaded.
 
 ### Verification
 

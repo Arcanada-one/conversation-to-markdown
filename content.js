@@ -3795,6 +3795,15 @@ async function getConversationMarkdown(settings) {
           '; rejectedHosts=' + JSON.stringify(lookup.rejectedHosts) + '.';
       }
     }
+    // A Library citation is an offered file, even though its preview button
+    // exposes no download URL. Keep the inline name, but do not bank the export
+    // as complete when saving files was requested. Otherwise batch resume skips
+    // the conversation forever despite never saving those cited documents.
+    if (wantFiles && /\(referenced file; not downloaded\)/.test(md)) {
+      attachmentsIncomplete = true;
+      md += '\n\n> Library files cited in this conversation were not downloaded. ' +
+        'Download them from ChatGPT Library before treating this export as complete.';
+    }
     const title = extractConversationTitle();
     if (title) md = '# ' + title + '\n\n' + md;
     return {

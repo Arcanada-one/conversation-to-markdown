@@ -139,8 +139,23 @@ function nodeToMarkdown(node, depth) {
 
   // App-shell Markdown embeds table controls inside the rendered content.
   if (node.getAttribute && node.getAttribute('data-block-actions') !== null) return '';
+  // The app shell renders a fenced code block as a div, not a pre. Its
+  // data-markdown-copy marker encloses both the code and a toolbar; reading
+  // children flattened the lines and added the toolbar's label and SVG.
+  if (node.getAttribute && node.getAttribute('data-markdown-copy') === 'code-block') {
+    const code = node.querySelector && node.querySelector('code');
+    if (code) return '```\n' + code.textContent.replace(/\n$/, '') + '\n```\n\n';
+  }
   if (isKatexMathml(node)) return '';
   if (isKatexRoot(node)) {
+    // Visible KaTeX text flattens fractions into an ambiguous string. The
+    // rendered formula carries its original TeX in a semantic annotation.
+    const annotation = node.querySelector('annotation[encoding="application/x-tex"]');
+    if (annotation && annotation.textContent) {
+      const tex = annotation.textContent.trim();
+      const display = node.parentElement && /\bkatex-display\b/.test(node.parentElement.className || '');
+      return display ? '$$\n' + tex + '\n$$\n\n' : '$' + tex + '$';
+    }
     const htmlEl = node.querySelector('.katex-html');
     if (htmlEl) return nodeToMarkdown(htmlEl, depth);
     return children();
@@ -252,9 +267,16 @@ function nodeToMarkdown(node, depth) {
     case 'video':
       return artifactPlaceholder('video');
     case 'svg':
+      if (node.getAttribute('aria-hidden') === 'true') return '';
       return artifactPlaceholder('svg');
-    case 'button':
+    case 'button': {
+      if (node.getAttribute('data-testid') === 'chatgpt-library-file-citation') {
+        const label = node.getAttribute('aria-label') || '';
+        const name = /([^\s/\\]+\.(?:md|txt|pdf|docx?|xlsx?|csv|json|zip|png|jpe?g))$/i.exec(label);
+        if (name) return ' `'+ name[1].replace(/`/g, '') + '` (referenced file; not downloaded)';
+      }
       return '';
+    }
     default:
       return children();
   }

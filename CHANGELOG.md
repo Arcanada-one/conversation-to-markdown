@@ -13,13 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   negative start position to the bottom. Previously the scanner repeatedly
   requested unreachable positive positions, stayed at two captured messages,
   and did not reach the download step.
+- Preserve app-shell code blocks and TeX formulas, omit decorative SVG icons,
+  and name cited Library files as unavailable instead of silently removing
+  their references. Library citation bytes are not yet downloaded.
 
 ### Verification
 
 - The target page's reverse scroll geometry was measured in Chrome. A regression
   reproducing Chrome's position clamp fails against 1.6.7 and passes with this
-  change; the full 284-test suite passes with one existing 7z skip. A fresh
-  extension export is still required before release.
+  change. A local comparison with a manual download found exact matching bytes
+  for the primary Markdown and ZIP but exposed formatting and citation losses
+  in the conversation Markdown. A fresh extension export of the additional
+  rendering changes is required before release.
 
 ## [1.6.7] — 2026-09-27
 

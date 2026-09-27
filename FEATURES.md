@@ -36,6 +36,13 @@ finish, including when a single answer spans several viewports. Verify on a
 fresh extension export of the reported two-message conversation; the fixture
 proves the coordinate conversion but does not replace that live check.
 
+Rendered app-shell code blocks keep their line breaks and fenced Markdown;
+formulas keep the TeX annotation rather than a flattened visual string.
+Decorative SVG icons do not appear as missing artefacts. Library file citations
+retain their full filenames with an explicit "not downloaded" note until a
+download link is available. Verify these against the reported conversation's
+manual answer and its cited documents; cited Library files are still not fetched.
+
 ## Checking against the live site
 
 ### Current verification status: 1.6.6

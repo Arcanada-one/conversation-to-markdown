@@ -2541,6 +2541,38 @@ test('renders KaTeX once by skipping the hidden MathML layer', () => {
   }
 });
 
+test('app-shell code, formula and cited files keep their meaning', () => {
+  const previousNode = global.Node;
+  global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
+  try {
+    const code = element('code', [textNode('Запрос\n  → проверка\n')]);
+    const block = element('div', [
+      element('div', [textNode('Обычный текст'), element('svg', [], { 'aria-hidden': 'true' })]),
+      code,
+    ], { 'data-markdown-copy': 'code-block' });
+    block.querySelector = selector => selector === 'code' ? code : null;
+    assert.equal(parser.nodeToMarkdown(block), '```\nЗапрос\n  → проверка\n```\n\n');
+
+    const tex = '\\frac{\\text{Полные расходы}}{\\text{Число работ}}';
+    const annotation = element('annotation', [textNode(tex)], { encoding: 'application/x-tex' });
+    const math = element('span', [annotation], { class: 'katex' });
+    math.parentElement = { className: 'katex-display' };
+    math.querySelector = selector => selector === 'annotation[encoding="application/x-tex"]'
+      ? annotation : null;
+    assert.equal(parser.nodeToMarkdown(math), '$$\n' + tex + '\n$$\n\n');
+
+    const citation = element('button', [textNode('Truncated…')], {
+      'data-testid': 'chatgpt-library-file-citation',
+      'aria-label': 'Открыть предпросмотр файла Canon_Arcana_Consilium_Context_Selection_TZ_v0.3.md',
+    });
+    assert.match(parser.nodeToMarkdown(citation), /Canon_Arcana_Consilium_Context_Selection_TZ_v0\.3\.md.*not downloaded/);
+    assert.equal(parser.nodeToMarkdown(element('svg', [], { 'aria-hidden': 'true' })), '');
+    assert.match(parser.nodeToMarkdown(element('svg', [])), /svg artifact/);
+  } finally {
+    global.Node = previousNode;
+  }
+});
+
 test('lists every sidebar conversation link once', () => {
   assert.equal(typeof parser.listSidebarConversations, 'function');
   const makeLink = (href, title) => ({

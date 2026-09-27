@@ -16,6 +16,11 @@ Copying a conversation uses two permissions:
 - `downloads` — writes the files to your Downloads folder, and reads download history (see below).
 - Host access to `https://files.oaiusercontent.com/*` — the host that serves files inside ChatGPT conversations.
 
+Library citations presented only as preview buttons are named in the Markdown,
+but their bytes are not downloaded by this version. A file-saving export with
+such citations is marked incomplete instead of being recorded as a complete
+batch export.
+
 In this mode the extension requests each file directly from that host, converts the bytes in memory, and hands the result to the browser's own download mechanism. Requests go to the declared ChatGPT and file hosts, not to a developer-operated endpoint. API requests include conversation, message, and file-path identifiers needed to locate the files. The extension does not upload conversation text or file bytes.
 
 To discover generated files and batch metadata, the extension reads the conversation API using your existing signed-in session. It obtains the access token from the same-origin session endpoint and sends it in an Authorization header to same-origin ChatGPT API endpoints. The token is held transiently in memory; it is not persisted, added to Markdown, or sent to a developer server. The extension does not ask for your password. File bytes are downloaded only from supported hosts. API metadata availability does not imply that a file download is supported.

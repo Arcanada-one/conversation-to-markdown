@@ -5305,3 +5305,142 @@ test('unavailable attachment inventory is incomplete even without visible files 
   assert.equal(incomplete, false, 'a confirmed empty inventory is a complete answer');
   assert.equal(out, 'Captured text');
 });
+
+
+// Shape measured from the operator's DOM on 2026-09-27: a data-turn-key
+// contains BOTH sides, search units own each message, and role attributes,
+// articles, .markdown and .prose are all absent. Text below is synthetic.
+function modernConversationFixture() {
+  function dom(tag, children = [], attrs = {}) {
+    const node = element(tag, children, attrs);
+    function matches(el, selector) {
+      if (selector.startsWith('.')) return el.className.split(/\s+/).includes(selector.slice(1));
+      const attr = selector.match(/^\[([\w-]+)(?:="([^"]*)")?\]$/);
+      if (attr) return attr[2] === undefined ? el.getAttribute(attr[1]) !== null : el.getAttribute(attr[1]) === attr[2];
+      return el.tagName.toLowerCase() === selector;
+    }
+    node.querySelectorAll = selector => {
+      const selectors = selector.split(',').map(s => s.trim());
+      const found = [];
+      const visit = el => {
+        if (el.nodeType !== 1) return;
+        if (selectors.some(s => matches(el, s))) found.push(el);
+        el.children.forEach(visit);
+      };
+      node.children.forEach(visit);
+      return found;
+    };
+    node.closest = selector => {
+      for (let el = node; el; el = el.parentElement) if (matches(el, selector)) return el;
+      return null;
+    };
+    return node;
+  }
+  const root = dom('main', [
+    dom('div', [dom('p', [textNode('Outside the transcript')])], { 'data-markdown-text-style': '' }),
+    ...[0, 1].map(i => dom('div', [
+      dom('div', [
+        dom('div', [
+          dom('div', [textNode('Вопрос ' + i)], { class: 'whitespace-pre-wrap' }),
+          dom('button', [textNode('Show more')]),
+        ], { 'data-user-message-bubble': '' }),
+      ], { 'data-chatgpt-search-unit-key': 'user' }),
+      dom('div', [
+        dom('h4', [textNode('ChatGPT said:')], { 'data-conversation-role': 'assistant' }),
+        dom('div', [
+          dom('div', [
+            dom('p', [textNode('Ответ ' + i), dom('strong', [textNode(' важное')])]),
+            dom('div', [textNode('Table controls')], { 'data-block-actions': '' }),
+            dom('button', [textNode('Embedded copy')]),
+            dom('table', [dom('tr', [dom('th', [textNode('Поле')])]), dom('tr', [dom('td', [textNode('Значение')])])]),
+          ], { 'data-markdown-text-style': '' }),
+          dom('button', [textNode('Copy reply')]),
+        ], { 'data-chatgpt-selection-message-id': 'answer-' + i }),
+      ], { 'data-chatgpt-search-unit-key': 'assistant' }),
+    ], { 'data-turn-key': 'pair-' + i })),
+  ]);
+  root.scrollTop = 0;
+  root.scrollHeight = 100;
+  root.clientHeight = 100;
+  root.scrollTo = ({ top }) => { root.scrollTop = top; };
+  const document = {
+    title: 'ChatGPT', scrollingElement: root,
+    querySelector: s => root.querySelector(s),
+    querySelectorAll: s => root.querySelectorAll(s),
+  };
+  return { root, document };
+}
+
+test('modern DOM: real export preserves both sides per turn-key without toolbar text', async () => {
+  const { document } = modernConversationFixture();
+  const source = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
+  const context = vm.createContext({
+    document, Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 }, URL,
+    location: { pathname: '/c/synthetic', href: 'https://chatgpt.com/' },
+    getComputedStyle: () => ({ overflowY: 'visible' }),
+    setTimeout: fn => { fn(); return 0; }, clearTimeout() {},
+  });
+  vm.runInContext(source, context);
+  assert.equal(document.querySelectorAll('[data-turn-id]').length, 0);
+  assert.equal(document.querySelectorAll('[data-message-author-role]').length, 0);
+  assert.equal(document.querySelectorAll('[data-user-message-bubble]').length, 2);
+  const result = await context.getConversationMarkdown({ downloadFiles: false });
+  assert.equal(result.ok, true, result.error);
+  assert.equal((result.md.match(/#### You said:/g) || []).length, 2);
+  assert.equal((result.md.match(/#### ChatGPT said:/g) || []).length, 2);
+  assert.match(result.md, /Ответ 0\*\* важное\*\*/);
+  assert.match(result.md, /\| Поле \|\n\| --- \|\n\| Значение \|/);
+  assert.ok(result.md.indexOf('Вопрос 0') < result.md.indexOf('Ответ 0'));
+  assert.ok(result.md.indexOf('Ответ 0') < result.md.indexOf('Вопрос 1'));
+  assert.doesNotMatch(result.md, /Show more|Copy reply|Outside the transcript|Table controls|Embedded copy/);
+  assert.equal(result.partial, true, 'new pagination has not been measured');
+  assert.match(result.md, /history start.*unverified/i);
+});
+
+test('modern DOM: batch readiness recognizes messages but not empty turn shells', async () => {
+  const { document, root } = modernConversationFixture();
+  const saved = global.document;
+  global.document = document;
+  try {
+    assert.deepEqual(await parser.waitForConversationReady({ timeoutMs: 10, pollMs: 1 }), { ready: true });
+    root.querySelectorAll = () => [];
+    assert.equal((await parser.waitForConversationReady({ timeoutMs: 5, pollMs: 1 })).ready, false);
+  } finally { global.document = saved; }
+});
+
+
+test('modern DOM: export scans separately mounted exchanges and restores scroll position', async () => {
+  const { document, root } = modernConversationFixture();
+  const allUnits = root.querySelectorAll('[data-chatgpt-search-unit-key]');
+  const originalQuery = root.querySelectorAll;
+  const positions = [];
+  root.scrollTop = 100;
+  root.scrollHeight = 200;
+  root.querySelectorAll = selector => {
+    if (selector === '[data-chatgpt-search-unit-key]') {
+      const index = root.scrollTop < 100 ? 0 : 2;
+      return allUnits.slice(index, index + 2);
+    }
+    return originalQuery(selector);
+  };
+  root.scrollTo = ({ top }) => { root.scrollTop = top; positions.push(top); };
+  const context = vm.createContext({
+    document, Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 }, URL,
+    location: { pathname: '/c/synthetic', href: 'https://chatgpt.com/' },
+    getComputedStyle: () => ({ overflowY: 'visible' }),
+    setTimeout: fn => { fn(); return 0; }, clearTimeout() {},
+  });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8'), context);
+  // Positive control: the initially mounted pair contains no first question.
+  assert.equal(document.querySelectorAll('[data-chatgpt-search-unit-key]').length, 2);
+  assert.match(document.querySelectorAll('[data-chatgpt-search-unit-key]')[0].textContent, /Вопрос 1/);
+  const result = await context.getConversationMarkdown({ downloadFiles: false });
+  assert.equal(result.ok, true, result.error);
+  assert.equal((result.md.match(/#### You said:/g) || []).length, 2);
+  assert.equal((result.md.match(/#### ChatGPT said:/g) || []).length, 2);
+  assert.ok(result.md.indexOf('Вопрос 0') < result.md.indexOf('Ответ 0'));
+  assert.ok(result.md.indexOf('Ответ 0') < result.md.indexOf('Вопрос 1'));
+  assert.ok(positions.includes(0));
+  assert.equal(root.scrollTop, 100);
+  assert.equal(result.partial, true);
+});

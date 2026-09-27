@@ -16,6 +16,19 @@ A checked item means **exercised against chatgpt.com**, not "the test passes".
 Items marked *(fixture-only)* cannot be checked any other way and are called out
 so the gap is visible rather than assumed away.
 
+## App-shell conversation layout (pending live export verification)
+
+Recognizes messages inside `data-turn-key` containers through their individual
+search units. A container may hold both a question and an answer: both are
+exported in order, with formatted answer content and without message/table
+controls. The virtualized scan collects messages across scroll positions and
+batch navigation recognizes this layout. The input structure was measured on a
+live page; export behavior has regression coverage using that structure and
+synthetic Russian text. The new layout's history-loading boundary has not yet
+been measured, so exports explicitly mark the history start as unverified and
+are not recorded as complete by batch export. File retrieval on this layout
+also still needs a live check.
+
 ## Checking against the live site
 
 ### Current verification status: 1.6.6

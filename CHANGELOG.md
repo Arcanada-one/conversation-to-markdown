@@ -5,6 +5,25 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.7] — 2026-09-27
+
+### Fixed
+
+- Recognize the app-shell conversation layout when older turn and author-role
+  attributes are absent. Capture questions and answers separately within each
+  turn container, preserving their order and Markdown formatting.
+- Recognize the same message units when waiting for batch navigation to finish.
+- Exclude embedded table controls from exported answer text.
+
+### Verification and limitations
+
+- The input structure was measured on a live conversation; regression fixtures
+  use synthetic Russian text. The 283-test suite passed, and eight targeted
+  mutations were detected.
+- This is a preview release. The new layout's history-loading boundary and file
+  retrieval have not been verified live. Exports mark the history start as
+  unverified and remain partial, so batch export cannot record them as complete.
+
 ## [1.6.6] — 2026-09-24
 
 ### Documentation

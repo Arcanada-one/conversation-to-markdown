@@ -16,7 +16,7 @@ A checked item means **exercised against chatgpt.com**, not "the test passes".
 Items marked *(fixture-only)* cannot be checked any other way and are called out
 so the gap is visible rather than assumed away.
 
-## App-shell conversation layout (pending live export verification)
+## App-shell conversation layout: 1.6.7 preview (pending live export verification)
 
 Recognizes messages inside `data-turn-key` containers through their individual
 search units. A container may hold both a question and an answer: both are
@@ -468,7 +468,7 @@ match the CHANGELOG's top entry, and users must never see a gap. The last entry
 below is the version being shipped; a test checks this line against the CHANGELOG
 so a release cannot be added without revisiting this file.
 
-Version history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8, 1.6.0, 1.6.1, 1.6.2, 1.6.3, 1.6.4, 1.6.5, 1.6.6
+Version history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8, 1.6.0, 1.6.1, 1.6.2, 1.6.3, 1.6.4, 1.6.5, 1.6.6, 1.6.7
 
 The latest entry identifies the prepared local build; it does not imply Chrome
 Web Store publication. Attachment retrieval is unchanged in 1.6.0.

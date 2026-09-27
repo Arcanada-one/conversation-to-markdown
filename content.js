@@ -137,6 +137,8 @@ function nodeToMarkdown(node, depth) {
     return Array.from(node.childNodes).map(function(n) { return nodeToMarkdown(n, depth); }).join('');
   };
 
+  // App-shell Markdown embeds table controls inside the rendered content.
+  if (node.getAttribute && node.getAttribute('data-block-actions') !== null) return '';
   if (isKatexMathml(node)) return '';
   if (isKatexRoot(node)) {
     const htmlEl = node.querySelector('.katex-html');
@@ -902,9 +904,61 @@ function buildConversationMarkdown(turns) {
   return parts.length ? parts.join('\n\n---\n\n') : null;
 }
 
+/** App-shell DOM measured on 2026-09-27. A turn-key wraps both roles.
+ * Search units, not turn-key containers, are the independently captured messages.
+ * Use semantic attributes; hashed CSS names and translated headings are unstable.
+ */
+function modernMessageRole(section) {
+  if (!section.getAttribute || section.getAttribute('data-chatgpt-search-unit-key') === null) return null;
+  if (section.querySelector('[data-user-message-bubble]')) return 'user';
+  if (section.querySelector('[data-conversation-role]') &&
+      section.querySelector('[data-chatgpt-selection-message-id]')) return 'assistant';
+  return null;
+}
+
+function modernMessageSections(root) {
+  if (!root || !root.querySelectorAll) return [];
+  return Array.from(root.querySelectorAll('[data-chatgpt-search-unit-key]')).filter(function(unit) {
+    // Scope to measured conversation turns, excluding search panels and previews.
+    return unit.closest && unit.closest('[data-turn-key]');
+  });
+}
+
+function extractModernMessage(section, discoveryIndex) {
+  const role = modernMessageRole(section);
+  const turnId = getSectionTurnId(section);
+  if (!role || !turnId) return null;
+  let markdown;
+  if (role === 'user') {
+    const bubble = section.querySelector('[data-user-message-bubble]');
+    // The outer bubble also contains the translated "Show more" control.
+    markdown = Array.from(bubble.querySelectorAll('.whitespace-pre-wrap'))
+      .map(function(node) { return node.textContent.trim(); }).filter(Boolean).join('\n\n');
+    const attachments = extractAttachments(section).concat(extractImages(section));
+    if (attachments.length) markdown += (markdown ? '\n\n' : '') + attachments.join('\n\n');
+  } else {
+    const message = section.querySelector('[data-chatgpt-selection-message-id]');
+    markdown = Array.from(message.querySelectorAll('[data-markdown-text-style]'))
+      .filter(function(node) {
+        return !node.parentElement || !node.parentElement.closest('[data-markdown-text-style]');
+      })
+      .map(function(node) { return nodeToMarkdown(node).trim(); }).filter(Boolean).join('\n\n');
+    // Do not duplicate inline images/links already converted by nodeToMarkdown.
+    for (const extra of extractAttachments(section).concat(extractImages(section))) {
+      if (!markdown.includes(extra)) markdown += (markdown ? '\n\n' : '') + extra;
+    }
+  }
+  if (!markdown) return null;
+  return createTurn(turnId, section, discoveryIndex, role, markdown.replace(/\n{3,}/g, '\n\n'));
+}
+
 function getSectionTurnId(section) {
   if (typeof section.getAttribute === 'function') {
-    return section.getAttribute('data-turn-id') || section.turnId || null;
+    const legacy = section.getAttribute('data-turn-id') || section.turnId;
+    if (legacy) return legacy;
+    const unitKey = section.getAttribute('data-chatgpt-search-unit-key');
+    const holder = unitKey !== null && section.closest && section.closest('[data-turn-key]');
+    return holder ? JSON.stringify([holder.getAttribute('data-turn-key'), unitKey]) : null;
   }
   return section.turnId || null;
 }
@@ -931,6 +985,9 @@ function isExplicitlyUnsupportedTurn(section) {
 }
 
 function extractTurn(section, discoveryIndex) {
+  if (section.getAttribute && section.getAttribute('data-chatgpt-search-unit-key') !== null) {
+    return extractModernMessage(section, discoveryIndex);
+  }
   const turnId = getSectionTurnId(section);
   const role = getSectionRole(section);
   if (!turnId) return null;
@@ -1652,6 +1709,9 @@ function markPartialScan(settings, reason) {
 
 /** Prefix markdown with a visible partial-export notice — must live in the artifact itself. */
 function prefixPartialNotice(md, reason) {
+  if (reason === 'history start unverified for this page layout') {
+    return '> **Partial export** — history start is unverified for this page layout; earlier messages may be missing.\n\n' + md;
+  }
   var detail = reason === 'cancelled'
     ? 'scan was stopped before reaching the end'
     : 'scan did not reach the end (' + reason + ')';
@@ -3437,7 +3497,8 @@ function waitForConversationReady(options) {
       }
       if (typeof document !== 'undefined' &&
           (document.querySelector('[data-turn-id]') ||
-           document.querySelector('[data-message-author-role]'))) {
+           document.querySelector('[data-message-author-role]') ||
+           modernMessageSections(document).some(function(unit) { return !!modernMessageRole(unit); }))) {
         return resolve({ ready: true });
       }
       if (Date.now() - startedAt >= timeoutMs) {
@@ -3505,7 +3566,9 @@ async function getConversationMarkdown(settings) {
   // default: a plain "copy as Markdown" stays a pure DOM read.
   const wantFiles = !!(settings && settings.downloadFiles);
   try {
-    const firstSection = document.querySelector('[data-turn-id]');
+    const legacySection = document.querySelector('[data-turn-id]');
+    const modern = !legacySection && modernMessageSections(document).length > 0;
+    const firstSection = legacySection || (modern ? modernMessageSections(document)[0] : null);
     let md;
     var scanMeta = null;
     // Artefact rows collected while the scan holds each scroll position. Keyed
@@ -3529,7 +3592,23 @@ async function getConversationMarkdown(settings) {
       scanMeta = {};
       if (typeof window !== 'undefined') window.__c2mScan = scanState;
       const turns = await scanTurns(container, {
-        readSections: function() { return document.querySelectorAll('[data-turn-id]'); },
+        readSections: function() {
+          return modern ? modernMessageSections(document) : document.querySelectorAll('[data-turn-id]');
+        },
+        scrollToStart: modern ? async function(target) {
+          const result = await scrollToConversationStart(target, {
+            readFirstTurn: function(root) { return modernMessageSections(root)[0] || null; },
+            readFirstTurnId: function(root) {
+              const first = modernMessageSections(root)[0];
+              return first ? getSectionTurnId(first) : null;
+            },
+            countTurns: function(root) { return modernMessageSections(root).length; },
+          });
+          // We measured the new message DOM, not its history-loading protocol.
+          // A quiet scroll must not certify that all earlier history was loaded.
+          markPartialScan({ scanMeta: scanMeta }, 'history start unverified for this page layout');
+          return result;
+        } : undefined,
         extractTurn: extractTurn,
         isCancelled: function() { return scanState.cancelled === true; },
         scanMeta: scanMeta,

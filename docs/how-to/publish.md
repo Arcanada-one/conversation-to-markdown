@@ -3,6 +3,10 @@
 This guide updates the existing store item. Publishing a GitHub release does not
 submit or update the Web Store listing.
 
+The GitHub release comes first. Publish it as a stable release marked Latest
+with the exact ZIP you upload to the store, no later than the day you submit it.
+The store follows after its review; the repository does not wait for it.
+
 ## Release acceptance
 
 The current source corrects reverse scrolling in the app-shell layout,
@@ -22,7 +26,7 @@ attachment backup or universal ChatGPT-layout coverage.
 2. Keep `manifest.json`, `package.json`, `CHANGELOG.md`, and `FEATURES.md` consistent. One release gets one version bump; local verification builds are not evidence of a store release.
 3. Review the [feature checklist](../../FEATURES.md) against the live site. Test a long conversation, uploaded files, generated files, clipboard mode, and the batch modes being advertised. Check actual file bytes and links, not only download acceptance or unit tests.
 4. Run `npm test` and `npm run check`. Stage any new files before testing because the public-surface gate reads tracked files. Review every skipped test.
-5. Commit the reviewed changes and record the exact release revision. Use the repository's normal review and merge process before making a stable release.
+5. Commit the reviewed changes and record the exact release revision. Merge through the repository's normal pull-request process, then tag that revision.
 
 ## Build the upload package
 
@@ -52,7 +56,7 @@ On macOS, verify a downloaded release asset from its containing directory:
 shasum -a 256 -c conversation-to-markdown-vVERSION.zip.sha256
 ```
 
-Replace `VERSION` with the release version. Attach the ZIP and checksum to the
+Replace `VERSION` with the release version. Attach this same ZIP and checksum — the file you upload to the store — to the
 GitHub release for the same commit. Include verified behavior, known limitations,
 and test results in the release notes. This package is for the standard ZIP
 upload flow; if the store item already uses Verified CRX Uploads, follow the

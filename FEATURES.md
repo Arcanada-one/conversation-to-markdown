@@ -16,7 +16,7 @@ A checked item means **exercised against chatgpt.com**, not "the test passes".
 Items marked *(fixture-only)* cannot be checked any other way and are called out
 so the gap is visible rather than assumed away.
 
-## App-shell conversation layout: 1.6.7 preview (pending live export verification)
+## App-shell conversation layout: 1.6.7
 
 Recognizes messages inside `data-turn-key` containers through their individual
 search units. A container may hold both a question and an answer: both are

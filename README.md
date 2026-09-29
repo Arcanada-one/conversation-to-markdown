@@ -41,6 +41,24 @@ minute can overwrite the same Markdown filename. Attachment names can also be
 reused and overwritten; dated Markdown copies are not independent snapshots of
 attachment bytes. An unavailable title falls back to a generic filename.
 
+## Understand an incomplete export
+
+Text completeness and file completeness are checked separately. A saved
+conversation can contain every rendered message and still be incomplete because
+one cited file was not downloaded.
+
+- A history-start warning means the scanner could not verify the beginning. In
+  the measured app-shell layout, it checks the history header, virtual-list
+  offsets, and the first mounted message at the top. It does not add the warning
+  merely because the page uses that layout. An unfamiliar structure remains
+  unverified.
+- A Library-file warning names a different limitation: the conversation cites a
+  preview-only document whose bytes the exporter cannot retrieve. Open that
+  citation in ChatGPT, choose **Download**, and keep the file with the export.
+- Downloading a file manually does not edit an existing Markdown warning or the
+  extension's local completeness index. Verify the actual files before changing
+  an export's status yourself. A partial export remains eligible for batch retry.
+
 ## Project exports
 
 Batch mode walks the conversation list visible through the Project sidebar and

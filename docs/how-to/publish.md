@@ -5,12 +5,18 @@ submit or update the Web Store listing.
 
 ## Release acceptance
 
-The uploaded-document resolver has passed a live byte comparison. The remaining
-HTML warning was traced to a failed tool command that never wrote its intended
-output; 1.6.6 corrects that source classification. Do not advertise universal
-attachment coverage: unsupported assets, redundant button warnings, and lookup
-timeouts remain possible. Complete the live checklist for the advertised scope
-before store submission and disclose accepted limitations in the listing.
+The current source corrects reverse scrolling in the app-shell layout,
+preserves rendered code and display math, and verifies the measured history
+boundary instead of warning on every modern-layout export. A user-provided
+installed export was compared with a fresh DOM walk: all 70 rendered message
+bodies matched exactly. The generated ZIP passed its CRC check, and its separate
+README and start prompt matched the corresponding ZIP members byte for byte.
+
+That observation does not verify an installed copy of the final history-boundary
+patch. Before store submission, install the exact upload package and repeat the
+checks below. Library citations without download URLs still require manual
+retrieval and keep file-saving exports partial. Do not advertise a complete
+attachment backup or universal ChatGPT-layout coverage.
 
 1. Compare the version in the [store listing](https://chromewebstore.google.com/detail/conversation-to-markdown/jhnhkmnignbhmcjbhoihdbjhjfljpili), the publisher dashboard (including pending submissions), and `manifest.json`. Use a version greater than the preceding store package.
 2. Keep `manifest.json`, `package.json`, `CHANGELOG.md`, and `FEATURES.md` consistent. One release gets one version bump; local verification builds are not evidence of a store release.
@@ -53,6 +59,25 @@ upload flow; if the store item already uses Verified CRX Uploads, follow the
 [official signing instructions](https://developer.chrome.com/docs/webstore/update#protect-your-package-updates)
 using the existing signing key instead.
 
+## Check the exact package in Chrome
+
+1. Extract the upload ZIP into its own folder. Disable any other installed copy
+   temporarily so the tested toolbar action is unambiguous.
+2. Load or reload that folder using the [installation guide](install.md), verify
+   the displayed version, and reload the ChatGPT conversation tab.
+3. Export a short conversation and a longer app-shell conversation. Keep the
+   popup open until completion. Check the first and last messages, both roles,
+   code fences, display math, tables, and actual saved file contents.
+4. On a conversation whose history boundary is confirmed and whose files are
+   supported, check that no history-start warning appears. On one with a
+   preview-only Library citation, check that the cited filename and missing-file
+   warning remain visible. Retrieve it manually as described in the README.
+5. Test clipboard mode and any batch/ZIP mode you intend to advertise. Check
+   that clipboard mode makes no attachment requests and that a partial export
+   is retried rather than recorded as complete.
+6. Record the package checksum and results. A successful source test or a DOM
+   replay is not a substitute for testing this installed package.
+
 ## Submit the existing store item
 
 Open the [Chrome Web Store Developer Dashboard](https://chrome.google.com/webstore/devconsole)
@@ -65,6 +90,28 @@ with the publisher account that owns **Conversation to Markdown**. Select item
 4. Check **Distribution** and keep the intended audience.
 5. Select **Submit for Review**. Choose deferred publication if you want to control the launch after approval.
 6. After approval, publish if deferred. Verify the public listing version and test a store-installed copy separately from an unpacked copy.
+
+### Listing and reviewer notes
+
+Keep the listing's feature claims within the tested scope. Suggested update text:
+
+> Exports ChatGPT conversations as Markdown with headings, lists, tables, code,
+> math, and user/assistant roles. Saves supported generated files and uploads
+> locally. Handles the measured app-shell scroll layout and reports unverified
+> history or unavailable files. Preview-only Library documents require a manual
+> download. No developer server or analytics is used.
+
+For reviewer test instructions, describe opening an existing ChatGPT
+conversation, pressing the toolbar action, keeping the popup open, and checking
+the Markdown and local file links. A signed-in ChatGPT session is required; do
+not put account passwords, session tokens, or private conversation links in the
+reviewer notes. State the known Library limitation and report only package
+checks you actually completed.
+
+The privacy-policy URL can point to this repository's public
+[PRIVACY.md](https://github.com/Arcanada-one/conversation-to-markdown/blob/main/PRIVACY.md).
+Support can point to the public
+[issue tracker](https://github.com/Arcanada-one/conversation-to-markdown/issues).
 
 ### Complete the permission justifications
 

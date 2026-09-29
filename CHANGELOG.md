@@ -44,6 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decorative SVG placeholders. A fresh installed-extension export of these
   changes is required before release.
 
+### Documentation
+
+- Explain text completeness separately from missing files, including manual
+  Library downloads and why they do not rewrite existing warnings.
+- Expand the store update guide with exact-package Chrome checks, honest listing
+  text, reviewer instructions, and public privacy/support URLs.
+
 ## [1.6.7] — 2026-09-27
 
 ### Fixed

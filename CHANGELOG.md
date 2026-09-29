@@ -21,7 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve display math when ChatGPT wraps a KaTeX formula in a
   `katex-display` container; the wrapper previously made it inline math.
 
+- Verify the measured app-shell history boundary instead of adding a start
+  warning to every modern-layout export. Unknown layouts retain the warning,
+  and missing Library files still keep file-saving exports partial.
+
 ### Verification
+
+- A user-provided installed export was compared with a fresh live DOM walk:
+  all 70 rendered message bodies matched exactly. Its start warning came from
+  the blanket layout guard; a separately cited Library document was genuinely
+  missing from the export folder. The new history detector distinguishes the
+  pending and exhausted live DOM fixtures. Three mutations are detected; the
+  full suite passes 286 tests with one existing skip. A fresh installed export
+  of this final history-boundary change is still required.
 
 - The target page's reverse scroll geometry was measured in Chrome. A regression
   reproducing Chrome's position clamp fails against 1.6.7 and passes with this

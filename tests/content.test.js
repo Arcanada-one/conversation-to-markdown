@@ -5461,6 +5461,22 @@ function modernConversationFixture(options = {}) {
       ], { 'data-chatgpt-search-unit-key': 'assistant' }),
     ], { 'data-turn-key': 'pair-' + i })),
   ]);
+  if (options.historyBoundary) {
+    const pairs = root.children.filter(node => node.getAttribute('data-turn-key') !== null);
+    const slots = pairs.map(pair => dom('div', [pair]));
+    slots.forEach(slot => { slot.style = { marginTop: '0px' }; });
+    const list = dom('div', slots);
+    list.style = { marginTop: options.virtualOffset || '0px' };
+    const virtualizer = dom('div', [list]);
+    virtualizer.style = { height: '100px' };
+    const history = dom('div', [
+      ...(options.historyPending ? [dom('div', [dom('div', [dom('svg')], { role: 'status' })])] : []),
+      dom('span', [], { hidden: '' }), virtualizer,
+    ], { 'data-thread-find-target': 'conversation', 'data-chatgpt-conversation-selection-target': 'true' });
+    root.children = [history];
+    root.childNodes = root.children;
+    history.parentElement = root;
+  }
   root.scrollTop = 0;
   root.scrollHeight = 100;
   root.clientHeight = 100;
@@ -5500,7 +5516,7 @@ test('modern DOM: real export preserves both sides per turn-key without toolbar 
 });
 
 test('modern file-saving export stays partial when a Library citation has no bytes', async () => {
-  const { document } = modernConversationFixture({ libraryCitation: 'source-note.md' });
+  const { document } = modernConversationFixture({ libraryCitation: 'source-note.md', historyBoundary: true });
   const source = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
   const context = vm.createContext({
     document, Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 }, URL,
@@ -5516,6 +5532,8 @@ test('modern file-saving export stays partial when a Library citation has no byt
   assert.equal(result.partial, true);
   assert.match(result.md, /source-note\.md.*referenced file; not downloaded/);
   assert.match(result.md, /Library files cited.*were not downloaded/);
+  assert.equal(result.partialReason, 'attachments-unavailable');
+  assert.doesNotMatch(result.md, /history start.*unverified/i);
 });
 
 test('modern DOM: batch readiness recognizes messages but not empty turn shells', async () => {
@@ -5564,4 +5582,29 @@ test('modern DOM: export scans separately mounted exchanges and restores scroll 
   assert.ok(positions.includes(0));
   assert.equal(root.scrollTop, 100);
   assert.equal(result.partial, true);
+});
+
+
+test('modern history boundary: exhausted history avoids the blanket partial warning', async () => {
+  for (const options of [
+    { historyBoundary: true, expectedPartial: false },
+    { historyBoundary: true, historyPending: true, expectedPartial: true },
+    { historyBoundary: true, virtualOffset: '300px', expectedPartial: true },
+    { expectedPartial: true },
+  ]) {
+    const { document } = modernConversationFixture(options);
+    const context = vm.createContext({
+      document, Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 }, URL,
+      location: { pathname: '/c/synthetic', href: 'https://chatgpt.com/' },
+      getComputedStyle: () => ({ overflowY: 'visible' }),
+      setTimeout: fn => { fn(); return 0; }, clearTimeout() {},
+    });
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8'), context);
+    const result = await context.getConversationMarkdown({ downloadFiles: false });
+    assert.equal(result.ok, true, result.error);
+    assert.equal((result.md.match(/#### You said:/g) || []).length, 2);
+    assert.equal((result.md.match(/#### ChatGPT said:/g) || []).length, 2);
+    assert.equal(result.partial, options.expectedPartial, JSON.stringify(options));
+    if (!options.expectedPartial) assert.doesNotMatch(result.md, /Partial export|history start.*unverified/i);
+  }
 });

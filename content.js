@@ -948,6 +948,40 @@ function modernMessageSections(root) {
   });
 }
 
+/** History boundary measured in Chrome on 2026-09-29: the direct header
+ * status persists while older pages exist, then disappears at the first message.
+ * The hidden separator and zero-offset virtual slots distinguish this layout
+ * from arbitrary status widgets and from a viewport mounted halfway down.
+ */
+function readModernPagination(container) {
+  const root = container.querySelector && container.querySelector('[data-thread-find-target="conversation"]');
+  if (!root || root.getAttribute('data-chatgpt-conversation-selection-target') !== 'true') return null;
+  const children = Array.from(root.children || []);
+  const separatorIndex = children.findIndex(function(el) {
+    return el.tagName === 'SPAN' && el.getAttribute('hidden') !== null;
+  });
+  if (separatorIndex < 0) return null;
+  const virtualizer = children[separatorIndex + 1];
+  const list = virtualizer && virtualizer.children && virtualizer.children[0];
+  const slot = list && list.children && list.children[0];
+  if (!virtualizer || !virtualizer.style || !virtualizer.style.height || !slot) return null;
+  const pending = children.slice(0, separatorIndex).some(function(el) {
+    return el.getAttribute('role') === 'status' || !!el.querySelector('[role="status"]');
+  });
+  const first = modernMessageSections(root)[0];
+  const firstInSlot = modernMessageSections(slot)[0];
+  const atFirstSlot = !!first && first === firstInSlot && list.style && slot.style &&
+    list.style.marginTop === '0px' && slot.style.marginTop === '0px';
+  return {
+    pending: pending,
+    // The status is a history-availability indicator, including while idle.
+    // Allow the existing edge re-arm to nudge it after two quiet rounds.
+    loading: false,
+    count: modernMessageSections(root).length,
+    complete: !pending && atFirstSlot && conversationScrollTop(container) <= 1,
+  };
+}
+
 function extractModernMessage(section, discoveryIndex) {
   const role = modernMessageRole(section);
   const turnId = getSectionTurnId(section);
@@ -1238,7 +1272,7 @@ async function scrollToConversationStart(container, options) {
   // more each time. At the actual beginning (221 containers), the sentinel
   // disappeared. Mounted sections and their relative test indices are NOT a
   // history count: empty height-preserving containers represent unmounted turns.
-  const readPagination = function(target) {
+  const readPagination = opts.readPagination || function(target) {
     if (!target.querySelector || !target.querySelectorAll) return null;
     const candidate = target.querySelector('[data-testid="conversation-pagination-sentinel"]');
     const sentinel = candidate && candidate.getAttribute &&
@@ -3656,10 +3690,13 @@ async function getConversationMarkdown(settings) {
               return first ? getSectionTurnId(first) : null;
             },
             countTurns: function(root) { return modernMessageSections(root).length; },
+            readPagination: readModernPagination,
           });
-          // We measured the new message DOM, not its history-loading protocol.
-          // A quiet scroll must not certify that all earlier history was loaded.
-          markPartialScan({ scanMeta: scanMeta }, 'history start unverified for this page layout');
+          // Unknown layouts stay uncertain; the measured history boundary can
+          // now positively certify arrival instead of warning on every export.
+          if (!result.confirmedByPagination) {
+            markPartialScan({ scanMeta: scanMeta }, 'history start unverified for this page layout');
+          }
           return result;
         } : undefined,
         extractTurn: extractTurn,
@@ -3880,6 +3917,7 @@ if (typeof module !== 'undefined' && module.exports) {
     UNPREVIEWABLE_FORMATS: UNPREVIEWABLE_FORMATS,
     waitForArtifactPanel: waitForArtifactPanel,
     scrollToConversationStart: scrollToConversationStart,
+    readModernPagination: readModernPagination,
     findCollapsedProjectRows: findCollapsedProjectRows,
     projectRowContainer: projectRowContainer,
     stripSidebarLabelSuffix: stripSidebarLabelSuffix,

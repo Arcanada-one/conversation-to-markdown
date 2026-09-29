@@ -24,10 +24,15 @@ exported in order, with formatted answer content and without message/table
 controls. The virtualized scan collects messages across scroll positions and
 batch navigation recognizes this layout. The input structure was measured on a
 live page; export behavior has regression coverage using that structure and
-synthetic Russian text. The new layout's history-loading boundary has not yet
-been measured, so exports explicitly mark the history start as unverified and
-are not recorded as complete by batch export. File retrieval on this layout
-also still needs a live check.
+synthetic Russian text. The history header was measured on 2026-09-29: its status indicator persists
+while earlier messages are available and disappears at the first message. An
+export verifies the start only when that indicator is absent, the measured
+virtual-list structure starts at zero offset, and the scanner reaches the top.
+Unknown structures, pending history, and nonzero virtual offsets remain partial.
+A fresh installed export saved 70 role blocks and three generated files. A live
+DOM walk subsequently reproduced all 70 message bodies exactly with the same
+Markdown parser, and the generated ZIP passed its CRC check. One cited Library document
+was absent from that folder and was downloaded separately during diagnosis.
 
 The app-shell conversation scroller uses `column-reverse`: its native position
 is zero at the bottom and negative at the beginning. The capture walk must reach

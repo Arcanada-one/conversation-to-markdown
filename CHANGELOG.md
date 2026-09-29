@@ -5,10 +5,20 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## [1.6.7] — 2026-09-29
+
+This is the package submitted to the Chrome Web Store on 2026-09-29. A preview
+asset built from `dd65d15` was attached to the v1.6.7 GitHub release on
+2026-09-27; it lacked the reverse-scroll fix below and was replaced by this
+build under the same version.
 
 ### Fixed
 
+- Recognize the app-shell conversation layout when older turn and author-role
+  attributes are absent. Capture questions and answers separately within each
+  turn container, preserving their order and Markdown formatting.
+- Recognize the same message units when waiting for batch navigation to finish.
+- Exclude embedded table controls from exported answer text.
 - Scan app-shell conversations with `column-reverse` scrolling from their
   negative start position to the bottom. Previously the scanner repeatedly
   requested unreachable positive positions, stayed at two captured messages,
@@ -20,29 +30,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   citation bytes are not yet downloaded.
 - Preserve display math when ChatGPT wraps a KaTeX formula in a
   `katex-display` container; the wrapper previously made it inline math.
-
 - Verify the measured app-shell history boundary instead of adding a start
   warning to every modern-layout export. Unknown layouts retain the warning,
   and missing Library files still keep file-saving exports partial.
 
-### Verification
+### Verification and limitations
 
+- The input structure was measured on a live conversation; regression fixtures
+  use synthetic Russian text. Eight targeted mutations of the layout detection
+  were detected.
+- Superseded within this release: the blanket unverified-start warning was
+  replaced by the measured history-boundary check listed under Fixed.
 - A user-provided installed export was compared with a fresh live DOM walk:
   all 70 rendered message bodies matched exactly. Its start warning came from
   the blanket layout guard; a separately cited Library document was genuinely
   missing from the export folder. The new history detector distinguishes the
   pending and exhausted live DOM fixtures. Three mutations are detected; the
-  full suite passes 286 tests with one existing skip. A fresh installed export
-  of this final history-boundary change is still required.
-
+  full suite passes 286 tests with one existing skip.
 - The target page's reverse scroll geometry was measured in Chrome. A regression
-  reproducing Chrome's position clamp fails against 1.6.7 and passes with this
-  change. A local comparison with a manual download found exact matching bytes
+  reproducing Chrome's position clamp fails against the 2026-09-27 preview
+  build and passes with this one. A local comparison with a manual download found exact matching bytes
   for the primary Markdown and ZIP but exposed formatting and citation losses
   in the conversation Markdown. A parser replay of the target answer's live DOM
   now retains its code block, display TeX, all three cited filenames, and no
-  decorative SVG placeholders. A fresh installed-extension export of these
-  changes is required before release.
+  decorative SVG placeholders.
+- Resulting `main` CI passed all 287 tests with no skips, and CodeQL passed.
+  The operator checked the submitted package in Chrome on 2026-09-29.
 
 ### Documentation
 
@@ -50,25 +63,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Library downloads and why they do not rewrite existing warnings.
 - Expand the store update guide with exact-package Chrome checks, honest listing
   text, reviewer instructions, and public privacy/support URLs.
-
-## [1.6.7] — 2026-09-27
-
-### Fixed
-
-- Recognize the app-shell conversation layout when older turn and author-role
-  attributes are absent. Capture questions and answers separately within each
-  turn container, preserving their order and Markdown formatting.
-- Recognize the same message units when waiting for batch navigation to finish.
-- Exclude embedded table controls from exported answer text.
-
-### Verification and limitations
-
-- The input structure was measured on a live conversation; regression fixtures
-  use synthetic Russian text. The 283-test suite passed, and eight targeted
-  mutations were detected.
-- This is a preview release. The new layout's history-loading boundary and file
-  retrieval have not been verified live. Exports mark the history start as
-  unverified and remain partial, so batch export cannot record them as complete.
 
 ## [1.6.6] — 2026-09-24
 

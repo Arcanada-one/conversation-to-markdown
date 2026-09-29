@@ -18,12 +18,33 @@ Do not use a personal account to approve changes authored by the agent.
   branch, taking `1.1.8` (the published version) to `1.8.0`. Users would have seen
   six minor versions appear with no releases behind them. The branch shipped as
   `1.2.0`.
-- Before bumping, check what is **actually published** on the Chrome Web Store,
-  not what the repository says. They diverge exactly when this rule is broken.
+- Before bumping, check the highest version already **uploaded** to the Chrome Web
+  Store (listing and pending dashboard submissions). The store rejects a package
+  whose version is not greater than the previous upload — that is the only thing
+  the store decides about versioning.
 - `manifest.json`, `package.json` and the top `CHANGELOG.md` entry move together.
   Tests enforce the coupling; that is a backstop, not permission to bump freely.
-- Do not infer store publication from CHANGELOG.md or local version history.
-  Check the store listing and pending publisher-dashboard submissions separately.
+
+## GitHub is the source of truth; the Web Store follows
+
+**The GitHub repository is primary. The Chrome Web Store is a downstream
+distribution channel** — it publishes a release after its own review, which takes
+about a week. The repository never waits for the store and never mirrors it.
+
+- A release is a **stable GitHub release marked Latest** as soon as its package
+  is ready — at the latest on the day it is submitted to the store. Do not leave
+  it as a pre-release "until the store approves", and do not mark an older
+  release Latest because the store listing still shows it.
+- **The store package and the GitHub release asset are the same file.** Tag the
+  exact commit the package was built from and attach that ZIP and its checksum.
+  If a later package has to go out under the same version, move the tag and
+  replace the asset, and say so in the release notes and CHANGELOG — two
+  different builds under one version number is the defect this rule prevents.
+- The store listing version is evidence only for store-facing statements (for
+  example, closing an issue with "now available in the Web Store"). It is never
+  the input for choosing Latest or for the CHANGELOG.
+- Release notes state the store status as a fact with a date ("submitted for
+  review on …"), not as a reason the release is incomplete.
 
 ## FEATURES.md is part of every feature
 

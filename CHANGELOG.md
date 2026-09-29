@@ -5,6 +5,52 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- Scan app-shell conversations with `column-reverse` scrolling from their
+  negative start position to the bottom. Previously the scanner repeatedly
+  requested unreachable positive positions, stayed at two captured messages,
+  and did not reach the download step.
+- Preserve app-shell code blocks and TeX formulas, omit decorative SVG icons,
+  and name cited Library files as unavailable instead of silently removing
+  their references. File-saving exports with Library citations stay partial,
+  so batch resume cannot mark missing documents as already saved. Library
+  citation bytes are not yet downloaded.
+- Preserve display math when ChatGPT wraps a KaTeX formula in a
+  `katex-display` container; the wrapper previously made it inline math.
+
+- Verify the measured app-shell history boundary instead of adding a start
+  warning to every modern-layout export. Unknown layouts retain the warning,
+  and missing Library files still keep file-saving exports partial.
+
+### Verification
+
+- A user-provided installed export was compared with a fresh live DOM walk:
+  all 70 rendered message bodies matched exactly. Its start warning came from
+  the blanket layout guard; a separately cited Library document was genuinely
+  missing from the export folder. The new history detector distinguishes the
+  pending and exhausted live DOM fixtures. Three mutations are detected; the
+  full suite passes 286 tests with one existing skip. A fresh installed export
+  of this final history-boundary change is still required.
+
+- The target page's reverse scroll geometry was measured in Chrome. A regression
+  reproducing Chrome's position clamp fails against 1.6.7 and passes with this
+  change. A local comparison with a manual download found exact matching bytes
+  for the primary Markdown and ZIP but exposed formatting and citation losses
+  in the conversation Markdown. A parser replay of the target answer's live DOM
+  now retains its code block, display TeX, all three cited filenames, and no
+  decorative SVG placeholders. A fresh installed-extension export of these
+  changes is required before release.
+
+### Documentation
+
+- Explain text completeness separately from missing files, including manual
+  Library downloads and why they do not rewrite existing warnings.
+- Expand the store update guide with exact-package Chrome checks, honest listing
+  text, reviewer instructions, and public privacy/support URLs.
+
 ## [1.6.7] — 2026-09-27
 
 ### Fixed

@@ -312,6 +312,66 @@ test('captures turns that are never mounted together', async () => {
   assert.equal(container.scrollCalls.at(-1).behavior, 'auto');
 });
 
+test('scans a column-reverse conversation from its negative start to native zero', async () => {
+  // Chrome's current app shell reports scrollTop=0 at the bottom. Positive
+  // scrollTo targets are clamped to zero; the old scanner captured the first
+  // mounted pair and then waited through repeated impossible scrolls.
+  const pages = Array.from({ length: 5 }, (_, index) => [{
+    turnId: 'reverse-' + index,
+    order: index,
+    role: 'user',
+    markdown: 'message ' + index,
+    getAttribute(name) { return name === 'data-turn-id' ? this.turnId : null; },
+    querySelector() { return null; },
+  }]);
+  pages[0][0].parentElement = {
+    getAttribute(name) { return name === 'data-turn-id-container' ? 'paginated-root:fixture' : null; },
+    parentElement: null,
+  };
+  const calls = [];
+  const container = {
+    scrollTop: 0,
+    scrollHeight: 500,
+    clientHeight: 100,
+    ownerDocument: { defaultView: { getComputedStyle: () => ({ flexDirection: 'column-reverse' }) } },
+    scrollTo({ top }) {
+      calls.push(top);
+      this.scrollTop = Math.max(-400, Math.min(0, top));
+    },
+    querySelectorAll(selector) {
+      if (selector !== '[data-turn-id]') return [];
+      const logicalTop = this.scrollTop + 400;
+      return pages[Math.min(4, Math.floor(logicalTop / 100))];
+    },
+    querySelector(selector) {
+      if (selector === '[data-turn-id]') return this.querySelectorAll(selector)[0];
+      if (selector.includes('paginated-root')) return pages[0][0].parentElement;
+      return null;
+    },
+  };
+  const start = await parser.scrollToConversationStart(container, { sleep: async () => {} });
+  assert.equal(start.reachedTop, true);
+  assert.equal(container.scrollTop, -400, 'the real beginning has a negative native scroll position');
+  container.scrollTop = 0; // The user opened the popup while viewing the bottom.
+
+  let grew = false;
+  const turns = await parser.scanTurns(container, {
+    readSections: (target) => target.querySelectorAll('[data-turn-id]'),
+    extractTurn: (turn) => turn,
+    scrollToStart: () => parser.scrollToConversationStart(container, { sleep: async () => {} }),
+    settle: async () => {},
+    onProgress: () => {
+      if (!grew) { container.scrollHeight += 100; grew = true; }
+    },
+    stablePasses: 2,
+    maxSteps: 30,
+  });
+  assert.deepEqual(turns.map((turn) => turn.turnId), pages.map((page) => page[0].turnId));
+  assert.equal(grew, true, 'the test exercised changing scroll height');
+  assert.ok(calls.some((top) => top < 0), 'the walk uses reachable negative scroll positions');
+  assert.equal(container.scrollTop, 0, 'the original bottom is restored after height growth');
+});
+
 test('orders numbered turns and uses discovery order when numbering is absent', () => {
   assert.equal(typeof parser.orderCapturedTurns, 'function');
   const numbered = new Map([
@@ -2476,6 +2536,44 @@ test('renders KaTeX once by skipping the hidden MathML layer', () => {
   try {
     const markdown = parser.nodeToMarkdown(katex);
     assert.equal(markdown.trim(), 'E=mc^2');
+  } finally {
+    global.Node = previousNode;
+  }
+});
+
+test('app-shell code, formula and cited files keep their meaning', () => {
+  const previousNode = global.Node;
+  global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
+  try {
+    const code = element('code', [textNode('Запрос\n  → проверка\n')]);
+    const block = element('div', [
+      element('div', [textNode('Обычный текст'), element('svg', [], { 'aria-hidden': 'true' })]),
+      code,
+    ], { 'data-markdown-copy': 'code-block' });
+    block.querySelector = selector => selector === 'code' ? code : null;
+    assert.equal(parser.nodeToMarkdown(block), '```\nЗапрос\n  → проверка\n```\n\n');
+
+    const tex = '\\frac{\\text{Полные расходы}}{\\text{Число работ}}';
+    const annotation = element('annotation', [textNode(tex)], { encoding: 'application/x-tex' });
+    const math = element('span', [annotation], { class: 'katex' });
+    math.parentElement = { className: 'katex-display' };
+    math.querySelector = selector => selector === 'annotation[encoding="application/x-tex"]'
+      ? annotation : null;
+    assert.equal(parser.nodeToMarkdown(math), '$$\n' + tex + '\n$$\n\n');
+    const displayWrapper = element('span', [math], { class: 'katex-display' });
+    math.parentElement = displayWrapper;
+    displayWrapper.querySelector = selector => selector === 'annotation[encoding="application/x-tex"]'
+      ? annotation : null;
+    assert.equal(parser.nodeToMarkdown(displayWrapper), '$$\n' + tex + '\n$$\n\n',
+      'the display wrapper must not be treated as an inline KaTeX root');
+
+    const citation = element('button', [textNode('Truncated…')], {
+      'data-testid': 'chatgpt-library-file-citation',
+      'aria-label': 'Открыть предпросмотр файла Canon_Arcana_Consilium_Context_Selection_TZ_v0.3.md',
+    });
+    assert.match(parser.nodeToMarkdown(citation), /Canon_Arcana_Consilium_Context_Selection_TZ_v0\.3\.md.*not downloaded/);
+    assert.equal(parser.nodeToMarkdown(element('svg', [], { 'aria-hidden': 'true' })), '');
+    assert.match(parser.nodeToMarkdown(element('svg', [])), /svg artifact/);
   } finally {
     global.Node = previousNode;
   }
@@ -5310,7 +5408,7 @@ test('unavailable attachment inventory is incomplete even without visible files 
 // Shape measured from the operator's DOM on 2026-09-27: a data-turn-key
 // contains BOTH sides, search units own each message, and role attributes,
 // articles, .markdown and .prose are all absent. Text below is synthetic.
-function modernConversationFixture() {
+function modernConversationFixture(options = {}) {
   function dom(tag, children = [], attrs = {}) {
     const node = element(tag, children, attrs);
     function matches(el, selector) {
@@ -5352,6 +5450,10 @@ function modernConversationFixture() {
             dom('p', [textNode('Ответ ' + i), dom('strong', [textNode(' важное')])]),
             dom('div', [textNode('Table controls')], { 'data-block-actions': '' }),
             dom('button', [textNode('Embedded copy')]),
+            ...(options.libraryCitation ? [dom('button', [textNode('Truncated citation')], {
+              'data-testid': 'chatgpt-library-file-citation',
+              'aria-label': 'Open preview of ' + options.libraryCitation,
+            })] : []),
             dom('table', [dom('tr', [dom('th', [textNode('Поле')])]), dom('tr', [dom('td', [textNode('Значение')])])]),
           ], { 'data-markdown-text-style': '' }),
           dom('button', [textNode('Copy reply')]),
@@ -5359,6 +5461,22 @@ function modernConversationFixture() {
       ], { 'data-chatgpt-search-unit-key': 'assistant' }),
     ], { 'data-turn-key': 'pair-' + i })),
   ]);
+  if (options.historyBoundary) {
+    const pairs = root.children.filter(node => node.getAttribute('data-turn-key') !== null);
+    const slots = pairs.map(pair => dom('div', [pair]));
+    slots.forEach(slot => { slot.style = { marginTop: '0px' }; });
+    const list = dom('div', slots);
+    list.style = { marginTop: options.virtualOffset || '0px' };
+    const virtualizer = dom('div', [list]);
+    virtualizer.style = { height: '100px' };
+    const history = dom('div', [
+      ...(options.historyPending ? [dom('div', [dom('div', [dom('svg')], { role: 'status' })])] : []),
+      dom('span', [], { hidden: '' }), virtualizer,
+    ], { 'data-thread-find-target': 'conversation', 'data-chatgpt-conversation-selection-target': 'true' });
+    root.children = [history];
+    root.childNodes = root.children;
+    history.parentElement = root;
+  }
   root.scrollTop = 0;
   root.scrollHeight = 100;
   root.clientHeight = 100;
@@ -5395,6 +5513,27 @@ test('modern DOM: real export preserves both sides per turn-key without toolbar 
   assert.doesNotMatch(result.md, /Show more|Copy reply|Outside the transcript|Table controls|Embedded copy/);
   assert.equal(result.partial, true, 'new pagination has not been measured');
   assert.match(result.md, /history start.*unverified/i);
+});
+
+test('modern file-saving export stays partial when a Library citation has no bytes', async () => {
+  const { document } = modernConversationFixture({ libraryCitation: 'source-note.md', historyBoundary: true });
+  const source = fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8');
+  const context = vm.createContext({
+    document, Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 }, URL,
+    location: { pathname: '/c/synthetic', href: 'https://chatgpt.com/' },
+    getComputedStyle: () => ({ overflowY: 'visible' }),
+    fetch: async url => ({ ok: true, json: async () =>
+      String(url).includes('/api/auth/session') ? { accessToken: 'fixture' } : { mapping: {} } }),
+    setTimeout: fn => { fn(); return 0; }, clearTimeout() {},
+  });
+  vm.runInContext(source, context);
+  const result = await context.getConversationMarkdown({ downloadFiles: true });
+  assert.equal(result.ok, true, result.error);
+  assert.equal(result.partial, true);
+  assert.match(result.md, /source-note\.md.*referenced file; not downloaded/);
+  assert.match(result.md, /Library files cited.*were not downloaded/);
+  assert.equal(result.partialReason, 'attachments-unavailable');
+  assert.doesNotMatch(result.md, /history start.*unverified/i);
 });
 
 test('modern DOM: batch readiness recognizes messages but not empty turn shells', async () => {
@@ -5443,4 +5582,29 @@ test('modern DOM: export scans separately mounted exchanges and restores scroll 
   assert.ok(positions.includes(0));
   assert.equal(root.scrollTop, 100);
   assert.equal(result.partial, true);
+});
+
+
+test('modern history boundary: exhausted history avoids the blanket partial warning', async () => {
+  for (const options of [
+    { historyBoundary: true, expectedPartial: false },
+    { historyBoundary: true, historyPending: true, expectedPartial: true },
+    { historyBoundary: true, virtualOffset: '300px', expectedPartial: true },
+    { expectedPartial: true },
+  ]) {
+    const { document } = modernConversationFixture(options);
+    const context = vm.createContext({
+      document, Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 }, URL,
+      location: { pathname: '/c/synthetic', href: 'https://chatgpt.com/' },
+      getComputedStyle: () => ({ overflowY: 'visible' }),
+      setTimeout: fn => { fn(); return 0; }, clearTimeout() {},
+    });
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8'), context);
+    const result = await context.getConversationMarkdown({ downloadFiles: false });
+    assert.equal(result.ok, true, result.error);
+    assert.equal((result.md.match(/#### You said:/g) || []).length, 2);
+    assert.equal((result.md.match(/#### ChatGPT said:/g) || []).length, 2);
+    assert.equal(result.partial, options.expectedPartial, JSON.stringify(options));
+    if (!options.expectedPartial) assert.doesNotMatch(result.md, /Partial export|history start.*unverified/i);
+  }
 });

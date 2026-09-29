@@ -41,6 +41,24 @@ minute can overwrite the same Markdown filename. Attachment names can also be
 reused and overwritten; dated Markdown copies are not independent snapshots of
 attachment bytes. An unavailable title falls back to a generic filename.
 
+## Understand an incomplete export
+
+Text completeness and file completeness are checked separately. A saved
+conversation can contain every rendered message and still be incomplete because
+one cited file was not downloaded.
+
+- A history-start warning means the scanner could not verify the beginning. In
+  the measured app-shell layout, it checks the history header, virtual-list
+  offsets, and the first mounted message at the top. It does not add the warning
+  merely because the page uses that layout. An unfamiliar structure remains
+  unverified.
+- A Library-file warning names a different limitation: the conversation cites a
+  preview-only document whose bytes the exporter cannot retrieve. Open that
+  citation in ChatGPT, choose **Download**, and keep the file with the export.
+- Downloading a file manually does not edit an existing Markdown warning or the
+  extension's local completeness index. Verify the actual files before changing
+  an export's status yourself. A partial export remains eligible for batch retry.
+
 ## Project exports
 
 Batch mode walks the conversation list visible through the Project sidebar and
@@ -57,6 +75,7 @@ browser memory. Cancelled or interrupted runs keep files already downloaded.
 ## Current limitations
 
 - **Not every attachment is supported.** Generated sandbox files and direct download links can be saved. Build 1.6.5 adds file-service lookup for named uploads with file identifiers. A live uploaded-document export was verified byte for byte against a manual download. Uploads without identifiers are reported as unresolved; unidentified assets can remain unsupported. Check the export inventory yourself.
+- Library file citations shown as preview buttons have no downloadable URL in the conversation markup. Their filenames remain in the Markdown with a not-downloaded note. File-saving exports that cite them stay incomplete until the files are obtained separately.
 - Paths inside tool commands or private analysis are not proof of a produced file and are excluded. An unreadable attachment inventory is reported as incomplete.
 - Some generated files cannot be resolved. An HTTP success response alone does not prove that a download link exists. Expired or unavailable files cannot be reconstructed by the extension.
 - File lookup is bounded. A timeout preserves captured text and links already resolved, but can leave files missing. Some page button labels can produce redundant missing-file warnings even when the corresponding file was downloaded.

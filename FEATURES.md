@@ -24,10 +24,32 @@ exported in order, with formatted answer content and without message/table
 controls. The virtualized scan collects messages across scroll positions and
 batch navigation recognizes this layout. The input structure was measured on a
 live page; export behavior has regression coverage using that structure and
-synthetic Russian text. The new layout's history-loading boundary has not yet
-been measured, so exports explicitly mark the history start as unverified and
-are not recorded as complete by batch export. File retrieval on this layout
-also still needs a live check.
+synthetic Russian text. The history header was measured on 2026-09-29: its status indicator persists
+while earlier messages are available and disappears at the first message. An
+export verifies the start only when that indicator is absent, the measured
+virtual-list structure starts at zero offset, and the scanner reaches the top.
+Unknown structures, pending history, and nonzero virtual offsets remain partial.
+A fresh installed export saved 70 role blocks and three generated files. A live
+DOM walk subsequently reproduced all 70 message bodies exactly with the same
+Markdown parser, and the generated ZIP passed its CRC check. One cited Library document
+was absent from that folder and was downloaded separately during diagnosis.
+
+The app-shell conversation scroller uses `column-reverse`: its native position
+is zero at the bottom and negative at the beginning. The capture walk must reach
+that negative start, then move through every mounted message toward zero and
+finish, including when a single answer spans several viewports. Verify on a
+fresh extension export of the reported two-message conversation; the fixture
+proves the coordinate conversion but does not replace that live check.
+
+Rendered app-shell code blocks keep their line breaks and fenced Markdown;
+formulas keep the TeX annotation rather than a flattened visual string,
+including when ChatGPT wraps display math in `katex-display`.
+Decorative SVG icons do not appear as missing artefacts. Library file citations
+retain their full filenames with an explicit "not downloaded" note until a
+download link is available. Verify these against the reported conversation's
+manual answer and its cited documents; cited Library files are still not fetched.
+When file saving is requested, those references keep the export partial so a
+batch run cannot record it as complete and silently skip the missing files.
 
 ## Checking against the live site
 

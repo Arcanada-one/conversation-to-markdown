@@ -16,6 +16,20 @@ A checked item means **exercised against chatgpt.com**, not "the test passes".
 Items marked *(fixture-only)* cannot be checked any other way and are called out
 so the gap is visible rather than assumed away.
 
+## Active conversation isolation: 1.6.8
+
+Only the active app-shell page contributes messages and file-panel rows, even
+when ChatGPT retains a previously viewed conversation with matching turn keys.
+Batch readiness must wait for messages on the active page. A page or route switch
+during export produces an error instead of saving a mixed conversation.
+
+Before release, open one conversation, navigate to another through ChatGPT's
+own sidebar, and export the latter without reloading. Check its first and last
+messages and attachment filenames; no text or file from the former may appear.
+Repeat in clipboard and file-saving modes, and reverse the navigation order.
+The reported live DOM and its replay verify the root cause and six message
+bodies; the final unpacked ZIP still requires this interactive check.
+
 ## App-shell conversation layout: 1.6.7
 
 Recognizes messages inside `data-turn-key` containers through their individual
@@ -490,7 +504,7 @@ match the CHANGELOG's top entry, and users must never see a gap. The last entry
 below is the version being shipped; a test checks this line against the CHANGELOG
 so a release cannot be added without revisiting this file.
 
-Version history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8, 1.6.0, 1.6.1, 1.6.2, 1.6.3, 1.6.4, 1.6.5, 1.6.6, 1.6.7
+Version history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8, 1.6.0, 1.6.1, 1.6.2, 1.6.3, 1.6.4, 1.6.5, 1.6.6, 1.6.7, 1.6.8
 
 The latest entry identifies the prepared local build; it does not imply Chrome
 Web Store publication. Attachment retrieval is unchanged in 1.6.0.

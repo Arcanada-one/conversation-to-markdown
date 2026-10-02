@@ -26,9 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Regression tests drive the shipped export and readiness entry points, including
   retained pages with duplicate message keys, foreign file panels, and switches
   during export. Six deliberate regressions are detected by these tests.
-- The final ZIP still needs a fresh unpacked-extension check in Chrome. Store
-  dashboard access was unavailable on 2026-10-02; this release is not claimed
-  to be submitted to or available from the Chrome Web Store.
+- The user installed the exact unpacked 1.6.8 package and confirmed on
+  2026-10-02 that the reported export now works. This is user-reported live
+  verification of the reported scenario, not a new sweep of every export mode.
+  Store dashboard access was unavailable; no store submission is claimed.
 
 ## [1.6.7] — 2026-09-29
 

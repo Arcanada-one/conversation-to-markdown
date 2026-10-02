@@ -28,7 +28,9 @@ own sidebar, and export the latter without reloading. Check its first and last
 messages and attachment filenames; no text or file from the former may appear.
 Repeat in clipboard and file-saving modes, and reverse the navigation order.
 The reported live DOM and its replay verify the root cause and six message
-bodies; the final unpacked ZIP still requires this interactive check.
+bodies. On 2026-10-02 the user installed the exact unpacked ZIP and confirmed
+that the reported export works. Other checklist modes are not newly attested
+by that confirmation.
 
 ## App-shell conversation layout: 1.6.7
 

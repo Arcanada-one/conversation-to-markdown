@@ -5,6 +5,32 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.8] — 2026-10-02
+
+### Fixed
+
+- Export only the active app-shell conversation. ChatGPT can retain previously
+  viewed pages with overlapping message keys; scanning the whole document mixed
+  their text under the current title while downloading the current files.
+- Scope message capture, file panels, fallback attachment reads, and batch
+  readiness to the same active page. Refuse ambiguous active-page state.
+- Stop with an error if the route or active page changes during capture or file
+  lookup, instead of saving text and files from different conversations.
+
+### Verification and limitations
+
+- Measured retained and active page markers in Chrome. A replay of the reported
+  page's mounted transcript reproduces foreign text with the previous code and
+  preserves the intended three questions and three answers with this version.
+  This verifies extraction of that snapshot, not a fresh installed-package run.
+- Regression tests drive the shipped export and readiness entry points, including
+  retained pages with duplicate message keys, foreign file panels, and switches
+  during export. Six deliberate regressions are detected by these tests.
+- The user installed the exact unpacked 1.6.8 package and confirmed on
+  2026-10-02 that the reported export now works. This is user-reported live
+  verification of the reported scenario, not a new sweep of every export mode.
+  Store dashboard access was unavailable; no store submission is claimed.
+
 ## [1.6.7] — 2026-09-29
 
 This is the package submitted to the Chrome Web Store on 2026-09-29. A preview

@@ -2725,8 +2725,8 @@ async function appendPanelArtifacts(markdown, options) {
 }
 
 /** Fallback for older ChatGPT UI that doesn't use [data-turn-id]. */
-function extractConversationLegacy() {
-  const messages = document.querySelectorAll('[data-message-author-role]');
+function extractConversationLegacy(root) {
+  const messages = (root || document).querySelectorAll('[data-message-author-role]');
   if (!messages.length) return null;
 
   const parts = [];
@@ -3562,6 +3562,22 @@ async function collectSidebarConversations(options) {
   };
 }
 
+/** ChatGPT retains inactive conversations in the app shell. Measured on
+ * 2026-10-02: two main surfaces, one under active-page=false (display:none),
+ * sharing fallback turn keys. Never combine their text or attachment rows.
+ * Older layouts have no app-shell markers and retain the document fallback.
+ */
+function activeConversationRoot(doc) {
+  if (!doc || !doc.querySelectorAll) return doc;
+  if (!doc.querySelector('[data-app-shell-active-page]')) return doc;
+  const pages = Array.from(doc.querySelectorAll('[data-app-shell-active-page]'));
+  if (!pages.length) return doc;
+  const active = pages.filter(function(page) {
+    return page.getAttribute('data-app-shell-active-page') === 'true';
+  });
+  return active.length === 1 ? active[0] : null;
+}
+
 /** Wait until a navigated conversation page has mountable message content. */
 function waitForConversationReady(options) {
   const supplied = options || {};
@@ -3582,10 +3598,11 @@ function waitForConversationReady(options) {
           return setTimeout(check, pollMs);
         }
       }
-      if (typeof document !== 'undefined' &&
-          (document.querySelector('[data-turn-id]') ||
-           document.querySelector('[data-message-author-role]') ||
-           modernMessageSections(document).some(function(unit) { return !!modernMessageRole(unit); }))) {
+      const root = typeof document !== 'undefined' ? activeConversationRoot(document) : null;
+      if (root &&
+          (root.querySelector('[data-turn-id]') ||
+           root.querySelector('[data-message-author-role]') ||
+           modernMessageSections(root).some(function(unit) { return !!modernMessageRole(unit); }))) {
         return resolve({ ready: true });
       }
       if (Date.now() - startedAt >= timeoutMs) {
@@ -3653,9 +3670,19 @@ async function getConversationMarkdown(settings) {
   // default: a plain "copy as Markdown" stays a pure DOM read.
   const wantFiles = !!(settings && settings.downloadFiles);
   try {
-    const legacySection = document.querySelector('[data-turn-id]');
-    const modern = !legacySection && modernMessageSections(document).length > 0;
-    const firstSection = legacySection || (modern ? modernMessageSections(document)[0] : null);
+    const root = activeConversationRoot(document);
+    if (!root) return { ok: false, error: 'Could not identify the active conversation. Try again after it loads.' };
+    const startPath = typeof location !== 'undefined' ? location.pathname : '';
+    const conversationId = (startPath.match(/\/c\/([A-Za-z0-9-]+)/) || [])[1] || null;
+    function assertSameConversation() {
+      if ((typeof location !== 'undefined' && location.pathname !== startPath) ||
+          activeConversationRoot(document) !== root) {
+        throw new Error('Conversation changed during export. Return to the intended conversation and export again.');
+      }
+    }
+    const legacySection = root.querySelector('[data-turn-id]');
+    const modern = !legacySection && modernMessageSections(root).length > 0;
+    const firstSection = legacySection || (modern ? modernMessageSections(root)[0] : null);
     let md;
     var scanMeta = null;
     // Artefact rows collected while the scan holds each scroll position. Keyed
@@ -3667,7 +3694,7 @@ async function getConversationMarkdown(settings) {
     // them. Keyed by label, since one button can mount repeatedly.
     const buttonsDuringScan = new Map();
     if (!firstSection) {
-      md = extractConversationLegacy();
+      md = extractConversationLegacy(root);
     } else {
       const container = findScrollContainer(firstSection);
       if (!container) return { ok: false, error: 'Could not find the conversation scroll area.' };
@@ -3680,7 +3707,8 @@ async function getConversationMarkdown(settings) {
       if (typeof window !== 'undefined') window.__c2mScan = scanState;
       const turns = await scanTurns(container, {
         readSections: function() {
-          return modern ? modernMessageSections(document) : document.querySelectorAll('[data-turn-id]');
+          assertSameConversation();
+          return modern ? modernMessageSections(root) : root.querySelectorAll('[data-turn-id]');
         },
         scrollToStart: modern ? async function(target) {
           const result = await scrollToConversationStart(target, {
@@ -3723,7 +3751,7 @@ async function getConversationMarkdown(settings) {
         // two different scroll positions. Collected during the walk, every
         // turn's files are seen while that turn exists.
         onMounted: wantFiles ? function() {
-          for (const file of listArtifactPanelFiles(document)) {
+          for (const file of listArtifactPanelFiles(root)) {
             if (!panelFilesDuringScan.has(file.name)) {
               panelFilesDuringScan.set(file.name, file);
             }
@@ -3735,7 +3763,7 @@ async function getConversationMarkdown(settings) {
           // (both editing suggestions — "Make the opening more concrete"), so
           // the traversal never ran and all 5 real download buttons were missed.
           // Collected during the walk there is no guard to get wrong.
-          for (const entry of downloadButtonsInPage(document, [])) {
+          for (const entry of downloadButtonsInPage(root, [])) {
             if (!buttonsDuringScan.has(entry.label)) {
               buttonsDuringScan.set(entry.label, entry);
             }
@@ -3768,6 +3796,8 @@ async function getConversationMarkdown(settings) {
       try {
         md = await Promise.race([
           appendPanelArtifacts(md, {
+            doc: root,
+            conversationId: conversationId,
             scannedPanelFiles: firstSection ? Array.from(panelFilesDuringScan.values()) : undefined,
             scannedButtons: firstSection ? Array.from(buttonsDuringScan.values()) : undefined,
             clickDownloads: false,
@@ -3786,6 +3816,7 @@ async function getConversationMarkdown(settings) {
             fetchImpl: typeof fetch === 'function' ? async function(url, init) {
               // Only stage names and status counts leave this wrapper. Never
               // include URLs, headers, response bodies or exception messages.
+              assertSameConversation();
               if (controller && controller.signal.aborted) throw new Error('lookup cancelled');
               lookup.stage = String(url).indexOf('/api/auth/session') !== -1 ? 'session' :
                 ((String(url).indexOf('/interpreter/download') !== -1 ||
@@ -3843,6 +3874,7 @@ async function getConversationMarkdown(settings) {
       md += '\n\n> Library files cited in this conversation were not downloaded. ' +
         'Download them from ChatGPT Library before treating this export as complete.';
     }
+    assertSameConversation();
     const title = extractConversationTitle();
     if (title) md = '# ' + title + '\n\n' + md;
     return {

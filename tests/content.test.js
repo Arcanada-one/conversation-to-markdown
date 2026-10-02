@@ -5608,3 +5608,126 @@ test('modern history boundary: exhausted history avoids the blanket partial warn
     if (!options.expectedPartial) assert.doesNotMatch(result.md, /Partial export|history start.*unverified/i);
   }
 });
+
+// Two retained pages measured in Chrome: inactive comes first, both reuse the
+// same fallback turn keys. Synthetic Russian text keeps private chats out of git.
+function retainedConversationFixture() {
+  const inactive = modernConversationFixture({ libraryCitation: 'foreign-private.md' });
+  const active = modernConversationFixture({ historyBoundary: true });
+  for (const node of inactive.root.querySelectorAll('.whitespace-pre-wrap')) {
+    node.childNodes[0].textContent = 'Чужой разговор';
+  }
+  inactive.root.getAttribute = key => key === 'data-app-shell-active-page' ? 'false' : null;
+  active.root.getAttribute = key => key === 'data-app-shell-active-page' ? 'true' : null;
+  const pages = [inactive.root, active.root];
+  const document = {
+    title: 'Текущий разговор', scrollingElement: active.root,
+    querySelectorAll: selector => selector === '[data-app-shell-active-page]' ? pages :
+      pages.flatMap(page => page.querySelectorAll(selector)),
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; },
+  };
+  return { document, active, inactive };
+}
+
+function retainedExportContext(fixture, overrides = {}) {
+  const context = vm.createContext({
+    document: fixture.document, Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 }, URL,
+    location: { pathname: '/c/synthetic', href: 'https://chatgpt.com/' },
+    getComputedStyle: () => ({ overflowY: 'visible' }),
+    fetch: async url => ({ ok: true, json: async () =>
+      String(url).includes('/api/auth/session') ? { accessToken: 'fixture' } : { mapping: {} } }),
+    setTimeout: (fn, ms) => { if (ms < 10000) fn(); return 0; }, clearTimeout() {}, ...overrides,
+  });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8'), context);
+  return context;
+}
+
+test('real export isolates active text and attachments from retained conversations', async () => {
+  for (const downloadFiles of [false, true]) {
+    const fixture = retainedConversationFixture();
+    const context = retainedExportContext(fixture);
+    assert.match(fixture.document.querySelector('[data-user-message-bubble]').textContent, /Чужой/,
+      'positive control: the former document-wide query reads the foreign page first');
+    const result = await context.getConversationMarkdown({ downloadFiles });
+    assert.equal(result.ok, true, result.error);
+    assert.match(result.md, /Вопрос 0/);
+    assert.match(result.md, /Ответ 1/);
+    assert.doesNotMatch(result.md, /Чужой|foreign-private/);
+    assert.equal((result.md.match(/#### You said:/g) || []).length, 2);
+    assert.equal(result.partial, false, JSON.stringify({ downloadFiles, reason: result.partialReason, md: result.md }));
+  }
+});
+
+test('real export refuses a conversation switch while scanning', async () => {
+  for (const change of ['route', 'active-page']) {
+    const fixture = retainedConversationFixture();
+    const context = retainedExportContext(fixture);
+    const scroll = fixture.active.root.scrollTo;
+    let switched = false;
+    fixture.active.root.scrollTo = options => {
+      scroll(options);
+      switched = true;
+      if (change === 'route') context.location.pathname = '/c/other-synthetic';
+      else {
+        fixture.active.root.getAttribute = () => 'false';
+        fixture.inactive.root.getAttribute = () => 'true';
+      }
+    };
+    const result = await context.getConversationMarkdown({ downloadFiles: true });
+    assert.equal(switched, true, 'positive control: scanning reached the switch');
+    assert.equal(result.ok, false);
+    assert.match(result.error, /Conversation changed/);
+    assert.equal(result.md, undefined);
+  }
+});
+
+test('batch readiness ignores retained messages when the active page is empty or ambiguous', async () => {
+  const fixture = retainedConversationFixture();
+  const context = retainedExportContext(fixture, { setTimeout, clearTimeout });
+  assert.equal((await context.waitForConversationReady({ timeoutMs: 5, pollMs: 1 })).ready, true);
+  fixture.active.root.querySelectorAll = () => [];
+  assert.equal((await context.waitForConversationReady({ timeoutMs: 5, pollMs: 1 })).ready, false);
+  fixture.inactive.root.getAttribute = () => 'true';
+  const result = await context.getConversationMarkdown({});
+  assert.equal(result.ok, false);
+  assert.match(result.error, /identify the active conversation/);
+});
+
+test('file-saving entrypoint scopes panel inventories and fallback reads to the active page', async () => {
+  const fixture = retainedConversationFixture();
+  for (const [page, name] of [[fixture.inactive.root, 'foreign-panel.md'], [fixture.active.root, 'current-panel.md']]) {
+    const query = page.querySelectorAll;
+    page.querySelectorAll = selector => selector === 'button[class*="open-file"], [class*="artifact-row"] button'
+      ? [{ getAttribute: key => key === 'aria-label' ? name : null }] : query(selector);
+  }
+  const context = retainedExportContext(fixture, {
+    fetch: async url => ({ ok: true, status: 200, json: async () =>
+      String(url).includes('/api/auth/session') ? { accessToken: 'fixture' } :
+      String(url).includes('/interpreter/download') ? { download_url: 'https://chatgpt.com/backend-api/estuary/content?id=file_fixture' } :
+      { mapping: { offered: { message: { id: 'answer-fixture', author: { role: 'assistant' },
+        content: { parts: ['[Current](sandbox:/mnt/data/current-panel.md)'] } } } } } }),
+  });
+  assert.equal(fixture.document.querySelectorAll('button[class*="open-file"], [class*="artifact-row"] button').length, 2);
+  const result = await context.getConversationMarkdown({ downloadFiles: true });
+  assert.equal(result.ok, true, result.error);
+  assert.match(result.md, /current-panel.md/);
+  assert.doesNotMatch(result.md, /foreign-panel.md/);
+});
+
+test('file-saving entrypoint refuses navigation during an awaited attachment response', async () => {
+  const fixture = retainedConversationFixture();
+  let responseReached = false;
+  const context = retainedExportContext(fixture, {
+    fetch: async url => {
+      if (String(url).includes('/api/auth/session')) return { ok: true, json: async () => ({ accessToken: 'fixture' }) };
+      responseReached = true;
+      context.location.pathname = '/c/other-synthetic';
+      return { ok: true, json: async () => ({ mapping: {} }) };
+    },
+  });
+  const result = await context.getConversationMarkdown({ downloadFiles: true });
+  assert.equal(responseReached, true, 'positive control: navigation happened after attachment lookup began');
+  assert.equal(result.ok, false);
+  assert.match(result.error, /Conversation changed/);
+  assert.equal(result.md, undefined);
+});

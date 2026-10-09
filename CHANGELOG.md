@@ -5,6 +5,34 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.9] — 2026-10-09
+
+### Fixed
+
+- Discover generated files offered through modern `data-file-reference` buttons,
+  including files with no ordinary download link in the rendered answer.
+- Read explicit sandbox paths outside `/mnt/data/`, including the new
+  `/workspace/scratch/` output directory, without guessing paths from filenames.
+- Accept complete app-shell API message inventories when the legacy conversation
+  mapping endpoint is unavailable. Treat paginated inventories as unknown.
+- Preserve modern file names in Markdown and mark unresolved file exports
+  incomplete rather than silently skipping attachments.
+
+### Verification and limitations
+
+- Live DOM and network-response inspection established the modern button, path,
+  and API shapes. The original archive downloaded through ChatGPT passed ZIP
+  integrity checks and all 23 manifest-listed files passed size and SHA-256 checks.
+- The source regression suite passed 295 tests with one packaging fallback test
+  skipped because 7-Zip is unavailable locally. Three deliberate regressions
+  removing the new selectors, sandbox paths, or API fallback fail the new tests.
+- The fixed installed-extension export has not been measured. The release keeps
+  existing permissions and dependencies. Long app-shell inventories that require
+  pagination remain explicitly incomplete when the legacy inventory is unavailable.
+- The user reported the published Web Store version as 1.6.8 on 2026-10-09.
+  Version 1.6.9 has not been submitted to the Web Store; GitHub is the primary
+  release channel and the store follows independently.
+
 ## [1.6.8] — 2026-10-02
 
 ### Fixed

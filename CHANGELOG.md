@@ -26,12 +26,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The source regression suite passed 295 tests with one packaging fallback test
   skipped because 7-Zip is unavailable locally. Three deliberate regressions
   removing the new selectors, sandbox paths, or API fallback fail the new tests.
-- The fixed installed-extension export has not been measured. The release keeps
-  existing permissions and dependencies. Long app-shell inventories that require
-  pagination remain explicitly incomplete when the legacy inventory is unavailable.
-- The user reported the published Web Store version as 1.6.8 on 2026-10-09.
-  Version 1.6.9 has not been submitted to the Web Store; GitHub is the primary
-  release channel and the store follows independently.
+- On 2026-10-09 the operator reported checking the extension and normal
+  operation. Detailed scenario results and the tested-package checksum were
+  not supplied; independent browser verification remains unmeasured.
+- On 2026-10-09 the operator reported submitting the update for Store
+  publication and waiting for Google approval. Approval, public availability
+  and store-installed-copy verification remain unmeasured. GitHub remains
+  the primary release channel.
+- Modern app-shell attachment inventories that require pagination remain
+  incomplete when the legacy inventory endpoint is unavailable.
 
 ## [1.6.8] — 2026-10-02
 

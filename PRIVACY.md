@@ -82,7 +82,7 @@ the export already wrote to your Downloads folder.
 
 - collects no telemetry or analytics;
 - stores no conversation content or user identifiers;
-- operates no server or cloud service;
+- operates no server and no cloud service of its own. The optional reader in `server.js` is a separate program you start on this computer. It only reads the HTML folder already saved here, listens on 127.0.0.1, and does not upload files or contact ChatGPT;
 - sends conversation content to no third party;
 - does not sell or share data; and
 - gives the developer no access to your conversations, files, or clipboard.

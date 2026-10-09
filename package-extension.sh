@@ -28,8 +28,10 @@ git archive --format=tar "$ref" | tar -x -C "$stage"
 
 # The runtime file list. zip.js is REQUIRED: popup.html loads it, and popup.js
 # guards on `typeof buildStoreZip === 'function'`, so omitting it disables the
-# archive feature silently instead of failing loudly.
-files=(manifest.json content.js popup.js popup.html zip.js icons)
+# archive feature silently instead of failing loudly. site.js is REQUIRED for
+# the same reason: popup.html loads it for the static HTML site. server.js is
+# not part of the extension; the user starts it with Node against a saved folder.
+files=(manifest.json content.js popup.js popup.html zip.js site.js icons)
 for f in "${files[@]}"; do
   [ -e "$stage/$f" ] || { echo "missing from $ref: $f" >&2; exit 1; }
 done

@@ -364,6 +364,21 @@ with the reason, so an incomplete export never looks complete.
 **Local rewriting.** A downloaded file's link in the Markdown is replaced by its
 local path, so the signed URL does not survive in the document.
 
+**Static HTML site.** *(fixture-only)* Checking **Save a static HTML site** writes
+the active conversation as static HTML: user and assistant text, links, code,
+tables, and images. Turns that exist only on an inactive retained app-shell page
+are left out. Text is escaped, so a message cannot become a script on the saved
+page. Retrieved files sit in that chat's directory and the page refers to them
+with relative URLs. A file that was not retrieved is named on the page, and that
+export stays incomplete. Ordinary web links stay links. A product photo on a
+host the extension is not allowed to fetch keeps its name and outbound address.
+
+**Project structure in the HTML archive.** *(fixture-only)* Chats that belong to
+a project are grouped under that project. Chats with no project stay in their
+own directories and remain addressable from the index. The index links to a
+project page, and that page links to each of its chats. The Markdown folder
+layout is unchanged.
+
 **Link hygiene.** Query parameters are stripped from page links; attachment URLs
 keep the parameters their host requires. Verify no `sig=`/`token=` reaches a
 saved page link.
@@ -484,8 +499,11 @@ one version number with no way to tell them apart from the browser.
 
 ## Privacy and permissions
 
-**Local only.** No telemetry, no analytics, no server, no third party. The
-developer has no access to conversations, files or clipboard.
+**Local only.** The extension sends no telemetry and no analytics, and it starts
+no server. A separate local server, `server.js`, can host the saved HTML folder
+on this computer. It listens on 127.0.0.1, answers GET and HEAD, and accepts no
+uploads. It does not contact ChatGPT or any third party. The developer has no
+access to conversations, files or clipboard.
 
 **Permission set.** Exactly `clipboardWrite`, `scripting`, `downloads`,
 `storage`. Locked by an exact-set test: an added permission must be a deliberate

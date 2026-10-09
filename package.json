@@ -6,6 +6,6 @@
   "type": "commonjs",
   "scripts": {
     "test": "node --test tests/*.test.js",
-    "check": "node --check content.js && node --check popup.js && node --check zip.js"
+    "check": "node --check content.js && node --check popup.js && node --check zip.js && node --check site.js && node --check server.js"
   }
 }

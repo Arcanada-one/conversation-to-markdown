@@ -4,6 +4,7 @@ const btnPause = document.getElementById('btn-pause');
 const status = document.getElementById('status');
 const chkImages = document.getElementById('chk-images');
 const chkBatch = document.getElementById('chk-batch');
+const chkHtml = document.getElementById('chk-html');
 const batchWarning = document.getElementById('batch-warning');
 
 // The running version, shown in the popup so a reloaded build is identifiable
@@ -860,6 +861,7 @@ async function saveConversationExport(tabId, result, options) {
   var dlTotal = 0;
   var dlErrors = [];
   var mdFinal = md;
+  var savedFiles = [];
 
   if (downloadImages && typeof chrome.downloads !== 'undefined') {
     var refs = parseArtifactRefs(md);
@@ -903,11 +905,10 @@ async function saveConversationExport(tabId, result, options) {
         if (r.ok) {
           dlOk++;
           mdFinal = mdFinal.split(ex.url).join('./' + r.filename);
-          if (zipEntries) {
-            var dataPart = ex.dataUrl.split(',')[1] || '';
-            var bin = Uint8Array.from(atob(dataPart), function(c) { return c.charCodeAt(0); });
-            addZipEntry(zipEntries, projectSlug, convSlug, fname, bin);
-          }
+          var dataPart = ex.dataUrl.split(',')[1] || '';
+          var bin = Uint8Array.from(atob(dataPart), function(c) { return c.charCodeAt(0); });
+          savedFiles.push({ url: ex.url, name: fname, bytes: bin });
+          if (zipEntries) addZipEntry(zipEntries, projectSlug, convSlug, fname, bin);
         } else {
           dlErrors.push(r.error || 'unknown');
         }
@@ -967,6 +968,7 @@ async function saveConversationExport(tabId, result, options) {
     mdName: mdName,
     mdOk: mdWrite.ok,
     mdError: mdWrite.error || null,
+    savedFiles: savedFiles,
   };
 }
 
@@ -1097,6 +1099,7 @@ async function runBatchExport(tab, options) {
   var retried = 0;
   var held = 0;
   var partial = 0;
+  var htmlSessions = [];
   var maxAttempts = options.maxAttempts || 3;
   var maxHoldRounds = options.maxHoldRounds || 20;
   var controls = {
@@ -1367,14 +1370,36 @@ async function runBatchExport(tab, options) {
     }
 
     exported += 1;
+    // HTML is built from the scan's original Markdown plus the bytes that
+    // actually arrived. The Markdown file may already have rewritten those
+    // URLs to ./names; binding against the original URLs is what puts the
+    // bytes in the HTML tree. A missing file keeps this export unbanked.
+    var htmlPartial = false;
+    if ((options.htmlSiteDir || options.downloadHtml) && typeof sessionFromExport === 'function') {
+      var retrievedFiles = (conv && conv.retrievedFiles) || null;
+      if (downloadImages && saved && saved.savedFiles && saved.savedFiles.length) {
+        retrievedFiles = saved.savedFiles;
+      }
+      var htmlConv = retrievedFiles ? Object.assign({}, conv, { retrievedFiles: retrievedFiles }) : conv;
+      var htmlResult = result;
+      if (downloadImages && saved && saved.dlErrors && saved.dlErrors.length) {
+        htmlResult = Object.assign({}, result, { partial: true });
+      }
+      var htmlSession = sessionFromExport(htmlConv, htmlResult);
+      htmlSessions.push(htmlSession);
+      htmlPartial = !!htmlSession.partial;
+    }
     var exportSlug = result.slug || conv.slug || conv.id;
-    if (result.partial) {
+    if (result.partial || htmlPartial) {
       // A stall-truncated export must NOT be banked as done. Banking it made the
       // next run skip the conversation as "already exported", so the one action
       // that could repair a truncated file was the one action refused — while the
-      // popup reported success. Counted and reported instead.
+      // popup reported success. Counted and reported instead. The same rule
+      // applies when the HTML site names a file that never arrived.
       partial += 1;
-      errors.push((conv.title || conv.id) + ': saved incompletely (scan did not reach the end) — re-run to finish it');
+      errors.push(result.partial
+        ? (conv.title || conv.id) + ': saved incompletely (scan did not reach the end) — re-run to finish it'
+        : (conv.title || conv.id) + ': saved incompletely (a file was not retrieved) — re-run to finish it');
     } else {
       completedPaths.add(mdDownloadPath(exportSlug, projectSlug, stampThis, batchStamp, conv.id));
       // Record only a COMPLETE export. A partial one is deliberately not banked,
@@ -1438,6 +1463,17 @@ async function runBatchExport(tab, options) {
     }
   }
 
+  var htmlSite = null;
+  if (htmlSessions.length && typeof layoutStaticSite === 'function') {
+    htmlSite = layoutStaticSite(htmlSessions);
+    if (options.htmlSiteDir && typeof writeStaticSite === 'function') {
+      writeStaticSite(options.htmlSiteDir, htmlSite);
+    }
+    if (options.downloadHtml) {
+      await downloadStaticSite(htmlSite);
+    }
+  }
+
   return {
     ok: true,
     total: conversations.length,
@@ -1467,7 +1503,24 @@ async function runBatchExport(tab, options) {
     listReason: listReason,
     errors: errors,
     zipName: zipName,
+    htmlFiles: htmlSite ? htmlSite.files.length : 0,
   };
+}
+
+/** Download one laid-out static site through chrome.downloads. */
+async function downloadStaticSite(laid) {
+  var files = (laid && laid.files) || [];
+  for (var i = 0; i < files.length; i++) {
+    var entry = files[i];
+    var bytes = typeof entry.body === 'string' ? textToUtf8Bytes(entry.body) : entry.body;
+    var handle = bytesToDownloadUrl(bytes, entry.mime || 'application/octet-stream');
+    var leaf = String(entry.path).split('/').pop();
+    try {
+      await downloadOne(handle.url, leaf, 'chatgpt-export/html/' + entry.path, MD_WRITE_TIMEOUT_MS);
+    } finally {
+      handle.revoke(handle.url);
+    }
+  }
 }
 
 /** Hold the run without losing it. A long export over a network the extension
@@ -1550,6 +1603,7 @@ btn.addEventListener('click', async () => {
         projectSlug: projectSlug,
         batchStamp: batchStamp,
         buildZip: true,
+        downloadHtml: !!(chkHtml && chkHtml.checked),
         onProgress: function(index, total, title) {
           btn.textContent = 'Exporting ' + formatBatchProgress(index, total, title);
         },
@@ -1654,6 +1708,23 @@ btn.addEventListener('click', async () => {
         partialSuffix: partialSuffix,
       });
       showStatus(saveStatus.type, saveStatus.text);
+      if (chkHtml && chkHtml.checked && typeof sessionFromExport === 'function' && typeof layoutStaticSite === 'function') {
+        var projectMatch = String(tab.url || '').match(/\/g\/(g-p-[A-Za-z0-9]+)\//);
+        var htmlSession = sessionFromExport({
+          title: result.title,
+          slug: result.slug,
+          projectId: projectMatch ? projectMatch[1] : null,
+          retrievedFiles: saved.savedFiles || [],
+        }, {
+          // Original URLs, not the rewritten Markdown: bindRetrievedFiles
+          // matches the remote address to the bytes just saved.
+          md: md,
+          title: result.title,
+          slug: result.slug,
+          partial: result.partial || (saved.dlErrors && saved.dlErrors.length > 0),
+        });
+        await downloadStaticSite(layoutStaticSite([htmlSession]));
+      }
 
       // NOT copied to the clipboard. With the save option on, the file is the
       // deliverable and the clipboard is a second copy nobody asked for — and it
@@ -1662,6 +1733,19 @@ btn.addEventListener('click', async () => {
       // multi-minute scan invites, and the rejection landed in the catch below
       // and REPLACED an already-displayed success with a red error. The file was
       // on disk the whole time.
+      btn.disabled = false;
+      btn.textContent = 'Copy as Markdown';
+      return;
+    }
+
+    if (chkHtml && chkHtml.checked && typeof sessionFromExport === 'function' && typeof layoutStaticSite === 'function') {
+      var htmlOnly = sessionFromExport({
+        title: result.title,
+        slug: result.slug,
+      }, { md: md, title: result.title, slug: result.slug, partial: result.partial });
+      await downloadStaticSite(layoutStaticSite([htmlOnly]));
+      var htmlPartialSuffix = (result.partial || htmlOnly.partial) ? ' (partial export)' : '';
+      showStatus('success', '✓ Saved HTML site' + htmlPartialSuffix + ' ' + result.lines + ' lines · ' + result.words + ' words');
       btn.disabled = false;
       btn.textContent = 'Copy as Markdown';
       return;

@@ -26,13 +26,17 @@ package.json
 popup.html
 popup.js
 public-files.allowlist
+server.js
+site.js
 tests/batch.test.js
 tests/content.test.js
 tests/manifest.test.js
 tests/package.test.js
 tests/popup.test.js
 tests/public-surface.test.js
+tests/server.test.js
 tests/sidebar.test.js
+tests/site.test.js
 tests/zip.test.js
 zip.js
 docs/reference/releases/1.6.9-closeout.md

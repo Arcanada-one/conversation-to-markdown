@@ -72,6 +72,26 @@ membership API; verify that the intended Project is selected before starting.
 An optional ZIP combines batch output in memory. Large batches need sufficient
 browser memory. Cancelled or interrupted runs keep files already downloaded.
 
+## Static HTML site
+
+Check **Save a static HTML site** to write an HTML page for the active
+conversation, plus an index. Chats that belong to a project are grouped under
+that project. Chats with no project stay in their own folders. Files the export
+retrieved sit beside the chat page and are linked with relative URLs. A file
+that could not be retrieved is named on the page, and that export stays
+incomplete. The pages escape conversation text.
+
+The extension does not serve those files. After the folder is on disk, a
+separate read-only server can host it on this computer:
+
+```sh
+node server.js path/to/chatgpt-export/html
+```
+
+It listens on 127.0.0.1, answers GET and HEAD, and does not accept uploads.
+Open the printed `http://127.0.0.1:<port>/` address. Downloads from the popup
+land under `chatgpt-export/html/`.
+
 ## Current limitations
 
 - **Not every attachment is supported.** Generated sandbox files and direct download links can be saved. Build 1.6.5 adds file-service lookup for named uploads with file identifiers. A live uploaded-document export was verified byte for byte against a manual download. Uploads without identifiers are reported as unresolved; unidentified assets can remain unsupported. Check the export inventory yourself.
@@ -97,7 +117,8 @@ that every current ChatGPT layout works.
 
 Host access covers `chatgpt.com`, `chat.openai.com`, and `files.oaiusercontent.com`.
 File and batch metadata requests use your existing ChatGPT session. No developer
-server, telemetry, or analytics is used. Read [Privacy](PRIVACY.md) for session-token,
+server, telemetry, or analytics is used. `server.js` is a local reader for a
+folder you already saved; the extension does not start it. Read [Privacy](PRIVACY.md) for session-token,
 local-storage, and signed-link handling.
 
 ## Development and publishing

@@ -311,6 +311,7 @@ test('the feature checklist covers every option the popup offers', () => {
   const options = [
     ['chk-images', /All attachment types|Files are opt-in/],
     ['chk-batch', /Whole-Project export/],
+    ['chk-html', /static HTML|local server/],
   ];
 
   for (const [id, expected] of options) {

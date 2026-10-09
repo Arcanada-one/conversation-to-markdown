@@ -5731,3 +5731,70 @@ test('file-saving entrypoint refuses navigation during an awaited attachment res
   assert.match(result.error, /Conversation changed/);
   assert.equal(result.md, undefined);
 });
+
+test('workspace sandbox links from modern API reach the real file resolver', async () => {
+  const offered = '/workspace/scratch/session/пакет/ТЗ.md';
+  const message = { id: 'answer-1', author: { role: 'assistant' }, channel: 'final',
+    content: { parts: ['[ТЗ](sandbox:' + offered + ')'] } };
+  const calls = [];
+  const fetchImpl = async url => {
+    calls.push(url);
+    if (url.includes('/interpreter/download')) {
+      assert.equal(new URL(url, 'https://chatgpt.com').searchParams.get('sandbox_path'), offered);
+      return jsonOk({ download_url: 'https://chatgpt.com/backend-api/estuary/content?fn=spec.md' })();
+    }
+    if (url.includes('/conversations/')) return jsonOk({ messages: [message],
+      page_info: { has_previous_page: false, has_next_page: false } })();
+    return { ok: false, status: 404 };
+  };
+  const md = await parser.appendPanelArtifacts('Answer', {
+    conversationId: 'fixture', token: 'fixture-token', fetchImpl, files: [],
+    scannedPanelFiles: [], scannedButtons: [], clickDownloads: false,
+  });
+  assert.match(md, /\[ТЗ.md\]\(https:\/\/chatgpt.com\/backend-api\/estuary/);
+  assert.ok(calls.some(url => url.includes('/conversations/')));
+  assert.ok(calls.some(url => url.includes('/interpreter/download')));
+  assert.doesNotMatch(md, /Could not/);
+});
+
+test('modern partial API inventory cannot claim that no files exist', async () => {
+  const artifacts = await parser.fetchConversationArtifacts('fixture', {
+    token: 'fixture', fetchImpl: async url => url.includes('/conversations/')
+      ? jsonOk({ messages: [], page_info: { has_previous_page: true, has_next_page: false } })()
+      : { ok: false, status: 404 },
+  });
+  assert.equal(artifacts, null);
+});
+
+function modernFileReference(name) {
+  return element('span', [textNode(name)], {
+    'data-file-reference': 'true', 'data-markdown-copy-text': name, role: 'button',
+  });
+}
+
+test('modern file references remain named and unresolved in a file-saving export', async () => {
+  const references = [modernFileReference('пакет.zip'), modernFileReference('ТЗ.docx'),
+    modernFileReference('TECHNICAL_SPEC.md')];
+  const doc = { querySelectorAll: selector => selector.includes('data-file-reference') ? references : [] };
+  assert.equal(parser.downloadButtonsInPage(doc, []).length, 3, 'positive control: all file buttons found');
+  let incomplete = false;
+  const md = await parser.appendPanelArtifacts('Answer', { conversationId: 'fixture',
+    doc, artifacts: [], files: [], scannedPanelFiles: [], clickDownloads: false,
+    reportUnresolvedButtons: true, onIncomplete: () => { incomplete = true; },
+  });
+  assert.equal(incomplete, true);
+  assert.match(md, /Could not retrieve a download link for: пакет.zip, ТЗ.docx, TECHNICAL_SPEC.md/);
+  const complete = await parser.appendPanelArtifacts('Answer', { conversationId: 'fixture',
+    doc: { querySelectorAll: () => [] }, artifacts: [], files: [], clickDownloads: false,
+    reportUnresolvedButtons: true, onIncomplete: () => assert.fail('no files must not warn'),
+  });
+  assert.equal(complete, 'Answer');
+});
+
+test('modern file references preserve names independently of button wording', () => {
+  const before = global.Node;
+  global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
+  try {
+    assert.equal(parser.nodeToMarkdown(modernFileReference('ТЗ.docx')), '`ТЗ.docx`');
+  } finally { global.Node = before; }
+});

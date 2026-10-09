@@ -139,6 +139,11 @@ function nodeToMarkdown(node, depth) {
     return Array.from(node.childNodes).map(function(n) { return nodeToMarkdown(n, depth); }).join('');
   };
 
+  if (node.getAttribute && node.getAttribute('data-file-reference') === 'true') {
+    const name = node.getAttribute('data-markdown-copy-text') || node.textContent || '';
+    return '`' + name.replace(/`/g, '') + '`';
+  }
+
   // App-shell Markdown embeds table controls inside the rendered content.
   if (node.getAttribute && node.getAttribute('data-block-actions') !== null) return '';
   // The app shell renders a fenced code block as a div, not a pre. Its
@@ -558,13 +563,16 @@ function sandboxPathsFromApiMessage(message) {
   // Accepts both shapes at once: the optional `sandbox:` scheme, then the path.
   // Stops at whitespace, quote, backtick, or a closing bracket — a Cyrillic
   // label frequently follows the path with no separator.
-  const pattern = /(?:sandbox:)?(\/mnt\/data\/[^\s`)\]}"'\\,;]+)/g;
+  // Explicit sandbox links now point into /workspace/scratch too (live 2026-10-09).
+  // Bare paths remain restricted to the legacy output directory: arbitrary tool
+  // paths are not proof of an offered file.
+  const pattern = /(?:sandbox:(\/[^\s`)\]}"'\\,;]+)|(\/mnt\/data\/[^\s`)\]}"'\\,;]+))/g;
   let match;
   while ((match = pattern.exec(text)) !== null) {
     // A trailing period is sentence punctuation far more often than part of a
     // file name; a path that really ends in one resolves to nothing anyway, and
     // the unresolved-file notice keeps that visible instead of silent.
-    const sandboxPath = match[1].replace(/[.]+$/, '');
+    const sandboxPath = (match[1] || match[2]).replace(/[.]+$/, '');
     if (!sandboxPath || seen.has(sandboxPath)) continue;
     const name = sandboxPath.split('/').pop();
     // A bare directory ("/mnt/data/") names no file.
@@ -590,22 +598,35 @@ async function fetchConversationArtifacts(conversationId, options) {
   if (!token) return null;
 
   let payload;
+  const init = {
+    credentials: 'include',
+    headers: { accept: 'application/json', authorization: 'Bearer ' + token },
+  };
   try {
-    const response = await doFetch('/backend-api/conversation/' + conversationId, {
-      credentials: 'include',
-      headers: { accept: 'application/json', authorization: 'Bearer ' + token },
-    });
-    if (!response || !response.ok) return null;
-    payload = await response.json();
+    const response = await doFetch('/backend-api/conversation/' + conversationId, init);
+    if (response && response.ok) payload = await response.json();
+    // The app-shell endpoint returns messages directly rather than mapping nodes.
+    // Observed on the live site, 2026-10-09. Retain the legacy full inventory
+    // whenever it is available, since the new endpoint may return only one page.
+    if (!payload || (!payload.mapping && !Array.isArray(payload.messages))) {
+      const modern = await doFetch('/backend-api/conversations/' + conversationId +
+        '?num_turns=10&include_has_versions=true', init);
+      if (!modern || !modern.ok) return null;
+      payload = await modern.json();
+    }
   } catch (_e) {
     return null;
   }
-  if (!payload || !payload.mapping) return null;
+  if (!payload || (!payload.mapping && !Array.isArray(payload.messages))) return null;
+  if (!payload.mapping && payload.page_info &&
+      (payload.page_info.has_previous_page || payload.page_info.has_next_page)) return null;
 
   const artifacts = [];
   const seen = new Set();
-  for (const node of Object.values(payload.mapping)) {
-    const message = node && node.message;
+  const messages = payload.mapping
+    ? Object.values(payload.mapping).map(function(node) { return node && node.message; })
+    : payload.messages;
+  for (const message of messages) {
     if (!message) continue;
     const messageId = message.id || null;
     const metadata = message.metadata || {};
@@ -2108,7 +2129,7 @@ function downloadButtonsInPage(doc, panelNames) {
   if (!root || !root.querySelectorAll) return [];
   let nodes;
   try {
-    nodes = root.querySelectorAll('button.behavior-btn, .behavior-btn');
+    nodes = root.querySelectorAll('button.behavior-btn, .behavior-btn, [data-file-reference="true"]');
   } catch (_e) {
     return [];
   }
@@ -2121,7 +2142,16 @@ function downloadButtonsInPage(doc, panelNames) {
 
   const out = [];
   for (const node of Array.from(nodes)) {
-    if (!node || node.tagName !== 'BUTTON') continue;
+    if (!node) continue;
+    const modernName = node.getAttribute && node.getAttribute('data-file-reference') === 'true'
+      ? node.getAttribute('data-markdown-copy-text') : null;
+    if (modernName) {
+      if (!labelMatchesAnyStem(modernName, known)) {
+        out.push({ button: node, label: modernName, archive: UNPREVIEWABLE_FORMATS.test(modernName) });
+      }
+      continue;
+    }
+    if (node.tagName !== 'BUTTON') continue;
     if (typeof node.closest === 'function' && node.closest('a')) continue;
     const label = (node.textContent || '').trim();
     if (!label || label.length > 200) continue;

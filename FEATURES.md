@@ -514,3 +514,7 @@ Web Store publication. Attachment retrieval is unchanged in 1.6.0.
 **Changelog coupling.** A version bump with no dated CHANGELOG entry fails the
 build, because releases 1.1.6 and 1.1.7 reached the store leaving no record of
 what changed.
+
+### Modern generated file references
+
+Files rendered as `data-file-reference` buttons retain their names in Markdown. Explicit `sandbox:` links are read from both legacy mapping responses and complete app-shell message responses, including `/workspace/scratch/` paths. If a file reference has no resolved download URL, the export names it and remains incomplete instead of silently skipping it. An app-shell API page that declares older or newer pages is not treated as a complete attachment inventory. Live DOM and downloaded archive checked on 2026-10-09; installed fixed-package export is not yet measured.

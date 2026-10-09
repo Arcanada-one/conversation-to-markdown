@@ -506,7 +506,7 @@ match the CHANGELOG's top entry, and users must never see a gap. The last entry
 below is the version being shipped; a test checks this line against the CHANGELOG
 so a release cannot be added without revisiting this file.
 
-Version history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8, 1.6.0, 1.6.1, 1.6.2, 1.6.3, 1.6.4, 1.6.5, 1.6.6, 1.6.7, 1.6.8
+Version history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8, 1.6.0, 1.6.1, 1.6.2, 1.6.3, 1.6.4, 1.6.5, 1.6.6, 1.6.7, 1.6.8, 1.6.9
 
 The latest entry identifies the prepared local build; it does not imply Chrome
 Web Store publication. Attachment retrieval is unchanged in 1.6.0.
@@ -515,6 +515,6 @@ Web Store publication. Attachment retrieval is unchanged in 1.6.0.
 build, because releases 1.1.6 and 1.1.7 reached the store leaving no record of
 what changed.
 
-### Modern generated file references
+### Modern generated file references: 1.6.9
 
 Files rendered as `data-file-reference` buttons retain their names in Markdown. Explicit `sandbox:` links are read from both legacy mapping responses and complete app-shell message responses, including `/workspace/scratch/` paths. If a file reference has no resolved download URL, the export names it and remains incomplete instead of silently skipping it. An app-shell API page that declares older or newer pages is not treated as a complete attachment inventory. Live DOM and downloaded archive checked on 2026-10-09; installed fixed-package export is not yet measured.

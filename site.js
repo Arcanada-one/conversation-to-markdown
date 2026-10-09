@@ -258,9 +258,112 @@ function markdownToHtml(markdown) {
   return html;
 }
 
-function renderSessionHtml(session) {
+/** In the page itself. A separate stylesheet is another file the download can
+ *  drop, and a page opened from disk would then have no formatting at all. */
+function documentStyle() {
+  return '<style>' +
+    'html{background:#f4f1ea;color:#1f1a14}' +
+    'body{max-width:44rem;margin:0 auto;padding:2.5rem 1.25rem 4rem;' +
+      'font:1.05rem/1.6 Georgia,"Iowan Old Style",Palatino,"Palatino Linotype",serif}' +
+    'h1{font-size:1.8rem;line-height:1.2;margin:0 0 1.5rem}' +
+    'h2{font-size:.85rem;letter-spacing:.06em;text-transform:uppercase;margin:0 0 .7rem;color:#6b6258}' +
+    'p{margin:.35rem 0 .85rem;white-space:pre-wrap;overflow-wrap:anywhere}' +
+    'a{color:#1d4e89}' +
+    'img{max-width:100%;height:auto}' +
+    'pre{overflow:auto;padding:.9rem 1rem;background:#221e19;color:#f6f1e7;border-radius:8px}' +
+    'code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.9em}' +
+    'table{border-collapse:collapse;width:100%;margin:0 0 1rem}' +
+    'th,td{border:1px solid #d9d1c3;padding:.45rem .65rem;text-align:left;vertical-align:top;overflow-wrap:anywhere}' +
+    'th{background:#efeae1}' +
+    '.turn{margin:0 0 1rem;padding:1rem 1.1rem;border-radius:10px}' +
+    '.turn.user{background:#fff}' +
+    '.turn.assistant{background:#f7f3eb}' +
+    '.missing,.partial{background:#fff4e5;border:1px solid #e6c48a;padding:.8rem 1rem;border-radius:8px}' +
+    '.md-actions{display:flex;flex-wrap:wrap;gap:.5rem;margin:0 0 1.25rem}' +
+    '.md-btn{display:inline-block;padding:.45rem .8rem;border:1px solid #d9d1c3;border-radius:8px;' +
+      'background:#fff;color:#1d4e89;font:inherit;text-decoration:none;cursor:pointer}' +
+    'ul{padding-left:1.2rem}li{margin:.4rem 0}' +
+    '</style>';
+}
+
+function documentShell(title, body, tail) {
+  return '<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1">\n' +
+    '<title>' + escapeHtml(title) + '</title>\n' + documentStyle() +
+    '\n</head>\n<body>\n<h1>' + escapeHtml(title) + '</h1>\n' + body +
+    (tail ? '\n' + tail : '') + '\n</body>\n</html>\n';
+}
+
+/** Markdown sibling of a chat page. The bound export text when the session
+ *  has it; otherwise the turns, under the same role headings as a saved note. */
+function sessionMarkdown(session) {
+  var body = session && session.markdown ? String(session.markdown) : '';
+  if (!body) {
+    var turns = (session && session.turns) || [];
+    var parts = [];
+    for (var i = 0; i < turns.length; i++) {
+      var role = turns[i].role === 'user' ? 'You said' : 'ChatGPT said';
+      parts.push('#### ' + role + ':\n\n' + (turns[i].markdown || ''));
+    }
+    body = parts.join('\n\n');
+    if (session && session.title) body = '# ' + session.title + (body ? '\n\n' + body : '');
+  }
+  if (session && session.partial && body.indexOf('Partial export.') === -1) {
+    body += (body ? '\n\n' : '') + 'Partial export. Re-run to retrieve files that are still missing.';
+  }
+  if (body && body.charAt(body.length - 1) !== '\n') body += '\n';
+  return body;
+}
+
+function markdownFileName(saved) {
+  var taken = false;
+  var files = saved || [];
+  for (var i = 0; i < files.length; i++) {
+    if (files[i] && files[i].name === 'conversation.md') taken = true;
+  }
+  return taken ? 'conversation-export.md' : 'conversation.md';
+}
+
+function markdownActions(href, mdPath) {
+  return '<p class="md-actions">' +
+    '<a class="md-btn" href="' + escapeHtml(href) + '" download="' + escapeHtml(href.replace(/^\.\//, '')) + '">Get in markdown</a>' +
+    '<button type="button" class="md-btn" data-md-path="' + escapeHtml(mdPath) + '">Copy path to markdown version</button>' +
+    '</p>';
+}
+
+/** Click handler for the path button. A constant: conversation text is never
+ *  concatenated into it. On a file: page the copied path is the markdown file
+ *  next to the page; otherwise it is the path inside the saved site. */
+function markdownCopyScript() {
+  return '<script>' +
+    'document.addEventListener("click",function(event){' +
+    'var button=event.target&&event.target.closest?event.target.closest("[data-md-path]"):null;' +
+    'if(!button)return;' +
+    'var path=button.getAttribute("data-md-path")||"";' +
+    'if(location.protocol==="file:"){' +
+    'try{var page=decodeURIComponent(location.pathname||"");' +
+    'if(/^\\/[A-Za-z]:\\//.test(page))page=page.slice(1);' +
+    'var cut=page.lastIndexOf("/");' +
+    'var leaf=path.split("/").pop()||"conversation.md";' +
+    'if(cut>=0)path=page.slice(0,cut+1)+leaf;}catch(e){}}' +
+    'function finish(ok){var previous=button.getAttribute("data-md-label")||button.textContent;' +
+    'if(!button.getAttribute("data-md-label"))button.setAttribute("data-md-label",previous);' +
+    'button.textContent=ok?"Path copied":"Path not copied";' +
+    'setTimeout(function(){button.textContent=button.getAttribute("data-md-label");},1500);}' +
+    'function fallback(value){var area=document.createElement("textarea");area.value=value;' +
+    'document.body.appendChild(area);area.select();var ok=false;' +
+    'try{ok=document.execCommand("copy");}catch(e){}area.remove();return ok;}' +
+    'if(navigator.clipboard&&navigator.clipboard.writeText){' +
+    'navigator.clipboard.writeText(path).then(function(){finish(true);},function(){finish(fallback(path));});}' +
+    'else{finish(fallback(path));}});' +
+    '</script>';
+}
+
+function renderSessionHtml(session, link) {
   var title = session.title || 'Conversation';
-  var body = '';
+  var href = (link && link.href) || './conversation.md';
+  var mdPath = (link && link.path) || 'conversation.md';
+  var body = markdownActions(href, mdPath);
   var turns = session.turns || [];
   if (turns.length) {
     for (var i = 0; i < turns.length; i++) {
@@ -270,7 +373,7 @@ function renderSessionHtml(session) {
         markdownToHtml(turns[i].markdown || '') + '</section>';
     }
   } else {
-    body = markdownToHtml(session.markdown || '');
+    body += markdownToHtml(session.markdown || '');
   }
   var missing = session.missing || [];
   if (missing.length) {
@@ -280,10 +383,11 @@ function renderSessionHtml(session) {
   if (session.partial) {
     body += '<p class="partial">Partial export. Re-run to retrieve files that are still missing.</p>';
   }
-  var html = '<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<title>' +
-    escapeHtml(title) + '</title>\n</head>\n<body>\n<h1>' + escapeHtml(title) +
-    '</h1>\n' + body + '\n</body>\n</html>\n';
-  return { html: html, title: title, partial: !!(session.partial || missing.length) };
+  return {
+    html: documentShell(title, body, markdownCopyScript()),
+    title: title,
+    partial: !!(session.partial || missing.length),
+  };
 }
 
 /** Conversation id suffix. Same character as popup.js ID_MARKER: titles are
@@ -317,9 +421,7 @@ function sessionDirectory(session) {
 }
 
 function pageShell(title, body) {
-  return '<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<title>' +
-    escapeHtml(title) + '</title>\n</head>\n<body>\n<h1>' + escapeHtml(title) +
-    '</h1>\n' + body + '\n</body>\n</html>\n';
+  return documentShell(title, body);
 }
 
 function layoutStaticSite(sessions) {
@@ -332,14 +434,25 @@ function layoutStaticSite(sessions) {
     var session = list[i];
     var dir = sessionDirectory(session);
     var project = projectSegment(session);
-    var rendered = renderSessionHtml(session);
+    var saved = session.saved || [];
+    var markdownName = markdownFileName(saved);
+    var markdownPath = dir + '/' + markdownName;
+    var rendered = renderSessionHtml(session, {
+      href: './' + markdownName,
+      path: markdownPath,
+    });
     files.push({
       path: dir + '/index.html',
       body: rendered.html,
       mime: 'text/html; charset=utf-8',
       role: 'chat',
     });
-    var saved = session.saved || [];
+    files.push({
+      path: markdownPath,
+      body: sessionMarkdown(session),
+      mime: 'text/markdown; charset=utf-8',
+      role: 'markdown',
+    });
     for (var s = 0; s < saved.length; s++) {
       files.push({
         path: dir + '/' + saved[s].name,

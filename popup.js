@@ -25,25 +25,58 @@ const batchWarning = document.getElementById('batch-warning');
   }
 })();
 
-/** Keep the two options consistent, and show the caveat while it is still a choice.
+/** Label on the action button for the options the user can see right now. */
+function exportButtonLabel() {
+  var saveMd = !!(chkImages && chkImages.checked);
+  var saveHtml = !!(chkHtml && chkHtml.checked);
+  if (saveMd && saveHtml) return 'Save Markdown and HTML';
+  if (saveHtml) return 'Save HTML site';
+  if (saveMd) return 'Save Markdown';
+  return 'Copy as Markdown';
+}
+
+/** Show that label. A running export owns the button text, so leave it alone
+ *  while the button is disabled. */
+function refreshExportButtonLabel() {
+  if (!btn || btn.disabled) return;
+  btn.textContent = exportButtonLabel();
+}
+
+/** Keep the options consistent, and show the caveat while it is still a choice.
  *
- *  A batch WITHOUT file saving archives signed, short-lived links rather than the
- *  files themselves: the export looks complete the day it runs and is empty a few
- *  hours later. That used to be a paragraph of warning text the user could read
- *  past — and a warning that can be ignored into data loss is the wrong mechanism.
- *  Choosing a batch now switches saving on and holds it there, so the archive
- *  cannot be built out of links that expire.
+ *  A markdown batch WITHOUT file saving archives signed, short-lived links
+ *  rather than the files themselves: the export looks complete the day it runs
+ *  and is empty a few hours later. Choosing that batch switches saving on and
+ *  holds it there.
+ *
+ *  An HTML batch is a different deliverable. Forcing the markdown option sent
+ *  every chat through that writer, and a refused markdown write dropped the
+ *  chat before its HTML page was recorded. While the HTML option is on, the
+ *  markdown checkbox stays the user's.
  *
  *  Unchecking the batch hands the option back rather than leaving it stuck on. */
 function syncBatchOptions() {
   var batchOn = !!(chkBatch && chkBatch.checked);
+  var htmlOn = !!(chkHtml && chkHtml.checked);
   if (batchWarning) batchWarning.classList.toggle('visible', batchOn);
-  if (!chkImages) return;
-  if (batchOn) chkImages.checked = true;
-  chkImages.disabled = batchOn;
+  if (chkImages) {
+    var lockMarkdown = batchOn && !htmlOn;
+    if (lockMarkdown) chkImages.checked = true;
+    chkImages.disabled = lockMarkdown;
+  }
+  refreshExportButtonLabel();
 }
 
-if (chkBatch) chkBatch.addEventListener('change', syncBatchOptions);
+if (chkBatch && typeof chkBatch.addEventListener === 'function') {
+  chkBatch.addEventListener('change', syncBatchOptions);
+}
+if (chkHtml && typeof chkHtml.addEventListener === 'function') {
+  chkHtml.addEventListener('change', syncBatchOptions);
+}
+if (chkImages && typeof chkImages.addEventListener === 'function') {
+  chkImages.addEventListener('change', refreshExportButtonLabel);
+}
+refreshExportButtonLabel();
 
 // Id of the tab currently being scanned, so Stop knows where to send the flag.
 var scanningTabId = null;
@@ -1321,6 +1354,13 @@ async function runBatchExport(tab, options) {
 
     var writeOk = false;
     var writeError = null;
+    var saved = null;
+    var wantHtml = !!(options.htmlSiteDir || options.downloadHtml);
+    // Markdown saving and the HTML site are separate deliverables. Recording
+    // the HTML page only after the markdown write returned ok made a refused
+    // .md — the path a batch takes when file saving is forced — drop the chat
+    // from the site entirely.
+    var markdownAttempted = false;
     // A conversation that GREW is stamped whether or not the option is ticked.
     // Chrome cannot append to a file and overwriting would destroy the earlier
     // export, so the new copy must carry a name of its own. This is the whole
@@ -1338,17 +1378,25 @@ async function runBatchExport(tab, options) {
     void useTimestamp;
     void grewThisRound;
     if (downloadImages) {
-      var saved = await saveConversationExport(tab.id, result, {
-        downloadImages: true,
-        useTimestamp: stampThis,
-        batchStamp: batchStamp,
-        projectSlug: projectSlug,
-        zipEntries: zipEntries,
-        conversationId: conv.id,
-      });
-      writeOk = saved.mdOk;
-      writeError = saved.mdError;
-    } else {
+      markdownAttempted = true;
+      try {
+        saved = await saveConversationExport(tab.id, result, {
+          downloadImages: true,
+          useTimestamp: stampThis,
+          batchStamp: batchStamp,
+          projectSlug: projectSlug,
+          zipEntries: zipEntries,
+          conversationId: conv.id,
+        });
+        writeOk = !!(saved && saved.mdOk);
+        writeError = saved && saved.mdError;
+      } catch (saveErr) {
+        // One attachment must not abort the run before the HTML site is written.
+        writeOk = false;
+        writeError = (saveErr && saveErr.message) || String(saveErr);
+      }
+    } else if (!wantHtml) {
+      markdownAttempted = true;
       var slug = result.slug || conv.slug || conv.id;
       var mdName = batchMdFilename(slug, conv.id, stampThis, batchStamp, result.partial);
       var folder = conversationFolderPath(slug, projectSlug);
@@ -1362,20 +1410,15 @@ async function runBatchExport(tab, options) {
       if (writeOk && zipEntries) addZipEntry(zipEntries, projectSlug, slug, mdName, result.md);
     }
 
-    // A refused write is a failure, not an export. Counting it made a run whose
-    // every write Chrome rejected report the whole project as saved.
-    if (!writeOk) {
-      errors.push((conv.title || conv.id) + ': not saved (' + (writeError || 'download rejected') + ')');
-      continue;
-    }
-
-    exported += 1;
     // HTML is built from the scan's original Markdown plus the bytes that
     // actually arrived. The Markdown file may already have rewritten those
     // URLs to ./names; binding against the original URLs is what puts the
     // bytes in the HTML tree. A missing file keeps this export unbanked.
+    // This happens even when the markdown file itself was refused: the page
+    // is the deliverable the HTML option asked for.
     var htmlPartial = false;
-    if ((options.htmlSiteDir || options.downloadHtml) && typeof sessionFromExport === 'function') {
+    var htmlRecorded = false;
+    if (wantHtml && typeof sessionFromExport === 'function') {
       var retrievedFiles = (conv && conv.retrievedFiles) || null;
       if (downloadImages && saved && saved.savedFiles && saved.savedFiles.length) {
         retrievedFiles = saved.savedFiles;
@@ -1387,20 +1430,39 @@ async function runBatchExport(tab, options) {
       }
       var htmlSession = sessionFromExport(htmlConv, htmlResult);
       htmlSessions.push(htmlSession);
+      htmlRecorded = true;
       htmlPartial = !!htmlSession.partial;
     }
+
+    // A refused write is a failure, not an export. Counting it made a run whose
+    // every write Chrome rejected report the whole project as saved. An HTML
+    // page that did land is still an export: dropping it here is how a markdown
+    // refusal used to erase the site.
+    if (!htmlRecorded && (!markdownAttempted || !writeOk)) {
+      errors.push((conv.title || conv.id) + ': not saved (' + (writeError || 'download rejected') + ')');
+      continue;
+    }
+    if (markdownAttempted && !writeOk) {
+      errors.push((conv.title || conv.id) + ': markdown not saved (' + (writeError || 'download rejected') + ')');
+    }
+
+    exported += 1;
     var exportSlug = result.slug || conv.slug || conv.id;
-    if (result.partial || htmlPartial) {
+    if (result.partial || htmlPartial || (markdownAttempted && !writeOk)) {
       // A stall-truncated export must NOT be banked as done. Banking it made the
       // next run skip the conversation as "already exported", so the one action
       // that could repair a truncated file was the one action refused — while the
       // popup reported success. Counted and reported instead. The same rule
-      // applies when the HTML site names a file that never arrived.
+      // applies when the HTML site names a file that never arrived. A markdown
+      // file that was refused is already named above; it must not be described
+      // again as a missing attachment.
       partial += 1;
-      errors.push(result.partial
-        ? (conv.title || conv.id) + ': saved incompletely (scan did not reach the end) — re-run to finish it'
-        : (conv.title || conv.id) + ': saved incompletely (a file was not retrieved) — re-run to finish it');
-    } else {
+      if (result.partial || htmlPartial) {
+        errors.push(result.partial
+          ? (conv.title || conv.id) + ': saved incompletely (scan did not reach the end) — re-run to finish it'
+          : (conv.title || conv.id) + ': saved incompletely (a file was not retrieved) — re-run to finish it');
+      }
+    } else if (markdownAttempted && writeOk) {
       completedPaths.add(mdDownloadPath(exportSlug, projectSlug, stampThis, batchStamp, conv.id));
       // Record only a COMPLETE export. A partial one is deliberately not banked,
       // for the same reason it is not added to completedPaths: the next run must
@@ -1778,7 +1840,6 @@ btn.addEventListener('click', async () => {
       // and REPLACED an already-displayed success with a red error. The file was
       // on disk the whole time.
       btn.disabled = false;
-      btn.textContent = 'Copy as Markdown';
       return;
     }
 
@@ -1792,13 +1853,11 @@ btn.addEventListener('click', async () => {
       if (!htmlWrite.ok) {
         showStatus('error', 'HTML site not saved: ' + (htmlWrite.error || 'the write did not complete'));
         btn.disabled = false;
-        btn.textContent = 'Copy as Markdown';
         return;
       }
       var htmlPartialSuffix = (result.partial || htmlOnly.partial) ? ' (partial export)' : '';
       showStatus('success', '✓ Saved HTML site' + htmlPartialSuffix + ' ' + result.lines + ' lines · ' + result.words + ' words');
       btn.disabled = false;
-      btn.textContent = 'Copy as Markdown';
       return;
     }
 
@@ -1818,7 +1877,7 @@ btn.addEventListener('click', async () => {
     btnCancel.classList.remove('visible');
     if (batchWarning) batchWarning.classList.remove('visible');
     btn.disabled = false;
-    btn.textContent = 'Copy as Markdown';
+    refreshExportButtonLabel();
   }
 });
 

@@ -19,7 +19,11 @@ function request(port, method, urlPath) {
     }, (res) => {
       const chunks = [];
       res.on('data', (chunk) => chunks.push(chunk));
-      res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks) }));
+      res.on('end', () => resolve({
+        status: res.statusCode,
+        body: Buffer.concat(chunks),
+        type: String(res.headers['content-type'] || ''),
+      }));
     });
     req.on('error', reject);
     if (method === 'POST') req.write('not-allowed');
@@ -35,9 +39,11 @@ async function bootAndRead(rootDir) {
     const indexPath = path.join(rootDir, 'index.html');
     const chatPath = path.join(rootDir, 'Budget', 'Spec', 'index.html');
     const filePath = path.join(rootDir, 'Budget', 'Spec', 'chart.png');
+    const markdownPath = path.join(rootDir, 'Budget', 'Spec', 'conversation.md');
     const index = await request(address.port, 'GET', '/');
     const chat = await request(address.port, 'GET', '/Budget/Spec/index.html');
     const file = await request(address.port, 'GET', '/Budget/Spec/chart.png');
+    const markdown = await request(address.port, 'GET', '/Budget/Spec/conversation.md');
     const posted = await request(address.port, 'POST', '/Budget/Spec/upload.txt');
     assert.equal(index.status, 200);
     assert.equal(chat.status, 200);
@@ -45,13 +51,18 @@ async function bootAndRead(rootDir) {
     assert.deepEqual(index.body, fs.readFileSync(indexPath));
     assert.deepEqual(chat.body, fs.readFileSync(chatPath));
     assert.deepEqual(file.body, fs.readFileSync(filePath));
+    assert.equal(markdown.status, 200);
+    assert.match(markdown.type, /text\/markdown/);
+    assert.deepEqual(markdown.body, fs.readFileSync(markdownPath));
     assert.match(chat.body.toString('utf8'), /Spec line/);
+    assert.match(markdown.body.toString('utf8'), /Spec line/);
     assert.equal(posted.status, 405);
     assert.equal(fs.existsSync(path.join(rootDir, 'Budget', 'Spec', 'upload.txt')), false);
     return {
       index: index.body.toString('utf8'),
       chat: chat.body.toString('utf8'),
       file: file.body,
+      markdown: markdown.body.toString('utf8'),
     };
   } finally {
     await new Promise((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
@@ -75,6 +86,8 @@ test('read-only server returns the same bytes on two boots', async () => {
     assert.equal(first.index, second.index);
     assert.equal(first.chat, second.chat);
     assert.deepEqual(first.file, second.file);
+    assert.equal(first.markdown, second.markdown);
+    assert.match(first.markdown, /Spec line/);
     assert.deepEqual(first.file, fileBytes);
   } finally {
     fs.rmSync(rootDir, { recursive: true, force: true });

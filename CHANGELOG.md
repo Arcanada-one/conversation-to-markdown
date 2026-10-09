@@ -5,6 +5,50 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] — 2026-10-09
+
+### Added
+
+- Save a static HTML site for the active conversation. Turns that exist only on
+  an inactive retained app-shell page are left out. Chats in a project are
+  grouped under that project. Chats with no project stay under `chats/`. Two
+  chats with the same title get separate directories ending in `~` and the
+  conversation id.
+- Retrieved files sit beside the chat page and are linked with relative URLs.
+  A file that was not retrieved is named on the page, and that export stays
+  incomplete.
+- Each chat directory also contains `conversation.md`. The page offers
+  **Get in markdown** and **Copy path to markdown version**. Opened from disk,
+  the copy button uses the markdown file's own path. An attachment already
+  named `conversation.md` keeps that name, and the note is saved as
+  `conversation-export.md`.
+- Pages carry their own styles for turns, code, tables, and images.
+- The action button is labelled **Save Markdown**, **Save HTML site**,
+  **Save Markdown and HTML**, or **Copy as Markdown**, matching the options.
+- `server.js` is a separate read-only reader for a saved HTML folder. It
+  listens on 127.0.0.1 and answers GET and HEAD. It is not part of the Chrome
+  package, and the extension does not start it.
+
+### Fixed
+
+- A download Chrome accepts is not treated as finished. The HTML file address
+  stays open until the write completes, and a refused or interrupted write is
+  reported as not saved.
+- Checking **Export all sidebar conversations** no longer forces Markdown
+  saving while the HTML option is on. A refused Markdown write still leaves
+  that chat's HTML page.
+
+### Verification and limitations
+
+- The HTML behaviour is covered by tests that drive the shipped export and the
+  read-only server. A live walk of the new pages against chatgpt.com is still
+  the release checklist in `FEATURES.md`; those items are marked fixture-only
+  until that walk is done.
+- The Chrome Web Store listing was last reported as 1.6.8 on 2026-10-09.
+  Version 1.6.9 was published on GitHub and was not recorded as submitted.
+  Version 1.7.0 has not been submitted. The store page could not be read from
+  this session because it redirects to a consent wall.
+
 ## [1.6.9] — 2026-10-09
 
 ### Fixed

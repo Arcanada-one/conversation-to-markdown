@@ -189,8 +189,19 @@ test('active session export writes escaped HTML and omits the inactive page', ()
     assert.match(html, /Could not retrieve: missing\.pdf/);
     assert.match(html, /class="partial"/);
     assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
-    assert.equal(html.includes('<script'), false);
+    assert.equal((html.match(/<script\b/g) || []).length, 1);
+    assert.match(html, /Get in markdown/);
+    assert.match(html, /Copy path to markdown version/);
+    assert.match(html, /href="\.\/conversation\.md"/);
+    assert.match(html, /data-md-path="chats\/Active-session\/conversation\.md"/);
+    const scriptBody = html.split('<script').slice(1).join('<script');
+    assert.equal(scriptBody.includes('ACTIVE-USER-LINE'), false);
+    assert.equal(scriptBody.includes(INACTIVE_SENTINEL), false);
     assert.equal(html.includes(INACTIVE_SENTINEL), false);
+    const md = fs.readFileSync(path.join(outputDir, 'chats', 'Active-session', 'conversation.md'), 'utf8');
+    assert.match(md, /ACTIVE-USER-LINE/);
+    assert.match(md, /ACTIVE-ASSISTANT-LINE/);
+    assert.equal(md.includes(INACTIVE_SENTINEL), false);
     const written = fs.readFileSync(path.join(outputDir, 'chats', 'Active-session', 'chart.png'));
     assert.deepEqual(written, chartBytes);
   } finally {
@@ -202,7 +213,8 @@ test('active session export writes escaped HTML and omits the inactive page', ()
 
 /** Drive the real runBatchExport. site.js is loaded into the same vm so the
  *  HTML layout the popup calls is the shipped one, not a copy. */
-function runHtmlBatch(conversations, htmlSiteDir) {
+function runHtmlBatch(conversations, htmlSiteDir, options) {
+  options = options || {};
   const zipSource = fs.readFileSync(path.join(__dirname, '..', 'zip.js'), 'utf8');
   const siteSource = fs.readFileSync(path.join(__dirname, '..', 'site.js'), 'utf8');
   const popupSource = fs.readFileSync(path.join(__dirname, '..', 'popup.js'), 'utf8');
@@ -261,7 +273,15 @@ function runHtmlBatch(conversations, htmlSiteDir) {
         },
       },
       downloads: {
-        download(_options, callback) { callback(1); },
+        download(_options, callback) {
+          if (options.rejectDownloads) {
+            context.chrome.runtime.lastError = { message: 'blocked' };
+            callback(undefined);
+            context.chrome.runtime.lastError = null;
+            return;
+          }
+          callback(1);
+        },
         search(_query, callback) { callback([]); },
       },
       runtime: { lastError: null },
@@ -293,7 +313,7 @@ function runHtmlBatch(conversations, htmlSiteDir) {
   context.module = { exports: {} };
   vm.runInNewContext(popupSource, context);
   return context.module.exports.runBatchExport({ id: 1 }, {
-    downloadImages: false,
+    downloadImages: !!options.downloadImages,
     buildZip: false,
     useTimestamp: false,
     projectSlug: 'proj',
@@ -342,15 +362,93 @@ test('batch export groups a project chat and leaves a loose chat addressable', a
     const spec = fs.readFileSync(path.join(outputDir, 'Budget', 'Spec~proj-chat', 'index.html'), 'utf8');
     assert.match(spec, /PROJECT-SPEC-LINE/);
     assert.match(spec, /src="\.\/chart\.png"/);
+    assert.match(spec, /href="\.\/conversation\.md"/);
+    assert.match(spec, /data-md-path="Budget\/Spec~proj-chat\/conversation\.md"/);
     assert.equal(spec.includes('LOOSE-INBOX-LINE'), false);
+    const specMd = fs.readFileSync(path.join(outputDir, 'Budget', 'Spec~proj-chat', 'conversation.md'), 'utf8');
+    assert.match(specMd, /PROJECT-SPEC-LINE/);
+    assert.equal(specMd.includes('LOOSE-INBOX-LINE'), false);
     const loose = fs.readFileSync(path.join(outputDir, 'chats', 'Inbox-notes~loose-chat', 'index.html'), 'utf8');
     assert.match(loose, /LOOSE-INBOX-LINE/);
+    const looseMd = fs.readFileSync(path.join(outputDir, 'chats', 'Inbox-notes~loose-chat', 'conversation.md'), 'utf8');
+    assert.match(looseMd, /LOOSE-INBOX-LINE/);
+    assert.equal(looseMd.includes('PROJECT-SPEC-LINE'), false);
     assert.equal(fs.existsSync(path.join(outputDir, 'chats', 'Spec', 'index.html')), false);
     const written = fs.readFileSync(path.join(outputDir, 'Budget', 'Spec~proj-chat', 'chart.png'));
     assert.deepEqual(written, chartBytes);
   } finally {
     fs.rmSync(outputDir, { recursive: true, force: true });
   }
+});
+
+test('a refused markdown write still leaves the HTML page', async () => {
+  // The HTML batch test above calls runBatchExport with downloadImages false
+  // and a download callback that always succeeds. The popup cannot produce
+  // that combination once "Export all" is ticked: that checkbox forces file
+  // saving on, and the markdown writer is then the gate in front of the HTML
+  // page. This fixture is that gate failing. The refusal has to be visible in
+  // the errors, or a download mock that ignores the refusal would still write
+  // the page and this assertion would pass for the wrong reason.
+  const outputDir = tempDir('c2m-site-md-refused-');
+  const conversations = [{
+    id: 'html-only',
+    title: 'Notes',
+    slug: 'Notes',
+    href: '/c/html-only',
+    md: 'HTML-SURVIVES-MARKDOWN-REFUSAL\n',
+  }];
+  try {
+    const result = await runHtmlBatch(conversations, outputDir, {
+      downloadImages: true,
+      rejectDownloads: true,
+    });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.match(result.errors.join('\n'), /markdown not saved \(blocked\)/);
+    const page = fs.readFileSync(path.join(outputDir, 'chats', 'Notes~html-only', 'index.html'), 'utf8');
+    assert.match(page, /HTML-SURVIVES-MARKDOWN-REFUSAL/);
+  } finally {
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+test('chat pages and the index carry styles for turns, code, tables, and images', () => {
+  const site = require('../site.js');
+  const chat = site.renderSessionHtml({
+    title: 'Styled',
+    markdown: 'Hello body\n\n```\nconst n = 1;\n```\n',
+  }).html;
+  assert.match(chat, /<style>/);
+  assert.match(chat, /\.turn\.user\{/);
+  assert.match(chat, /pre\{overflow:auto/);
+  assert.match(chat, /img\{max-width:100%/);
+  assert.match(chat, /Hello body/);
+  assert.match(chat, /Get in markdown/);
+  assert.equal((chat.match(/<script\b/g) || []).length, 1);
+  assert.equal(chat.split('<script').slice(1).join('<script').includes('Hello body'), false);
+  const index = site.layoutStaticSite([{ title: 'Styled', slug: 'Styled', markdown: 'Hello body' }]).files[0].body;
+  assert.equal(index.includes('Chat archive'), true);
+  assert.match(index, /<style>/);
+  assert.match(index, /\.turn\.user\{/);
+});
+
+test('an attachment already named conversation.md keeps its bytes', () => {
+  const site = require('../site.js');
+  const laid = site.layoutStaticSite([{
+    title: 'Notes',
+    slug: 'Notes',
+    markdown: 'BODY-OF-THE-CHAT',
+    saved: [{ name: 'conversation.md', bytes: Buffer.from('file-bytes') }],
+  }]);
+  const attachment = laid.files.find((file) => file.path === 'chats/Notes/conversation.md');
+  const note = laid.files.find((file) => file.path === 'chats/Notes/conversation-export.md');
+  const page = laid.files.find((file) => file.path === 'chats/Notes/index.html');
+  assert.ok(attachment, 'the retrieved file must keep the name conversation.md');
+  assert.ok(note, 'the chat markdown must move aside');
+  assert.equal(Buffer.from(attachment.body).toString(), 'file-bytes');
+  assert.match(note.body, /BODY-OF-THE-CHAT/);
+  assert.equal(note.body.includes('file-bytes'), false);
+  assert.match(page.body, /href="\.\/conversation-export\.md"/);
+  assert.match(page.body, /data-md-path="chats\/Notes\/conversation-export\.md"/);
 });
 
 test('same-title chats keep separate directories, including their own text', () => {
@@ -370,6 +468,12 @@ test('same-title chats keep separate directories, including their own text', () 
     const looseSecond = fs.readFileSync(path.join(outputDir, 'chats', 'Notes~ddd', 'index.html'), 'utf8');
     assert.match(first, /FIRST/);
     assert.equal(first.includes('SECOND'), false);
+    const firstMd = fs.readFileSync(path.join(outputDir, 'Budget', 'Notes~aaa', 'conversation.md'), 'utf8');
+    const secondMd = fs.readFileSync(path.join(outputDir, 'Budget', 'Notes~bbb', 'conversation.md'), 'utf8');
+    assert.match(firstMd, /FIRST/);
+    assert.equal(firstMd.includes('SECOND'), false);
+    assert.match(secondMd, /SECOND/);
+    assert.equal(secondMd.includes('FIRST'), false);
     assert.match(second, /SECOND/);
     assert.equal(second.includes('FIRST'), false);
     assert.match(looseFirst, /LOOSE-FIRST/);

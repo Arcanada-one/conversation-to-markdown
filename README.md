@@ -19,7 +19,7 @@ code, tables, links, and user/assistant roles. Processing happens in your browse
 1. Open your conversation on ChatGPT and wait for its messages to appear.
 2. Open the **Conversation to Markdown** toolbar popup.
 3. Leave **Save .md + files to chatgpt-export/** checked to save files, or uncheck it to copy Markdown to the clipboard.
-4. Press **Copy as Markdown**. The button uses the selected delivery mode despite its name.
+4. Press the button. It reads **Save Markdown**, **Save HTML site**, **Save Markdown and HTML**, or **Copy as Markdown**, matching the boxes.
 5. Keep both the popup and conversation tab open until the result appears. Closing the popup interrupts the operation; there is no background worker.
 6. Check the result and any warnings in the saved Markdown. Confirm that the linked files exist before treating the export as a complete backup.
 
@@ -62,8 +62,10 @@ one cited file was not downloaded.
 ## Project exports
 
 Batch mode walks the conversation list visible through the Project sidebar and
-navigates the current tab through those conversations. It always enables file
-saving. Keep the popup open; pause, resume, and cancel controls apply to the run.
+navigates the current tab through those conversations. With the HTML option
+off, it turns file saving on and holds it there. With **Save a static HTML site**
+on, that markdown option stays yours, and a markdown file Chrome does not
+finish does not drop the HTML page. Keep the popup open; pause, resume, and cancel controls apply to the run.
 A restarted batch uses download history and a local metadata index to avoid
 re-exporting unchanged conversations. Incomplete exports are not recorded as
 complete. The list is taken from the sidebar, not an authoritative Project
@@ -81,7 +83,11 @@ the same title each get a directory ending in `~` and the conversation id, so
 one does not replace the other. Files the export retrieved sit beside the chat
 page and are linked with relative URLs. A file that could not be retrieved is
 named on the page, and that export stays incomplete. The pages escape
-conversation text. A download Chrome accepts but does not finish is reported
+conversation text and carry their own styles, so a page opened on its own is
+readable. Each chat folder also contains `conversation.md`. On the page,
+**Get in markdown** opens that file, and **Copy path to markdown version**
+copies its path: the path inside the saved site, or the file's own path when
+the page was opened from disk. A download Chrome accepts but does not finish is reported
 as not saved.
 
 The extension does not serve those files. After the folder is on disk, a

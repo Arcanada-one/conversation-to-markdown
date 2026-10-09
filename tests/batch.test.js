@@ -1710,3 +1710,45 @@ test('choosing a project batch turns file saving on and holds it there', async (
   popupUi.syncBatchOptions();
   assert.equal(images.disabled, false, 'the option stayed locked after the batch was cancelled');
 });
+
+test('an HTML batch does not lock markdown saving on', () => {
+  // The test above only builds chk-images and chk-batch. It never ticks
+  // chk-html and it never calls runBatchExport, so it stayed green while the
+  // lock forced every HTML batch onto the markdown writer. The HTML batch
+  // test calls runBatchExport itself with downloadImages false, which this
+  // checkbox refuses to produce. Both can pass while the screen cannot save
+  // the HTML site once Export all is ticked.
+  const images = { checked: false, disabled: false, listeners: {},
+    addEventListener(n, f) { this.listeners[n] = f; },
+    classList: { add() {}, remove() {}, toggle() {} } };
+  const batch = { checked: false, disabled: false, listeners: {},
+    addEventListener(n, f) { this.listeners[n] = f; },
+    classList: { add() {}, remove() {}, toggle() {} } };
+  const html = { checked: false, disabled: false, listeners: {},
+    addEventListener(n, f) { this.listeners[n] = f; },
+    classList: { add() {}, remove() {}, toggle() {} } };
+  const elements = { 'chk-images': images, 'chk-batch': batch, 'chk-html': html };
+  const popupUi = loadPopupExportsWithChrome({}, {
+    document: {
+      getElementById: (id) => elements[id] || ({
+        addEventListener() {}, disabled: false, textContent: '', checked: false,
+        classList: { add() {}, remove() {}, toggle() {} },
+      }),
+    },
+  });
+
+  // Positive control: with the HTML option off, the markdown lock still holds.
+  batch.checked = true;
+  html.checked = false;
+  popupUi.syncBatchOptions();
+  assert.equal(images.checked, true);
+  assert.equal(images.disabled, true);
+
+  html.checked = true;
+  html.listeners.change();
+  assert.equal(images.disabled, false, 'ticking the HTML option must release the markdown lock');
+  images.checked = false;
+  popupUi.syncBatchOptions();
+  assert.equal(images.checked, false, 'a later sync must not turn markdown saving back on');
+  assert.equal(images.disabled, false);
+});

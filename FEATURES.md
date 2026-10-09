@@ -372,12 +372,17 @@ page. Retrieved files sit in that chat's directory and the page refers to them
 with relative URLs. A file that was not retrieved is named on the page, and that
 export stays incomplete. Ordinary web links stay links. A product photo on a
 host the extension is not allowed to fetch keeps its name and outbound address.
+Chrome accepting the HTML download is not completion: the file address stays
+open until the write finishes, and a refused or interrupted write is reported
+as not saved.
 
 **Project structure in the HTML archive.** *(fixture-only)* Chats that belong to
 a project are grouped under that project. Chats with no project stay in their
 own directories and remain addressable from the index. The index links to a
-project page, and that page links to each of its chats. The Markdown folder
-layout is unchanged.
+project page, and that page links to each of its chats. Two chats with the same
+title do not share a directory: the folder name ends with `~` and that chat's
+id, the same boundary a batch Markdown filename uses, so the later chat does
+not replace the earlier one. The Markdown folder layout is unchanged.
 
 **Link hygiene.** Query parameters are stripped from page links; attachment URLs
 keep the parameters their host requires. Verify no `sig=`/`token=` reaches a

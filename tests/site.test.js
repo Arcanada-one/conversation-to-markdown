@@ -336,19 +336,169 @@ test('batch export groups a project chat and leaves a loose chat addressable', a
 
     const index = fs.readFileSync(path.join(outputDir, 'index.html'), 'utf8');
     assert.match(index, /href="Budget\/index\.html"/);
-    assert.match(index, /href="chats\/Inbox-notes\/index\.html"/);
+    assert.match(index, /href="chats\/Inbox-notes~loose-chat\/index\.html"/);
     const project = fs.readFileSync(path.join(outputDir, 'Budget', 'index.html'), 'utf8');
-    assert.match(project, /href="Spec\/index\.html"/);
-    const spec = fs.readFileSync(path.join(outputDir, 'Budget', 'Spec', 'index.html'), 'utf8');
+    assert.match(project, /href="Spec~proj-chat\/index\.html"/);
+    const spec = fs.readFileSync(path.join(outputDir, 'Budget', 'Spec~proj-chat', 'index.html'), 'utf8');
     assert.match(spec, /PROJECT-SPEC-LINE/);
     assert.match(spec, /src="\.\/chart\.png"/);
     assert.equal(spec.includes('LOOSE-INBOX-LINE'), false);
-    const loose = fs.readFileSync(path.join(outputDir, 'chats', 'Inbox-notes', 'index.html'), 'utf8');
+    const loose = fs.readFileSync(path.join(outputDir, 'chats', 'Inbox-notes~loose-chat', 'index.html'), 'utf8');
     assert.match(loose, /LOOSE-INBOX-LINE/);
     assert.equal(fs.existsSync(path.join(outputDir, 'chats', 'Spec', 'index.html')), false);
-    const written = fs.readFileSync(path.join(outputDir, 'Budget', 'Spec', 'chart.png'));
+    const written = fs.readFileSync(path.join(outputDir, 'Budget', 'Spec~proj-chat', 'chart.png'));
     assert.deepEqual(written, chartBytes);
   } finally {
     fs.rmSync(outputDir, { recursive: true, force: true });
   }
+});
+
+test('same-title chats keep separate directories, including their own text', () => {
+  const site = require('../site.js');
+  const outputDir = tempDir('c2m-same-title-');
+  try {
+    const laid = site.layoutStaticSite([
+      { id: 'aaa', title: 'Notes', slug: 'Notes', projectTitle: 'Budget', markdown: 'FIRST' },
+      { id: 'bbb', title: 'Notes', slug: 'Notes', projectTitle: 'Budget', markdown: 'SECOND' },
+      { id: 'ccc', title: 'Notes', slug: 'Notes', markdown: 'LOOSE-FIRST' },
+      { id: 'ddd', title: 'Notes', slug: 'Notes', markdown: 'LOOSE-SECOND' },
+    ]);
+    site.writeStaticSite(outputDir, laid);
+    const first = fs.readFileSync(path.join(outputDir, 'Budget', 'Notes~aaa', 'index.html'), 'utf8');
+    const second = fs.readFileSync(path.join(outputDir, 'Budget', 'Notes~bbb', 'index.html'), 'utf8');
+    const looseFirst = fs.readFileSync(path.join(outputDir, 'chats', 'Notes~ccc', 'index.html'), 'utf8');
+    const looseSecond = fs.readFileSync(path.join(outputDir, 'chats', 'Notes~ddd', 'index.html'), 'utf8');
+    assert.match(first, /FIRST/);
+    assert.equal(first.includes('SECOND'), false);
+    assert.match(second, /SECOND/);
+    assert.equal(second.includes('FIRST'), false);
+    assert.match(looseFirst, /LOOSE-FIRST/);
+    assert.equal(looseFirst.includes('LOOSE-SECOND'), false);
+    assert.match(looseSecond, /LOOSE-SECOND/);
+    const project = fs.readFileSync(path.join(outputDir, 'Budget', 'index.html'), 'utf8');
+    assert.match(project, /href="Notes~aaa\/index\.html"/);
+    assert.match(project, /href="Notes~bbb\/index\.html"/);
+    const index = fs.readFileSync(path.join(outputDir, 'index.html'), 'utf8');
+    assert.match(index, /href="chats\/Notes~ccc\/index\.html"/);
+    assert.match(index, /href="chats\/Notes~ddd\/index\.html"/);
+    assert.equal(index.includes('href="chats/Notes/index.html"'), false);
+  } finally {
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+function loadDownloadPopup(chromeDownloads) {
+  const context = {
+    module: { exports: {} },
+    console,
+    document: {
+      getElementById: () => ({
+        addEventListener() {}, disabled: false, textContent: '', value: '', checked: false,
+        classList: { add() {}, remove() {}, contains() { return false; } },
+      }),
+    },
+    navigator: { clipboard: { writeText: async () => {} }, onLine: true },
+    chrome: {
+      tabs: { query: async () => [] },
+      scripting: { executeScript: async () => [] },
+      downloads: chromeDownloads,
+      runtime: { lastError: null },
+    },
+    setTimeout,
+    clearTimeout,
+    setInterval: () => 0,
+    clearInterval() {},
+    Blob,
+    TextEncoder,
+    Uint8Array,
+    URL: Object.assign(function UrlShim(value, base) { return new URL(value, base); }, {
+      createObjectURL() {
+        context.__order.push('create');
+        return 'blob:c2m/' + context.__order.length;
+      },
+      revokeObjectURL() {
+        context.__order.push('revoke');
+      },
+    }),
+    encodeURIComponent,
+    btoa: (value) => Buffer.from(value, 'binary').toString('base64'),
+    atob: (value) => Buffer.from(value, 'base64').toString('binary'),
+    __order: [],
+  };
+  context.window = context;
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'zip.js'), 'utf8'), context);
+  context.buildStoreZip = context.module.exports.buildStoreZip;
+  context.module = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'popup.js'), 'utf8'), context);
+  return context;
+}
+
+function htmlDownloadChrome(state, order) {
+  let listener = null;
+  return {
+    download(_options, callback) {
+      order.push('accept');
+      const id = order.length;
+      callback(id);
+      setTimeout(() => {
+        order.push('state:' + state);
+        assert.equal(order.includes('revoke'), false, 'the blob must still be alive when Chrome finishes');
+        if (listener) listener({ id, state: { current: state } });
+      }, 30);
+    },
+    onChanged: {
+      addListener(fn) { listener = fn; },
+      removeListener(fn) { if (listener === fn) listener = null; },
+    },
+    search(_query, callback) { callback([]); },
+  };
+}
+
+test('HTML download revokes the blob only after the write completes', async () => {
+  const order = [];
+  const context = loadDownloadPopup(htmlDownloadChrome('complete', order));
+  context.__order = order;
+  const result = await context.module.exports.downloadStaticSite({
+    files: [{ path: 'index.html', body: '<p>HELLO-PAGE</p>', mime: 'text/html; charset=utf-8' }],
+  });
+  assert.equal(result.ok, true, result.error);
+  assert.deepEqual(order.filter((item) => item !== 'create'), ['accept', 'state:complete', 'revoke']);
+});
+
+test('an interrupted or rejected HTML write is not success', async () => {
+  const interruptedOrder = [];
+  const interrupted = loadDownloadPopup(htmlDownloadChrome('interrupted', interruptedOrder));
+  interrupted.__order = interruptedOrder;
+  const unfinished = await interrupted.module.exports.downloadStaticSite({
+    files: [{ path: 'Budget/Notes/index.html', body: '<p>PAGE</p>', mime: 'text/html' }],
+  });
+  assert.equal(unfinished.ok, false);
+  assert.match(unfinished.error, /did not complete/);
+  assert.deepEqual(
+    interruptedOrder.filter((item) => item !== 'create'),
+    ['accept', 'state:interrupted', 'revoke'],
+  );
+
+  const rejectedOrder = [];
+  const rejectedContext = loadDownloadPopup({
+    download(_options, callback) {
+      rejectedOrder.push('accept');
+      rejectedContext.chrome.runtime.lastError = { message: 'Invalid filename' };
+      callback(undefined);
+      rejectedContext.chrome.runtime.lastError = null;
+    },
+    onChanged: {
+      addListener() {},
+      removeListener() {},
+    },
+    search(_query, callback) { callback([]); },
+  });
+  rejectedContext.__order = rejectedOrder;
+  const rejected = await rejectedContext.module.exports.downloadStaticSite({
+    files: [{ path: 'index.html', body: '<p>PAGE</p>', mime: 'text/html' }],
+  });
+  assert.equal(rejected.ok, false);
+  assert.match(rejected.error, /Invalid filename/);
+  assert.equal(rejectedOrder.includes('revoke'), true);
+  assert.equal(rejectedOrder.includes('state:complete'), false);
 });

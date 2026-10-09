@@ -1464,13 +1464,18 @@ async function runBatchExport(tab, options) {
   }
 
   var htmlSite = null;
+  var htmlOk = true;
   if (htmlSessions.length && typeof layoutStaticSite === 'function') {
     htmlSite = layoutStaticSite(htmlSessions);
     if (options.htmlSiteDir && typeof writeStaticSite === 'function') {
       writeStaticSite(options.htmlSiteDir, htmlSite);
     }
     if (options.downloadHtml) {
-      await downloadStaticSite(htmlSite);
+      var htmlWrite = await downloadStaticSite(htmlSite);
+      if (!htmlWrite.ok) {
+        errors.push('HTML site not saved (' + (htmlWrite.error || 'the write did not complete') + ')');
+        htmlOk = false;
+      }
     }
   }
 
@@ -1504,23 +1509,52 @@ async function runBatchExport(tab, options) {
     errors: errors,
     zipName: zipName,
     htmlFiles: htmlSite ? htmlSite.files.length : 0,
+    htmlOk: htmlOk,
   };
 }
 
-/** Download one laid-out static site through chrome.downloads. */
+/** Download one laid-out static site through chrome.downloads.
+ *
+ *  Acceptance is not completion. The blob URL stays alive until Chrome reports
+ *  the write finished or failed, then it is revoked. A refused or unfinished
+ *  write makes the whole call unsuccessful so the popup cannot call it saved.
+ */
 async function downloadStaticSite(laid) {
   var files = (laid && laid.files) || [];
+  var failed = [];
+  var canObserveCompletion = typeof chrome !== 'undefined' &&
+    chrome.downloads && chrome.downloads.onChanged;
   for (var i = 0; i < files.length; i++) {
     var entry = files[i];
     var bytes = typeof entry.body === 'string' ? textToUtf8Bytes(entry.body) : entry.body;
     var handle = bytesToDownloadUrl(bytes, entry.mime || 'application/octet-stream');
     var leaf = String(entry.path).split('/').pop();
     try {
-      await downloadOne(handle.url, leaf, 'chatgpt-export/html/' + entry.path, MD_WRITE_TIMEOUT_MS);
+      var write = await downloadOne(handle.url, leaf, 'chatgpt-export/html/' + entry.path, MD_WRITE_TIMEOUT_MS);
+      if (write.ok && canObserveCompletion) {
+        var written = await waitForDownloadComplete(write.downloadId, MD_WRITE_TIMEOUT_MS);
+        if (!written) {
+          write.ok = false;
+          write.error = write.error || 'the write did not complete';
+        }
+      }
+      if (!write.ok) failed.push((entry.path || leaf) + ': ' + (write.error || 'download rejected'));
     } finally {
       handle.revoke(handle.url);
     }
   }
+  return {
+    ok: failed.length === 0,
+    error: failed.length ? failed.join('; ') : null,
+    written: files.length - failed.length,
+    failed: failed.length,
+  };
+}
+
+/** Conversation id from a chat URL path. Titles collide; this id does not. */
+function conversationIdFromLocation(url) {
+  var match = String(url || '').match(/\/c\/([A-Za-z0-9-]+)/);
+  return match ? match[1] : null;
 }
 
 /** Hold the run without losing it. A long export over a network the extension
@@ -1618,10 +1652,12 @@ btn.addEventListener('click', async () => {
       // end of the list. Otherwise the run covered the conversations it could
       // see, which may be a subset — and the user cannot notice a conversation
       // that was never listed, so the wording has to carry the doubt.
-      var summary = batchResult.listComplete
-        ? '✓ Batch export complete: ' + batchResult.exported + ' saved'
-        : '⚠ Exported ' + batchResult.exported + ' of the conversations the sidebar listed'
-          + ' — the full list could not be confirmed';
+      var summary = batchResult.htmlOk === false
+        ? 'HTML site not saved'
+        : batchResult.listComplete
+          ? '✓ Batch export complete: ' + batchResult.exported + ' saved'
+          : '⚠ Exported ' + batchResult.exported + ' of the conversations the sidebar listed'
+            + ' — the full list could not be confirmed';
       if (batchResult.skipped > 0) {
         // Never "already exported" on an unconfirmed list: that phrasing reads as
         // verified coverage and argues the user out of checking.
@@ -1649,7 +1685,10 @@ btn.addEventListener('click', async () => {
       }
       if (batchResult.zipName) summary += '\nZip: ' + batchResult.zipName;
       if (batchResult.errors.length) summary += '\nErrors: ' + batchResult.errors.join('; ');
-      showStatus(batchResult.listComplete ? 'success' : 'warning', summary);
+      showStatus(
+        batchResult.htmlOk === false ? 'error' : (batchResult.listComplete ? 'success' : 'warning'),
+        summary
+      );
       return;
     }
 
@@ -1711,6 +1750,7 @@ btn.addEventListener('click', async () => {
       if (chkHtml && chkHtml.checked && typeof sessionFromExport === 'function' && typeof layoutStaticSite === 'function') {
         var projectMatch = String(tab.url || '').match(/\/g\/(g-p-[A-Za-z0-9]+)\//);
         var htmlSession = sessionFromExport({
+          id: conversationIdFromLocation(tab.url),
           title: result.title,
           slug: result.slug,
           projectId: projectMatch ? projectMatch[1] : null,
@@ -1723,7 +1763,11 @@ btn.addEventListener('click', async () => {
           slug: result.slug,
           partial: result.partial || (saved.dlErrors && saved.dlErrors.length > 0),
         });
-        await downloadStaticSite(layoutStaticSite([htmlSession]));
+        var htmlWithFiles = await downloadStaticSite(layoutStaticSite([htmlSession]));
+        if (!htmlWithFiles.ok) {
+          showStatus('error', saveStatus.text + '\nHTML site not saved: ' +
+            (htmlWithFiles.error || 'the write did not complete'));
+        }
       }
 
       // NOT copied to the clipboard. With the save option on, the file is the
@@ -1740,10 +1784,17 @@ btn.addEventListener('click', async () => {
 
     if (chkHtml && chkHtml.checked && typeof sessionFromExport === 'function' && typeof layoutStaticSite === 'function') {
       var htmlOnly = sessionFromExport({
+        id: conversationIdFromLocation(tab.url),
         title: result.title,
         slug: result.slug,
       }, { md: md, title: result.title, slug: result.slug, partial: result.partial });
-      await downloadStaticSite(layoutStaticSite([htmlOnly]));
+      var htmlWrite = await downloadStaticSite(layoutStaticSite([htmlOnly]));
+      if (!htmlWrite.ok) {
+        showStatus('error', 'HTML site not saved: ' + (htmlWrite.error || 'the write did not complete'));
+        btn.disabled = false;
+        btn.textContent = 'Copy as Markdown';
+        return;
+      }
       var htmlPartialSuffix = (result.partial || htmlOnly.partial) ? ' (partial export)' : '';
       showStatus('success', '✓ Saved HTML site' + htmlPartialSuffix + ' ' + result.lines + ' lines · ' + result.words + ' words');
       btn.disabled = false;
@@ -1793,6 +1844,7 @@ if (typeof module !== 'undefined' && module.exports) {
     stampsInPaths: stampsInPaths,
     conversationFolderPath: conversationFolderPath,
     downloadOne: downloadOne,
+    downloadStaticSite: downloadStaticSite,
     saveConversationExport: saveConversationExport,
     buildSaveStatus: buildSaveStatus,
     syncBatchOptions: syncBatchOptions,

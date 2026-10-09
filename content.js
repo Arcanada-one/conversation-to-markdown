@@ -4006,6 +4006,7 @@ function exportActiveSessionHtml(doc, options) {
     if (bound.partial) partial = true;
   }
   var session = {
+    id: opts.id || null,
     title: opts.title || 'Conversation',
     slug: opts.slug || 'conversation',
     projectId: opts.projectId || null,

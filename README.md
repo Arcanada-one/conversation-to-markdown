@@ -76,10 +76,13 @@ browser memory. Cancelled or interrupted runs keep files already downloaded.
 
 Check **Save a static HTML site** to write an HTML page for the active
 conversation, plus an index. Chats that belong to a project are grouped under
-that project. Chats with no project stay in their own folders. Files the export
-retrieved sit beside the chat page and are linked with relative URLs. A file
-that could not be retrieved is named on the page, and that export stays
-incomplete. The pages escape conversation text.
+that project. Chats with no project stay in their own folders. Two chats with
+the same title each get a directory ending in `~` and the conversation id, so
+one does not replace the other. Files the export retrieved sit beside the chat
+page and are linked with relative URLs. A file that could not be retrieved is
+named on the page, and that export stays incomplete. The pages escape
+conversation text. A download Chrome accepts but does not finish is reported
+as not saved.
 
 The extension does not serve those files. After the folder is on disk, a
 separate read-only server can host it on this computer:

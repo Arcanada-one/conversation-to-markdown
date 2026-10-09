@@ -286,8 +286,19 @@ function renderSessionHtml(session) {
   return { html: html, title: title, partial: !!(session.partial || missing.length) };
 }
 
+/** Conversation id suffix. Same character as popup.js ID_MARKER: titles are
+ *  slugified without it, so two chats named Notes cannot share a directory. */
+function conversationIdSegment(session) {
+  var raw = session && session.id ? String(session.id) : '';
+  var id = raw.replace(/[\\/:*?"<>|~\u0000-\u001f]/g, '');
+  return id || null;
+}
+
 function chatSegment(session) {
-  return slugSegment(session.slug) || slugSegment(session.title) || slugSegment(session.id) || 'chat';
+  var base = slugSegment(session.slug) || slugSegment(session.title) || 'chat';
+  var id = conversationIdSegment(session);
+  if (!id) return base;
+  return base + '~' + id;
 }
 
 function projectSegment(session) {

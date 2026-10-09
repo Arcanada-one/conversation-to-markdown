@@ -43,7 +43,7 @@
       "title": "C2M 1.6.9 — verify installed extension against live ChatGPT",
       "projectId": "08a50f9a-a735-4605-91ce-ce4a41193fbb",
       "parentId": null,
-      "status": "todo"
+      "status": "done"
     },
     {
       "key": "store",
@@ -51,7 +51,7 @@
       "title": "C2M 1.6.9 — publish Chrome Web Store update and verify store copy",
       "projectId": "08a50f9a-a735-4605-91ce-ce4a41193fbb",
       "parentId": null,
-      "status": "todo"
+      "status": "in_progress"
     }
   ],
   "edges": [
@@ -121,6 +121,18 @@
       "content_type": "application/zip"
     },
     {
+      "task_id": "30177e85-a2f9-4c67-8fe6-b171d0885921",
+      "uri": "https://raw.githubusercontent.com/Arcanada-one/conversation-to-markdown/04b8d0f2a4629ffb23712c542b727d392b0959bc/docs/reference/releases/1.6.9-closeout.md",
+      "sha256": "5a50a11e2cfd417fc3c5c33851a403b26d62bd227766c17a6c085c53dd4ea904",
+      "content_type": "text/markdown"
+    },
+    {
+      "task_id": "30177e85-a2f9-4c67-8fe6-b171d0885921",
+      "uri": "https://raw.githubusercontent.com/Arcanada-one/conversation-to-markdown/04b8d0f2a4629ffb23712c542b727d392b0959bc/docs/reference/releases/1.6.9-work-item-graph.json",
+      "sha256": "a7f76ff216a7fa818b08c123ad7f9fbee0e9f878747fe2a9232b62e65792be26",
+      "content_type": "application/json"
+    },
+    {
       "task_id": "e5e220aa-85c6-441f-bdc1-124a74baca3d",
       "uri": "https://github.com/Arcanada-one/conversation-to-markdown/raw/581c3a016df4e34055527b0040a3bc5d2f7985bf/docs/reference/releases/1.6.9-closeout.md",
       "sha256": "5649bd3f81c43adc03645a5035b9cf36288630ff9be04a9a0494406f0905e8c9",
@@ -131,6 +143,18 @@
       "uri": "https://github.com/Arcanada-one/conversation-to-markdown/releases/download/v1.6.9/conversation-to-markdown-v1.6.9.zip",
       "sha256": "ec0efd0a8567109be5cabebe3f541fdafcba19746a585facd82003fa8f1c6ee8",
       "content_type": "application/zip"
+    },
+    {
+      "task_id": "e5e220aa-85c6-441f-bdc1-124a74baca3d",
+      "uri": "https://raw.githubusercontent.com/Arcanada-one/conversation-to-markdown/04b8d0f2a4629ffb23712c542b727d392b0959bc/docs/reference/releases/1.6.9-closeout.md",
+      "sha256": "5a50a11e2cfd417fc3c5c33851a403b26d62bd227766c17a6c085c53dd4ea904",
+      "content_type": "text/markdown"
+    },
+    {
+      "task_id": "e5e220aa-85c6-441f-bdc1-124a74baca3d",
+      "uri": "https://raw.githubusercontent.com/Arcanada-one/conversation-to-markdown/04b8d0f2a4629ffb23712c542b727d392b0959bc/docs/reference/releases/1.6.9-work-item-graph.json",
+      "sha256": "a7f76ff216a7fa818b08c123ad7f9fbee0e9f878747fe2a9232b62e65792be26",
+      "content_type": "application/json"
     },
     {
       "task_id": "70142ab1-3dad-46f8-ab10-385c49890832",
@@ -145,6 +169,18 @@
       "content_type": "application/zip"
     },
     {
+      "task_id": "70142ab1-3dad-46f8-ab10-385c49890832",
+      "uri": "https://raw.githubusercontent.com/Arcanada-one/conversation-to-markdown/04b8d0f2a4629ffb23712c542b727d392b0959bc/docs/reference/releases/1.6.9-closeout.md",
+      "sha256": "5a50a11e2cfd417fc3c5c33851a403b26d62bd227766c17a6c085c53dd4ea904",
+      "content_type": "text/markdown"
+    },
+    {
+      "task_id": "70142ab1-3dad-46f8-ab10-385c49890832",
+      "uri": "https://raw.githubusercontent.com/Arcanada-one/conversation-to-markdown/04b8d0f2a4629ffb23712c542b727d392b0959bc/docs/reference/releases/1.6.9-work-item-graph.json",
+      "sha256": "a7f76ff216a7fa818b08c123ad7f9fbee0e9f878747fe2a9232b62e65792be26",
+      "content_type": "application/json"
+    },
+    {
       "task_id": "69c2645d-bc07-4b67-8856-acf13024d5ed",
       "uri": "https://github.com/Arcanada-one/conversation-to-markdown/raw/581c3a016df4e34055527b0040a3bc5d2f7985bf/docs/reference/releases/1.6.9-closeout.md",
       "sha256": "5649bd3f81c43adc03645a5035b9cf36288630ff9be04a9a0494406f0905e8c9",
@@ -155,6 +191,42 @@
       "uri": "https://github.com/Arcanada-one/conversation-to-markdown/releases/download/v1.6.9/conversation-to-markdown-v1.6.9.zip",
       "sha256": "ec0efd0a8567109be5cabebe3f541fdafcba19746a585facd82003fa8f1c6ee8",
       "content_type": "application/zip"
+    },
+    {
+      "task_id": "69c2645d-bc07-4b67-8856-acf13024d5ed",
+      "uri": "https://raw.githubusercontent.com/Arcanada-one/conversation-to-markdown/04b8d0f2a4629ffb23712c542b727d392b0959bc/docs/reference/releases/1.6.9-closeout.md",
+      "sha256": "5a50a11e2cfd417fc3c5c33851a403b26d62bd227766c17a6c085c53dd4ea904",
+      "content_type": "text/markdown"
+    },
+    {
+      "task_id": "69c2645d-bc07-4b67-8856-acf13024d5ed",
+      "uri": "https://raw.githubusercontent.com/Arcanada-one/conversation-to-markdown/04b8d0f2a4629ffb23712c542b727d392b0959bc/docs/reference/releases/1.6.9-work-item-graph.json",
+      "sha256": "a7f76ff216a7fa818b08c123ad7f9fbee0e9f878747fe2a9232b62e65792be26",
+      "content_type": "application/json"
+    },
+    {
+      "task_id": "82066889-4b6e-4c33-b878-43c9fbeae7b3",
+      "uri": "https://raw.githubusercontent.com/Arcanada-one/conversation-to-markdown/04b8d0f2a4629ffb23712c542b727d392b0959bc/docs/reference/releases/1.6.9-closeout.md",
+      "sha256": "5a50a11e2cfd417fc3c5c33851a403b26d62bd227766c17a6c085c53dd4ea904",
+      "content_type": "text/markdown"
+    },
+    {
+      "task_id": "82066889-4b6e-4c33-b878-43c9fbeae7b3",
+      "uri": "https://raw.githubusercontent.com/Arcanada-one/conversation-to-markdown/04b8d0f2a4629ffb23712c542b727d392b0959bc/docs/reference/releases/1.6.9-work-item-graph.json",
+      "sha256": "a7f76ff216a7fa818b08c123ad7f9fbee0e9f878747fe2a9232b62e65792be26",
+      "content_type": "application/json"
+    },
+    {
+      "task_id": "40b7bd9a-63a8-4e94-acd5-b0c6d7e4265d",
+      "uri": "https://raw.githubusercontent.com/Arcanada-one/conversation-to-markdown/04b8d0f2a4629ffb23712c542b727d392b0959bc/docs/reference/releases/1.6.9-closeout.md",
+      "sha256": "5a50a11e2cfd417fc3c5c33851a403b26d62bd227766c17a6c085c53dd4ea904",
+      "content_type": "text/markdown"
+    },
+    {
+      "task_id": "40b7bd9a-63a8-4e94-acd5-b0c6d7e4265d",
+      "uri": "https://raw.githubusercontent.com/Arcanada-one/conversation-to-markdown/04b8d0f2a4629ffb23712c542b727d392b0959bc/docs/reference/releases/1.6.9-work-item-graph.json",
+      "sha256": "a7f76ff216a7fa818b08c123ad7f9fbee0e9f878747fe2a9232b62e65792be26",
+      "content_type": "application/json"
     }
   ],
   "readiness": {
@@ -191,19 +263,8 @@
     "store": {
       "taskId": "40b7bd9a-63a8-4e94-acd5-b0c6d7e4265d",
       "dependencyCount": 1,
-      "blockedBy": [
-        {
-          "id": "2923d17e-0888-4484-a91e-193d965593d3",
-          "type": "depends_on",
-          "direction": "outgoing",
-          "fromTaskId": "40b7bd9a-63a8-4e94-acd5-b0c6d7e4265d",
-          "toTaskId": "82066889-4b6e-4c33-b878-43c9fbeae7b3",
-          "otherTaskId": "82066889-4b6e-4c33-b878-43c9fbeae7b3",
-          "otherTaskTitle": "C2M 1.6.9 — verify installed extension against live ChatGPT",
-          "otherTaskStatus": "todo"
-        }
-      ],
-      "ready": false
+      "blockedBy": [],
+      "ready": true
     }
   },
   "verification": {
@@ -213,8 +274,8 @@
       "failed": 0
     },
     "mutants_killed": 3,
-    "installed_extension": "not_measured",
-    "store_submission_publication": "not_measured",
+    "installed_extension": "operator_reported_pass",
+    "store_submission_publication": "operator_reported_submitted; Google approval and public availability not_measured",
     "native_KC2_runtime_admission": "not_measured"
   },
   "artifacts": [
@@ -289,5 +350,11 @@
       "artifactId": "package",
       "type": "publishes"
     }
-  ]
+  ],
+  "operator_update": {
+    "reported_date": "2026-10-09",
+    "installed_extension": "Operator reports checking the extension and normal operation. Per-scenario results and a tested-package checksum were not supplied.",
+    "store": "Operator reports submission for publication and is waiting for Google approval.",
+    "provenance": "Operator message in this task; not an independent browser/dashboard probe."
+  }
 }

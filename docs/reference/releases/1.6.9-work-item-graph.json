@@ -1,0 +1,293 @@
+{
+  "schema": "C2MWorkItemGraph/v1",
+  "captured_date": "2026-10-09",
+  "repository": "Arcanada-one/conversation-to-markdown",
+  "release": "1.6.9",
+  "registration": "retrospective; execution history records current registration/closeout, not historical source execution timestamps",
+  "tasks": [
+    {
+      "key": "root",
+      "id": "30177e85-a2f9-4c67-8fe6-b171d0885921",
+      "title": "C2M 1.6.9 — generated-file export repair, release and documented closeout",
+      "projectId": "08a50f9a-a735-4605-91ce-ce4a41193fbb",
+      "parentId": null,
+      "status": "done"
+    },
+    {
+      "key": "source",
+      "id": "e5e220aa-85c6-441f-bdc1-124a74baca3d",
+      "title": "C2M 1.6.9 — repair modern generated-file discovery",
+      "projectId": "08a50f9a-a735-4605-91ce-ce4a41193fbb",
+      "parentId": "30177e85-a2f9-4c67-8fe6-b171d0885921",
+      "status": "done"
+    },
+    {
+      "key": "release",
+      "id": "70142ab1-3dad-46f8-ab10-385c49890832",
+      "title": "C2M 1.6.9 — publish exact GitHub release package",
+      "projectId": "08a50f9a-a735-4605-91ce-ce4a41193fbb",
+      "parentId": "30177e85-a2f9-4c67-8fe6-b171d0885921",
+      "status": "done"
+    },
+    {
+      "key": "docs",
+      "id": "69c2645d-bc07-4b67-8856-acf13024d5ed",
+      "title": "C2M 1.6.9 — archive evidence and prepare Store listing update",
+      "projectId": "08a50f9a-a735-4605-91ce-ce4a41193fbb",
+      "parentId": "30177e85-a2f9-4c67-8fe6-b171d0885921",
+      "status": "done"
+    },
+    {
+      "key": "qa",
+      "id": "82066889-4b6e-4c33-b878-43c9fbeae7b3",
+      "title": "C2M 1.6.9 — verify installed extension against live ChatGPT",
+      "projectId": "08a50f9a-a735-4605-91ce-ce4a41193fbb",
+      "parentId": null,
+      "status": "todo"
+    },
+    {
+      "key": "store",
+      "id": "40b7bd9a-63a8-4e94-acd5-b0c6d7e4265d",
+      "title": "C2M 1.6.9 — publish Chrome Web Store update and verify store copy",
+      "projectId": "08a50f9a-a735-4605-91ce-ce4a41193fbb",
+      "parentId": null,
+      "status": "todo"
+    }
+  ],
+  "edges": [
+    {
+      "id": "d9a439b6-63d1-4518-92e1-944da523d85e",
+      "fromTaskId": "30177e85-a2f9-4c67-8fe6-b171d0885921",
+      "toTaskId": "b1b892fd-7bfb-4135-a93a-dafce889c38d",
+      "type": "related_to"
+    },
+    {
+      "from": "30177e85-a2f9-4c67-8fe6-b171d0885921",
+      "to": "e5e220aa-85c6-441f-bdc1-124a74baca3d",
+      "type": "parent_of"
+    },
+    {
+      "from": "30177e85-a2f9-4c67-8fe6-b171d0885921",
+      "to": "70142ab1-3dad-46f8-ab10-385c49890832",
+      "type": "parent_of"
+    },
+    {
+      "id": "2a1c6e92-28d7-41de-a45d-67d31263f810",
+      "fromTaskId": "70142ab1-3dad-46f8-ab10-385c49890832",
+      "toTaskId": "e5e220aa-85c6-441f-bdc1-124a74baca3d",
+      "type": "depends_on"
+    },
+    {
+      "from": "30177e85-a2f9-4c67-8fe6-b171d0885921",
+      "to": "69c2645d-bc07-4b67-8856-acf13024d5ed",
+      "type": "parent_of"
+    },
+    {
+      "id": "b0f4e6e8-ed8f-49d5-b30a-e0320d92c6e3",
+      "fromTaskId": "69c2645d-bc07-4b67-8856-acf13024d5ed",
+      "toTaskId": "70142ab1-3dad-46f8-ab10-385c49890832",
+      "type": "depends_on"
+    },
+    {
+      "id": "34d0f5ee-f93f-4e9c-bdc4-1c05b3872df7",
+      "fromTaskId": "69c2645d-bc07-4b67-8856-acf13024d5ed",
+      "toTaskId": "6ff3cbbc-9de2-4b6c-b3d9-bad75badf8f2",
+      "type": "related_to"
+    },
+    {
+      "id": "c11453b2-60b0-4581-8810-d25687472e60",
+      "fromTaskId": "82066889-4b6e-4c33-b878-43c9fbeae7b3",
+      "toTaskId": "30177e85-a2f9-4c67-8fe6-b171d0885921",
+      "type": "depends_on"
+    },
+    {
+      "id": "2923d17e-0888-4484-a91e-193d965593d3",
+      "fromTaskId": "40b7bd9a-63a8-4e94-acd5-b0c6d7e4265d",
+      "toTaskId": "82066889-4b6e-4c33-b878-43c9fbeae7b3",
+      "type": "depends_on"
+    }
+  ],
+  "evidence": [
+    {
+      "task_id": "30177e85-a2f9-4c67-8fe6-b171d0885921",
+      "uri": "https://github.com/Arcanada-one/conversation-to-markdown/raw/581c3a016df4e34055527b0040a3bc5d2f7985bf/docs/reference/releases/1.6.9-closeout.md",
+      "sha256": "5649bd3f81c43adc03645a5035b9cf36288630ff9be04a9a0494406f0905e8c9",
+      "content_type": "text/markdown"
+    },
+    {
+      "task_id": "30177e85-a2f9-4c67-8fe6-b171d0885921",
+      "uri": "https://github.com/Arcanada-one/conversation-to-markdown/releases/download/v1.6.9/conversation-to-markdown-v1.6.9.zip",
+      "sha256": "ec0efd0a8567109be5cabebe3f541fdafcba19746a585facd82003fa8f1c6ee8",
+      "content_type": "application/zip"
+    },
+    {
+      "task_id": "e5e220aa-85c6-441f-bdc1-124a74baca3d",
+      "uri": "https://github.com/Arcanada-one/conversation-to-markdown/raw/581c3a016df4e34055527b0040a3bc5d2f7985bf/docs/reference/releases/1.6.9-closeout.md",
+      "sha256": "5649bd3f81c43adc03645a5035b9cf36288630ff9be04a9a0494406f0905e8c9",
+      "content_type": "text/markdown"
+    },
+    {
+      "task_id": "e5e220aa-85c6-441f-bdc1-124a74baca3d",
+      "uri": "https://github.com/Arcanada-one/conversation-to-markdown/releases/download/v1.6.9/conversation-to-markdown-v1.6.9.zip",
+      "sha256": "ec0efd0a8567109be5cabebe3f541fdafcba19746a585facd82003fa8f1c6ee8",
+      "content_type": "application/zip"
+    },
+    {
+      "task_id": "70142ab1-3dad-46f8-ab10-385c49890832",
+      "uri": "https://github.com/Arcanada-one/conversation-to-markdown/raw/581c3a016df4e34055527b0040a3bc5d2f7985bf/docs/reference/releases/1.6.9-closeout.md",
+      "sha256": "5649bd3f81c43adc03645a5035b9cf36288630ff9be04a9a0494406f0905e8c9",
+      "content_type": "text/markdown"
+    },
+    {
+      "task_id": "70142ab1-3dad-46f8-ab10-385c49890832",
+      "uri": "https://github.com/Arcanada-one/conversation-to-markdown/releases/download/v1.6.9/conversation-to-markdown-v1.6.9.zip",
+      "sha256": "ec0efd0a8567109be5cabebe3f541fdafcba19746a585facd82003fa8f1c6ee8",
+      "content_type": "application/zip"
+    },
+    {
+      "task_id": "69c2645d-bc07-4b67-8856-acf13024d5ed",
+      "uri": "https://github.com/Arcanada-one/conversation-to-markdown/raw/581c3a016df4e34055527b0040a3bc5d2f7985bf/docs/reference/releases/1.6.9-closeout.md",
+      "sha256": "5649bd3f81c43adc03645a5035b9cf36288630ff9be04a9a0494406f0905e8c9",
+      "content_type": "text/markdown"
+    },
+    {
+      "task_id": "69c2645d-bc07-4b67-8856-acf13024d5ed",
+      "uri": "https://github.com/Arcanada-one/conversation-to-markdown/releases/download/v1.6.9/conversation-to-markdown-v1.6.9.zip",
+      "sha256": "ec0efd0a8567109be5cabebe3f541fdafcba19746a585facd82003fa8f1c6ee8",
+      "content_type": "application/zip"
+    }
+  ],
+  "readiness": {
+    "root": {
+      "taskId": "30177e85-a2f9-4c67-8fe6-b171d0885921",
+      "dependencyCount": 2,
+      "blockedBy": [],
+      "ready": true
+    },
+    "source": {
+      "taskId": "e5e220aa-85c6-441f-bdc1-124a74baca3d",
+      "dependencyCount": 1,
+      "blockedBy": [],
+      "ready": true
+    },
+    "release": {
+      "taskId": "70142ab1-3dad-46f8-ab10-385c49890832",
+      "dependencyCount": 2,
+      "blockedBy": [],
+      "ready": true
+    },
+    "docs": {
+      "taskId": "69c2645d-bc07-4b67-8856-acf13024d5ed",
+      "dependencyCount": 2,
+      "blockedBy": [],
+      "ready": true
+    },
+    "qa": {
+      "taskId": "82066889-4b6e-4c33-b878-43c9fbeae7b3",
+      "dependencyCount": 2,
+      "blockedBy": [],
+      "ready": true
+    },
+    "store": {
+      "taskId": "40b7bd9a-63a8-4e94-acd5-b0c6d7e4265d",
+      "dependencyCount": 1,
+      "blockedBy": [
+        {
+          "id": "2923d17e-0888-4484-a91e-193d965593d3",
+          "type": "depends_on",
+          "direction": "outgoing",
+          "fromTaskId": "40b7bd9a-63a8-4e94-acd5-b0c6d7e4265d",
+          "toTaskId": "82066889-4b6e-4c33-b878-43c9fbeae7b3",
+          "otherTaskId": "82066889-4b6e-4c33-b878-43c9fbeae7b3",
+          "otherTaskTitle": "C2M 1.6.9 — verify installed extension against live ChatGPT",
+          "otherTaskStatus": "todo"
+        }
+      ],
+      "ready": false
+    }
+  },
+  "verification": {
+    "source_suite": {
+      "passed": 295,
+      "skipped": 1,
+      "failed": 0
+    },
+    "mutants_killed": 3,
+    "installed_extension": "not_measured",
+    "store_submission_publication": "not_measured",
+    "native_KC2_runtime_admission": "not_measured"
+  },
+  "artifacts": [
+    {
+      "id": "pr29",
+      "uri": "https://github.com/Arcanada-one/conversation-to-markdown/pull/29",
+      "commit": "d7778278ded4a413b70c0e38ab9d5483009cca31"
+    },
+    {
+      "id": "pr30",
+      "uri": "https://github.com/Arcanada-one/conversation-to-markdown/pull/30",
+      "commit": "a556af5262154959e236d83ddefb468dc21cc7f8"
+    },
+    {
+      "id": "pr31",
+      "uri": "https://github.com/Arcanada-one/conversation-to-markdown/pull/31",
+      "commit": "5a65b88c041913e941baaf07edc5b40a86cf6f3d"
+    },
+    {
+      "id": "pr32",
+      "uri": "https://github.com/Arcanada-one/conversation-to-markdown/pull/32",
+      "commit": "581c3a016df4e34055527b0040a3bc5d2f7985bf"
+    },
+    {
+      "id": "release",
+      "uri": "https://github.com/Arcanada-one/conversation-to-markdown/releases/tag/v1.6.9"
+    },
+    {
+      "id": "package",
+      "uri": "https://github.com/Arcanada-one/conversation-to-markdown/releases/download/v1.6.9/conversation-to-markdown-v1.6.9.zip",
+      "sha256": "ec0efd0a8567109be5cabebe3f541fdafcba19746a585facd82003fa8f1c6ee8"
+    }
+  ],
+  "artifact_edges": [
+    {
+      "taskId": "e5e220aa-85c6-441f-bdc1-124a74baca3d",
+      "artifactId": "pr29",
+      "type": "implemented_by"
+    },
+    {
+      "taskId": "70142ab1-3dad-46f8-ab10-385c49890832",
+      "artifactId": "pr30",
+      "type": "prepared_by"
+    },
+    {
+      "taskId": "70142ab1-3dad-46f8-ab10-385c49890832",
+      "artifactId": "release",
+      "type": "delivered_as"
+    },
+    {
+      "taskId": "70142ab1-3dad-46f8-ab10-385c49890832",
+      "artifactId": "package",
+      "type": "delivered_as"
+    },
+    {
+      "taskId": "69c2645d-bc07-4b67-8856-acf13024d5ed",
+      "artifactId": "pr31",
+      "type": "documented_by"
+    },
+    {
+      "taskId": "69c2645d-bc07-4b67-8856-acf13024d5ed",
+      "artifactId": "pr32",
+      "type": "corrected_by"
+    },
+    {
+      "taskId": "82066889-4b6e-4c33-b878-43c9fbeae7b3",
+      "artifactId": "package",
+      "type": "verifies"
+    },
+    {
+      "taskId": "40b7bd9a-63a8-4e94-acd5-b0c6d7e4265d",
+      "artifactId": "package",
+      "type": "publishes"
+    }
+  ]
+}

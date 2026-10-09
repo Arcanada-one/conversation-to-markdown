@@ -36,3 +36,4 @@ tests/sidebar.test.js
 tests/zip.test.js
 zip.js
 docs/reference/releases/1.6.9-closeout.md
+docs/reference/releases/1.6.9-work-item-graph.json

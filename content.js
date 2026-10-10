@@ -2918,6 +2918,30 @@ function knownProjectName(doc) {
   return null;
 }
 
+/** Project name shown on the unfurl row that contains this conversation link.
+ *  The row is a sibling of the link, so the search starts at the parent.
+ *  A link with no parent returns null. The name is capped because it becomes
+ *  a folder segment. */
+function projectTitleForConversationLink(link) {
+  var current = link;
+  var depth;
+  for (depth = 0; depth < 8 && current; depth++) {
+    current = current.parentElement;
+    if (!current || typeof current.querySelector !== 'function') continue;
+    var row = null;
+    try {
+      row = current.querySelector('[class*="project-unfurl-row"]');
+    } catch (_e) {
+      row = null;
+    }
+    if (!row) continue;
+    var label = String(row.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!label) continue;
+    return label.slice(0, 80);
+  }
+  return null;
+}
+
 /**
  * Enumerate the conversation links CURRENTLY MOUNTED in the sidebar.
  * Verified against production: matches both /c/{id} and the project-scoped
@@ -2958,6 +2982,7 @@ function listSidebarConversations(doc) {
       // reached through /c/{id} loses its project context.
       href: href,
       projectId: projectId,
+      projectTitle: projectTitleForConversationLink(link),
       title: title,
       slug: slugifyTitle(title) || id,
     });
@@ -3919,7 +3944,7 @@ async function getConversationMarkdown(settings) {
       words: md.split(/\s+/).filter(Boolean).length,
     };
   } catch (error) {
-    return { ok: false, error: error.message || String(error) };
+    return { ok: false, error: error.message || String(error), stack: (error && error.stack) || null };
   }
 }
 
@@ -3945,6 +3970,93 @@ async function fetchImageDataUrls(urls) {
     }
   }
   return results;
+}
+
+/** Turns mounted under one conversation root, legacy or app-shell. */
+function turnsOnRoot(root) {
+  if (!root || !root.querySelectorAll) return [];
+  var legacy = root.querySelectorAll('[data-turn-id]');
+  if (legacy && legacy.length) {
+    return orderCapturedTurns(Array.from(legacy).map(function(section, index) {
+      return extractTurn(section, index);
+    }).filter(Boolean));
+  }
+  var modern = modernMessageSections(root);
+  return orderCapturedTurns(modern.map(function(section, index) {
+    return extractTurn(section, index);
+  }).filter(Boolean));
+}
+
+function dedupeNamed(items, readName) {
+  var seen = {};
+  var out = [];
+  for (var i = 0; i < items.length; i++) {
+    var name = readName(items[i]);
+    if (!name || seen[name]) continue;
+    seen[name] = true;
+    out.push(items[i]);
+  }
+  return out;
+}
+
+/**
+ * Render the active conversation as a static HTML site.
+ *
+ * Inactive app-shell pages retained in the same document are not read.
+ * Pass outputDir to write the tree. Retrieved file bytes become siblings
+ * of the chat page; a file that did not arrive is named and the export
+ * stays incomplete.
+ */
+function exportActiveSessionHtml(doc, options) {
+  var opts = options || {};
+  var site = typeof require === 'function' ? require('./site.js') : null;
+  if (!site || typeof site.layoutStaticSite !== 'function') {
+    return { ok: false, error: 'HTML exporter is unavailable.' };
+  }
+  // Active app-shell page only. A retained conversation shares this document
+  // and must not be written into the static page.
+  var root = activeConversationRoot(doc);
+  if (!root) return { ok: false, error: 'Could not identify the active conversation. Try again after it loads.' };
+  var turns = turnsOnRoot(root);
+  if (!turns.length) return { ok: false, error: 'No conversation found on this page.' };
+  var saved = [];
+  var missing = [];
+  var partial = !!opts.partial;
+  var renderedTurns = [];
+  for (var i = 0; i < turns.length; i++) {
+    var bound = site.bindRetrievedFiles(turns[i].markdown, opts.retrieved || []);
+    renderedTurns.push({ role: turns[i].role, markdown: bound.markdown });
+    saved = saved.concat(bound.saved);
+    missing = missing.concat(bound.missing);
+    if (bound.partial) partial = true;
+  }
+  var session = {
+    id: opts.id || null,
+    title: opts.title || 'Conversation',
+    slug: opts.slug || 'conversation',
+    projectId: opts.projectId || null,
+    projectTitle: opts.projectTitle || null,
+    projectSlug: opts.projectSlug || null,
+    turns: renderedTurns,
+    saved: dedupeNamed(saved, function(file) { return file.name; }),
+    missing: dedupeNamed(missing, function(name) { return name; }),
+    partial: partial,
+  };
+  var laid = site.layoutStaticSite([session]);
+  if (opts.outputDir) site.writeStaticSite(opts.outputDir, laid);
+  var page = null;
+  for (var f = 0; f < laid.files.length; f++) {
+    if (laid.files[f].role === 'chat') page = laid.files[f];
+  }
+  return {
+    ok: true,
+    html: page ? page.body : '',
+    pagePath: page ? page.path : null,
+    partial: session.partial,
+    missing: session.missing,
+    files: laid.files,
+    title: session.title,
+  };
 }
 
 if (typeof module !== 'undefined' && module.exports) {
@@ -3989,6 +4101,8 @@ if (typeof module !== 'undefined' && module.exports) {
     fetchConversationMetadata: fetchConversationMetadata,
     findScrollContainer: findScrollContainer,
     getConversationMarkdown: getConversationMarkdown,
+    exportActiveSessionHtml: exportActiveSessionHtml,
+    turnsOnRoot: turnsOnRoot,
     largestCoverageGap: largestCoverageGap,
     nodeToMarkdown: nodeToMarkdown,
     orderCapturedTurns: orderCapturedTurns,

@@ -364,12 +364,59 @@ with the reason, so an incomplete export never looks complete.
 **Local rewriting.** A downloaded file's link in the Markdown is replaced by its
 local path, so the signed URL does not survive in the document.
 
+**Static HTML site.** *(fixture-only)* Checking **Save a static HTML site** writes
+the active conversation as static HTML: user and assistant text, links, code,
+tables, and images. Turns that exist only on an inactive retained app-shell page
+are left out. Text is escaped, so a message cannot become a script on the saved
+page. Retrieved files sit in that chat's directory and the page refers to them
+with relative URLs. A file that was not retrieved is named on the page, and that
+export stays incomplete. Ordinary web links stay links. A product photo on a
+host the extension is not allowed to fetch keeps its name and outbound address.
+Chrome accepting the HTML download is not completion: the file address stays
+open until the write finishes, and a refused or interrupted write is reported
+as not saved. Each page carries its own styles for turns, code, tables, and
+images, so opening the file shows a readable page without a separate stylesheet.
+The chat directory also contains `conversation.md`, the same text the page
+shows. The page has **Get in markdown**, a link to that file, and **Copy path
+to markdown version**, which copies the file's path inside the saved site.
+Opened from disk, that button copies the markdown file's own path instead.
+A saved attachment already named `conversation.md` keeps that name, and the
+note is written as `conversation-export.md`. The copy control is a fixed
+script; conversation text is not placed in it. Each code block has **Copy
+code**. The script reads the code from the page when the button is clicked
+and does not contain the conversation. The archive index has a search box,
+and a chat saved incompletely is marked on that index. An index written by a
+later run still links to chat pages already downloaded. A chat page is written
+when that chat finishes, before the next conversation is scanned. A conversation
+whose Markdown is already on disk is still written as HTML until
+`export-complete.txt` is in its folder. The status line names
+`chatgpt-export/html/` and the log file, and **Show export folder** reveals
+the download.
+
+**Execution log.** *(fixture-only)* A run that saves files writes
+`chatgpt-export/logs/<run>.json` and, for an HTML site, `export-log.json` in
+that folder. The file is overwritten as the run proceeds, so a crash keeps the
+last flush. It records the phase, the outcome, counts, the conversation id and
+title, and a sanitized error. It does not contain message text, signed URLs,
+or the session token. A clipboard-only copy does not write the file.
+
+**Project structure in the HTML archive.** *(fixture-only)* Chats that belong to
+a project are grouped under that project. Chats with no project stay in their
+own directories and remain addressable from the index. The index links to a
+project page, and that page links to each of its chats. Two chats with the same
+title do not share a directory: the folder name ends with `~` and that chat's
+id, the same boundary a batch Markdown filename uses, so the later chat does
+not replace the earlier one. The Markdown folder layout is unchanged.
+
 **Link hygiene.** Query parameters are stripped from page links; attachment URLs
 keep the parameters their host requires. Verify no `sig=`/`token=` reaches a
 saved page link.
 
 **Saving is enabled by default.** Each popup opens with the save option checked.
-Uncheck it for clipboard-only output. With the save option unticked, a plain copy makes **no
+Uncheck it for clipboard-only output. The action button names the choice:
+**Save Markdown** when that option is on, **Save HTML site** when only the
+static HTML option is on, **Save Markdown and HTML** when both are on, and
+**Copy as Markdown** when neither is on. With the save option unticked, a plain copy makes **no
 network request of any kind** — enforced by a test as well as by the privacy
 policy.
 
@@ -400,10 +447,14 @@ navigating mid-run: the .md must land.
 
 **Whole-Project export.** Every conversation in a Project exports in one run,
 each into its own folder, optionally bundled into one `.zip`. Choosing a batch
-switches file saving on and holds it there: an archive built without it contains
-signed, short-lived LINKS rather than files, so it looks complete on the day it
-runs and is empty hours later. Verify the save option is ticked and disabled the
-moment the batch box is ticked, and released when it is unticked.
+while the HTML option is off switches file saving on and holds it there: a
+markdown archive built without it contains signed, short-lived LINKS rather
+than files, so it looks complete on the day it runs and is empty hours later.
+Verify the save option is ticked and disabled the moment that batch box is
+ticked, and released when it is unticked. With **Save a static HTML site**
+ticked, the markdown option stays the user's. A refused markdown write must
+still leave that chat's HTML page: the page used to be recorded only after
+the markdown file succeeded, so the forced markdown path dropped it.
 
 **List completeness.** The virtualized sidebar is walked to the end and every row
 verified as observed with no gaps. An unconfirmed walk is reported as
@@ -484,8 +535,11 @@ one version number with no way to tell them apart from the browser.
 
 ## Privacy and permissions
 
-**Local only.** No telemetry, no analytics, no server, no third party. The
-developer has no access to conversations, files or clipboard.
+**Local only.** The extension sends no telemetry and no analytics, and it starts
+no server. A separate local server, `server.js`, can host the saved HTML folder
+on this computer. It listens on 127.0.0.1, answers GET and HEAD, and accepts no
+uploads. It does not contact ChatGPT or any third party. The developer has no
+access to conversations, files or clipboard.
 
 **Permission set.** Exactly `clipboardWrite`, `scripting`, `downloads`,
 `storage`. Locked by an exact-set test: an added permission must be a deliberate
@@ -506,7 +560,7 @@ match the CHANGELOG's top entry, and users must never see a gap. The last entry
 below is the version being shipped; a test checks this line against the CHANGELOG
 so a release cannot be added without revisiting this file.
 
-Version history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8, 1.6.0, 1.6.1, 1.6.2, 1.6.3, 1.6.4, 1.6.5, 1.6.6, 1.6.7, 1.6.8, 1.6.9
+Version history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8, 1.6.0, 1.6.1, 1.6.2, 1.6.3, 1.6.4, 1.6.5, 1.6.6, 1.6.7, 1.6.8, 1.6.9, 1.7.0
 
 The latest entry identifies the prepared local build; it does not imply Chrome
 Web Store publication. Attachment retrieval is unchanged in 1.6.0.

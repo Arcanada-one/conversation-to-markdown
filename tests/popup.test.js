@@ -99,8 +99,10 @@ function createPopupHarness(runScan, options = {}) {
       },
     };
   }
-  // The image checkbox only exists when a test opts into the download path.
-  const checkbox = options.downloadImages ? makeCheckbox(true) : null;
+  // The image checkbox only exists when a test opts into the download path,
+  // or when it needs to toggle that option without starting it on.
+  const checkbox = (options.downloadImages || options.imagesPresent) ? makeCheckbox(!!options.downloadImages) : null;
+  const htmlCheckbox = makeCheckbox(!!options.htmlChecked);
   const timestampCheckbox = makeCheckbox(!!options.useTimestamp);
   const batchCheckbox = makeCheckbox(!!options.batchMode);
   const batchWarning = makeWarning();
@@ -127,6 +129,7 @@ function createPopupHarness(runScan, options = {}) {
         if (id === 'btn-cancel') return cancelButton;
         if (id === 'btn-pause') return pauseButton;
         if (id === 'chk-images') return checkbox;
+        if (id === 'chk-html') return htmlCheckbox;
         if (id === 'chk-timestamp') return timestampCheckbox;
         if (id === 'chk-batch') return batchCheckbox;
         if (id === 'batch-warning') return batchWarning;
@@ -253,10 +256,39 @@ function createPopupHarness(runScan, options = {}) {
     downloads: () => downloads,
     batchCheckbox,
     imagesCheckbox: checkbox,
+    htmlCheckbox,
     batchWarningVisible: () => batchWarning.classList.contains('visible'),
     linksWarningVisible: () => linksWarning.classList.contains('visible'),
   };
 }
+
+test('the action button names an HTML-only export', async () => {
+  let seenWhileScanning = null;
+  const harness = createPopupHarness((options, button) => {
+    seenWhileScanning = button.textContent;
+    return [{ result: { ok: true, md: '# page', title: 'Page', slug: 'Page', lines: 1, words: 1 } }];
+  }, { imagesPresent: true });
+
+  // Positive control: markdown saving is a different label, so "Save HTML site"
+  // is not the only string the button can show.
+  assert.equal(harness.button.textContent, 'Copy as Markdown');
+  harness.imagesCheckbox.checked = true;
+  harness.imagesCheckbox.dispatchChange();
+  assert.equal(harness.button.textContent, 'Save Markdown');
+
+  harness.htmlCheckbox.checked = true;
+  harness.htmlCheckbox.dispatchChange();
+  assert.equal(harness.button.textContent, 'Save Markdown and HTML');
+
+  harness.imagesCheckbox.checked = false;
+  harness.imagesCheckbox.dispatchChange();
+  assert.equal(harness.button.textContent, 'Save HTML site');
+
+  await harness.click();
+  assert.equal(seenWhileScanning, 'Scanning conversation…');
+  assert.equal(harness.button.disabled, false);
+  assert.equal(harness.button.textContent, 'Save HTML site');
+});
 
 test('ticking the batch forces file saving on, instead of warning about it', () => {
   // There used to be two caveats here, one of which warned that a batch without

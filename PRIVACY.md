@@ -2,7 +2,7 @@
 
 Conversation to Markdown processes conversation content locally in your browser.
 
-The extension's content script is present only on the two sites declared in the manifest: `https://chatgpt.com/*` and `https://chat.openai.com/*`. It begins extraction only after you press **Copy as Markdown** in the extension popup. During extraction, it reads the conversation DOM, temporarily scrolls the page so virtualized content can render, creates Markdown in memory, restores the starting scroll position, and delivers the finished result. Where it goes depends on the save option: ticked, it is written to a file in your Downloads folder and the clipboard is left alone; unticked, it is written to your clipboard and no file is created.
+The extension's content script is present only on the two sites declared in the manifest: `https://chatgpt.com/*` and `https://chat.openai.com/*`. It begins extraction only after you press the popup's action button. That button is labelled **Save Markdown**, **Save HTML site**, **Save Markdown and HTML**, or **Copy as Markdown**, matching the options under it. During extraction, it reads the conversation DOM, temporarily scrolls the page so virtualized content can render, creates Markdown in memory, restores the starting scroll position, and delivers the finished result. With **Save .md + files** ticked, Markdown and attachments are written to your Downloads folder and the clipboard is left alone. With **Save a static HTML site** ticked, the HTML pages are written under `chatgpt-export/html/`, and each chat folder also gets a `conversation.md` file. A button on that page copies the markdown file's path to the clipboard when you click it. The page does not send the path anywhere. With neither ticked, the Markdown is written to your clipboard and no file is created.
 
 Copying a conversation uses two permissions:
 
@@ -36,7 +36,7 @@ hostnames (without paths or query strings). This diagnostic line contains no
 URLs, headers, response bodies or session tokens. Already resolved file links
 are preserved separately, under the signed-link handling described below.
 
-This lookup happens **only** when the save checkbox is ticked; the exporter does not click file buttons. With saving unchecked, **Copy as Markdown** reads the page and nothing more — the extension makes no direct network requests and clicks no file buttons (ChatGPT itself may load messages in response to scrolling), and both are enforced by tests in the repository, not only by this document.
+This lookup happens **only** when the save checkbox is ticked; the exporter does not click file buttons. With saving unchecked, the run reads the page and does not request attachment bytes — the extension makes no direct network requests and clicks no file buttons (ChatGPT itself may load messages in response to scrolling), and both are enforced by tests in the repository, not only by this document. The button in that mode reads **Copy as Markdown**, or **Save HTML site** when only the HTML option is ticked.
 
 ## Exporting a whole Project
 
@@ -70,6 +70,23 @@ From version 1.3.0 the extension also records its most recent failure in the sam
 
 This exists because earlier versions recorded nothing at all: a failure part-way through a long export left the user with a message that vanished with the popup and no way to find out what happened.
 
+## The execution log
+
+A run that saves Markdown or HTML also writes a log file under
+`chatgpt-export/logs/`, and an HTML export copies it to `export-log.json` in
+the HTML folder. The file is there so a failed or partial export can be
+inspected after the popup has closed. It records the extension version, the
+options used, the phase, the outcome, numeric counts, the conversation id,
+the conversation title, and a sanitized error message and stack.
+
+It does not contain message text, attachment bytes, signed URLs, request
+headers, or the session token. Web addresses and token-like parameters are
+removed before the line is written. The same local-only rule as the export
+index applies: the file stays on this computer, it is not sent anywhere, and
+the developer has no access to it. A clipboard-only copy does not write it.
+Closing the popup can still lose the lines that were not flushed yet; each
+finished conversation flushes the log so the lines before a crash remain.
+
 ## The zip archive
 
 When a batch export is asked to produce a single archive, the `.zip` is built **in the
@@ -81,8 +98,9 @@ the export already wrote to your Downloads folder.
 ## What the extension never does
 
 - collects no telemetry or analytics;
-- stores no conversation content or user identifiers;
-- operates no server or cloud service;
+- stores no conversation content in `chrome.storage`, and the execution log
+  described above does not copy message text;
+- operates no server and no cloud service of its own. The optional reader in `server.js` is a separate program you start on this computer. It only reads the HTML folder already saved here, listens on 127.0.0.1, and does not upload files or contact ChatGPT;
 - sends conversation content to no third party;
 - does not sell or share data; and
 - gives the developer no access to your conversations, files, or clipboard.

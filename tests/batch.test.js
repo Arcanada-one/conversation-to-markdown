@@ -732,9 +732,13 @@ test('a rejected write is never counted as an exported conversation', async () =
 
   const { res, attempted } = await runBatchAgainstFakeChrome(conversations, rejectEverything);
 
-  assert.equal(attempted.length, 2, 'both writes must be attempted');
+  // The run also rewrites its execution log. Those downloads are not conversation
+  // writes, and counting them made a rejected note look like it had been retried.
+  const notes = attempted.filter((name) => String(name).endsWith('.md'));
+  assert.equal(notes.length, 2, 'both writes must be attempted');
   assert.equal(res.exported, 0, 'a rejected write must not count as exported');
-  assert.equal(res.errors.length, 2, 'each rejected write must be reported');
+  assert.ok(res.errors.some((entry) => /^One:/.test(entry)), JSON.stringify(res.errors));
+  assert.ok(res.errors.some((entry) => /^Two:/.test(entry)), JSON.stringify(res.errors));
 });
 
 test('an accepted write is still counted, so the guard is not blanket', async () => {
@@ -743,9 +747,14 @@ test('an accepted write is still counted, so the guard is not blanket', async ()
   const conversations = [
     { id: 'aaaaaaaa-1111', href: '/c/aaaaaaaa-1111', title: 'One', slug: 'One' },
   ];
-  const { res } = await runBatchAgainstFakeChrome(conversations, () => true);
+  const { res } = await runBatchAgainstFakeChrome(
+    conversations,
+    () => true,
+    {},
+    { downloadState: 'complete' },
+  );
   assert.equal(res.exported, 1);
-  assert.equal(res.errors.length, 0);
+  assert.equal(res.errors.length, 0, JSON.stringify(res.errors));
 });
 
 test('a truncated export is still repairable on the NEXT run', () => {
@@ -1709,4 +1718,46 @@ test('choosing a project batch turns file saving on and holds it there', async (
   batch.checked = false;
   popupUi.syncBatchOptions();
   assert.equal(images.disabled, false, 'the option stayed locked after the batch was cancelled');
+});
+
+test('an HTML batch does not lock markdown saving on', () => {
+  // The test above only builds chk-images and chk-batch. It never ticks
+  // chk-html and it never calls runBatchExport, so it stayed green while the
+  // lock forced every HTML batch onto the markdown writer. The HTML batch
+  // test calls runBatchExport itself with downloadImages false, which this
+  // checkbox refuses to produce. Both can pass while the screen cannot save
+  // the HTML site once Export all is ticked.
+  const images = { checked: false, disabled: false, listeners: {},
+    addEventListener(n, f) { this.listeners[n] = f; },
+    classList: { add() {}, remove() {}, toggle() {} } };
+  const batch = { checked: false, disabled: false, listeners: {},
+    addEventListener(n, f) { this.listeners[n] = f; },
+    classList: { add() {}, remove() {}, toggle() {} } };
+  const html = { checked: false, disabled: false, listeners: {},
+    addEventListener(n, f) { this.listeners[n] = f; },
+    classList: { add() {}, remove() {}, toggle() {} } };
+  const elements = { 'chk-images': images, 'chk-batch': batch, 'chk-html': html };
+  const popupUi = loadPopupExportsWithChrome({}, {
+    document: {
+      getElementById: (id) => elements[id] || ({
+        addEventListener() {}, disabled: false, textContent: '', checked: false,
+        classList: { add() {}, remove() {}, toggle() {} },
+      }),
+    },
+  });
+
+  // Positive control: with the HTML option off, the markdown lock still holds.
+  batch.checked = true;
+  html.checked = false;
+  popupUi.syncBatchOptions();
+  assert.equal(images.checked, true);
+  assert.equal(images.disabled, true);
+
+  html.checked = true;
+  html.listeners.change();
+  assert.equal(images.disabled, false, 'ticking the HTML option must release the markdown lock');
+  images.checked = false;
+  popupUi.syncBatchOptions();
+  assert.equal(images.checked, false, 'a later sync must not turn markdown saving back on');
+  assert.equal(images.disabled, false);
 });

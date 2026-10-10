@@ -2717,6 +2717,40 @@ test('lists conversations that live inside a Project', () => {
   assert.equal(listed[0].title, 'Перевод i18n JSON для сайта');
   assert.equal(listed[0].slug, 'Перевод-i18n-JSON-для-сайта');
   assert.equal(listed[1].projectId, null);
+  assert.equal(listed[0].projectTitle, null);
+  assert.equal(listed[1].projectTitle, null);
+});
+
+test('a project conversation takes its folder name from the project row', () => {
+  const projectId = 'g-p-6954db053ec481919faff2151c140cb6';
+  const row = { textContent: 'Qoople' };
+  const container = {
+    querySelector(selector) {
+      return String(selector).indexOf('project-unfurl-row') !== -1 ? row : null;
+    },
+  };
+  const link = {
+    getAttribute(name) {
+      if (name === 'href') return '/g/' + projectId + '/c/chat-1';
+      if (name === 'aria-label') return 'Spec';
+      return null;
+    },
+    querySelector: () => null,
+    textContent: 'Spec',
+    parentElement: container,
+  };
+  container.parentElement = null;
+  const doc = {
+    querySelectorAll(selector) {
+      if (String(selector).indexOf('/c/') === -1) return [];
+      return [link];
+    },
+  };
+  const listed = parser.listSidebarConversations(doc);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].projectId, projectId);
+  assert.equal(listed[0].projectTitle, 'Qoople');
+  assert.equal(listed[0].title, 'Spec');
 });
 
 test('waitForConversationReady resolves when message content mounts', async () => {

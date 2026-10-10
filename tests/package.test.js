@@ -75,6 +75,7 @@ test('the submission package builds when Info-ZIP is unavailable', (t) => {
       'manifest.json',
       'popup.html',
       'popup.js',
+      'site.js',
       'zip.js',
     ].sort());
   } finally {

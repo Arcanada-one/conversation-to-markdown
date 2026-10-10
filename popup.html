@@ -75,6 +75,19 @@
 
     #btn-cancel:hover { color: #e05252; border-color: #e0525266; }
     #btn-cancel.visible { display: block; }
+    #btn-show-folder {
+      display: none;
+      width: 100%;
+      margin-top: 8px;
+      padding: 9px 16px;
+      background: transparent;
+      color: #ddd;
+      border: 1px solid #3a3a3a;
+      border-radius: 10px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    #btn-show-folder.visible { display: block; }
     #btn-pause {
       display: none;
       width: 100%;
@@ -172,6 +185,7 @@
   <button id="btn-copy">Save Markdown</button>
   <button id="btn-pause">Pause</button>
   <button id="btn-cancel">Stop scanning</button>
+  <button id="btn-show-folder" type="button">Show export folder</button>
 
   <!-- "Re-export with a date-time stamp" was removed in 1.3.0: it changed the
        FILENAME and nothing else. Every export is stamped now. -->

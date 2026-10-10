@@ -382,7 +382,23 @@ to markdown version**, which copies the file's path inside the saved site.
 Opened from disk, that button copies the markdown file's own path instead.
 A saved attachment already named `conversation.md` keeps that name, and the
 note is written as `conversation-export.md`. The copy control is a fixed
-script; conversation text is not placed in it.
+script; conversation text is not placed in it. Each code block has **Copy
+code**. The script reads the code from the page when the button is clicked
+and does not contain the conversation. The archive index has a search box,
+and a chat saved incompletely is marked on that index. An index written by a
+later run still links to chat pages already downloaded. A chat page is written
+when that chat finishes, before the next conversation is scanned. A conversation
+whose Markdown is already on disk is still written as HTML until
+`export-complete.txt` is in its folder. The status line names
+`chatgpt-export/html/` and the log file, and **Show export folder** reveals
+the download.
+
+**Execution log.** *(fixture-only)* A run that saves files writes
+`chatgpt-export/logs/<run>.json` and, for an HTML site, `export-log.json` in
+that folder. The file is overwritten as the run proceeds, so a crash keeps the
+last flush. It records the phase, the outcome, counts, the conversation id and
+title, and a sanitized error. It does not contain message text, signed URLs,
+or the session token. A clipboard-only copy does not write the file.
 
 **Project structure in the HTML archive.** *(fixture-only)* Chats that belong to
 a project are grouped under that project. Chats with no project stay in their

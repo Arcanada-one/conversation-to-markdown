@@ -732,9 +732,13 @@ test('a rejected write is never counted as an exported conversation', async () =
 
   const { res, attempted } = await runBatchAgainstFakeChrome(conversations, rejectEverything);
 
-  assert.equal(attempted.length, 2, 'both writes must be attempted');
+  // The run also rewrites its execution log. Those downloads are not conversation
+  // writes, and counting them made a rejected note look like it had been retried.
+  const notes = attempted.filter((name) => String(name).endsWith('.md'));
+  assert.equal(notes.length, 2, 'both writes must be attempted');
   assert.equal(res.exported, 0, 'a rejected write must not count as exported');
-  assert.equal(res.errors.length, 2, 'each rejected write must be reported');
+  assert.ok(res.errors.some((entry) => /^One:/.test(entry)), JSON.stringify(res.errors));
+  assert.ok(res.errors.some((entry) => /^Two:/.test(entry)), JSON.stringify(res.errors));
 });
 
 test('an accepted write is still counted, so the guard is not blanket', async () => {
@@ -743,9 +747,14 @@ test('an accepted write is still counted, so the guard is not blanket', async ()
   const conversations = [
     { id: 'aaaaaaaa-1111', href: '/c/aaaaaaaa-1111', title: 'One', slug: 'One' },
   ];
-  const { res } = await runBatchAgainstFakeChrome(conversations, () => true);
+  const { res } = await runBatchAgainstFakeChrome(
+    conversations,
+    () => true,
+    {},
+    { downloadState: 'complete' },
+  );
   assert.equal(res.exported, 1);
-  assert.equal(res.errors.length, 0);
+  assert.equal(res.errors.length, 0, JSON.stringify(res.errors));
 });
 
 test('a truncated export is still repairable on the NEXT run', () => {

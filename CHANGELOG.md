@@ -28,9 +28,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `server.js` is a separate read-only reader for a saved HTML folder. It
   listens on 127.0.0.1 and answers GET and HEAD. It is not part of the Chrome
   package, and the extension does not start it.
+- Each run that saves files also writes `chatgpt-export/logs/<run>.json`. The
+  log records phases, outcomes, counts, and sanitized errors. It is rewritten
+  as the run proceeds. It does not contain message text, signed URLs, or the
+  session token.
+- The HTML index keeps chats already saved in an earlier run. A chat page is
+  written when that chat finishes. The index can be searched, and an
+  incomplete chat is marked. Code blocks have **Copy code**.
+- **Show export folder** reveals the download in the file manager. The status
+  line names `chatgpt-export/html/` and the log file.
 
 ### Fixed
 
+- A conversation already saved as Markdown is still exported as HTML when its
+  HTML page is not complete. A later HTML export does not replace the archive
+  index with only the chats from that run.
 - A download Chrome accepts is not treated as finished. The HTML file address
   stays open until the write completes, and a refused or interrupted write is
   reported as not saved.
@@ -44,10 +56,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read-only server. A live walk of the new pages against chatgpt.com is still
   the release checklist in `FEATURES.md`; those items are marked fixture-only
   until that walk is done.
-- The Chrome Web Store listing was last reported as 1.6.8 on 2026-10-09.
-  Version 1.6.9 was published on GitHub and was not recorded as submitted.
-  Version 1.7.0 has not been submitted. The store page could not be read from
-  this session because it redirects to a consent wall.
+- On 2026-10-09 the operator reported submitting 1.6.9 for Store publication,
+  with Google approval still pending. Version 1.7.0 has not been submitted.
+  The store page could not be read from this session because it redirects to
+  a consent wall.
 
 ## [1.6.9] — 2026-10-09
 

@@ -90,6 +90,17 @@ copies its path: the path inside the saved site, or the file's own path when
 the page was opened from disk. A download Chrome accepts but does not finish is reported
 as not saved.
 
+The index lists chats from this run and from earlier HTML downloads, marks an
+incomplete chat, and has a search box. Each code block has **Copy code**.
+The status line names `chatgpt-export/html/`. **Show export folder** reveals
+that download.
+
+A run that saves files also writes `chatgpt-export/logs/<run>.json`. The HTML
+folder gets a copy as `export-log.json`. The log is for finding failures that
+the page does not show: the phase, the outcome, counts, and the error. It does
+not contain the conversation text or signed file URLs. It is rewritten as the
+run proceeds, so the last successful flush survives a crash.
+
 The extension does not serve those files. After the folder is on disk, a
 separate read-only server can host it on this computer:
 

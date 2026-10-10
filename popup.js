@@ -6,6 +6,7 @@ const chkImages = document.getElementById('chk-images');
 const chkBatch = document.getElementById('chk-batch');
 const chkHtml = document.getElementById('chk-html');
 const batchWarning = document.getElementById('batch-warning');
+const btnShowFolder = document.getElementById('btn-show-folder');
 
 // The running version, shown in the popup so a reloaded build is identifiable
 // at a glance. Read from the manifest rather than written here: a number typed
@@ -1083,6 +1084,245 @@ function buildSaveStatus(parts) {
   };
 }
 
+/** The run whose log is being written, so a crash in this popup can still
+ *  append the exception before the document goes away. */
+var activeRunLog = null;
+var activeRunLogOptions = null;
+var lastExportDownloadId = null;
+
+function noteExportDownload(id) {
+  if (id !== undefined && id !== null) lastExportDownloadId = id;
+}
+
+function revealExportFolder() {
+  if (typeof chrome === 'undefined' || !chrome.downloads) return;
+  if (lastExportDownloadId !== null && typeof chrome.downloads.show === 'function') {
+    chrome.downloads.show(lastExportDownloadId);
+    return;
+  }
+  if (typeof chrome.downloads.showDefaultFolder === 'function') chrome.downloads.showDefaultFolder();
+}
+
+function markExportFolderVisible() {
+  if (!btnShowFolder || btnShowFolder.id !== 'btn-show-folder') return;
+  if (btnShowFolder.classList) btnShowFolder.classList.add('visible');
+}
+
+if (btnShowFolder && btnShowFolder !== status && typeof btnShowFolder.addEventListener === 'function') {
+  btnShowFolder.addEventListener('click', function() { revealExportFolder(); });
+}
+
+/** Drop URLs, tokens, and oversized text. The log sits beside the export and
+ *  must not become a second copy of the conversation or of a signed link. */
+function sanitizeLogText(value) {
+  var text = String(value == null ? '' : value);
+  text = text.replace(/https?:\/\/[^\s)'"<>]+/gi, '[url]');
+  text = text.replace(/Bearer\s+\S+/gi, 'Bearer [redacted]');
+  text = text.replace(/((?:sig|token|access_token|authorization)=)[^&\s]+/gi, '$1[redacted]');
+  if (text.length > 600) text = text.slice(0, 600);
+  return text;
+}
+
+function createRunLog(kind, options) {
+  var manifest = null;
+  try {
+    manifest = typeof chrome !== 'undefined' && chrome.runtime &&
+      typeof chrome.runtime.getManifest === 'function' ? chrome.runtime.getManifest() : null;
+  } catch (_e) {
+    manifest = null;
+  }
+  var opts = options || {};
+  return {
+    version: manifest && manifest.version || null,
+    runId: opts.runId || formatExportTimestamp(),
+    kind: kind,
+    startedAt: new Date().toISOString(),
+    options: {
+      saveMarkdown: !!opts.downloadImages,
+      saveHtml: !!opts.downloadHtml,
+    },
+    events: [],
+  };
+}
+
+function pushLogEvent(log, event) {
+  if (!log) return;
+  var source = event || {};
+  log.events.push({
+    at: new Date().toISOString(),
+    level: source.level || 'info',
+    phase: sanitizeLogText(source.phase || ''),
+    outcome: sanitizeLogText(source.outcome || ''),
+    conversationId: source.conversationId ? sanitizeLogText(source.conversationId) : null,
+    title: source.title ? sanitizeLogText(source.title) : null,
+    message: source.message ? sanitizeLogText(source.message) : null,
+    stack: source.stack ? sanitizeLogText(source.stack) : null,
+    counts: source.counts || null,
+  });
+}
+
+function runLogJson(log) {
+  return JSON.stringify({
+    version: log.version,
+    runId: log.runId,
+    kind: log.kind,
+    startedAt: log.startedAt,
+    updatedAt: new Date().toISOString(),
+    options: log.options,
+    events: log.events,
+  }, null, 2);
+}
+
+/** Rewrite the log file with everything recorded so far. Chrome cannot append,
+ *  so each flush overwrites one file for this run. A crash keeps the last
+ *  flush. A failure here must not fail the export. */
+async function flushRunLog(log, options) {
+  if (!log) return { ok: false, error: 'no log' };
+  var body = runLogJson(log);
+  var opts = options || {};
+  var ok = true;
+  var error = null;
+  if (opts.htmlSiteDir && typeof writeStaticSite === 'function') {
+    try {
+      writeStaticSite(opts.htmlSiteDir, {
+        files: [{ path: 'export-log.json', body: body, mime: 'application/json', role: 'log' }],
+      });
+    } catch (err) {
+      ok = false;
+      error = (err && err.message) || String(err);
+    }
+  }
+  var canDownload = opts.downloadLog !== false &&
+    typeof chrome !== 'undefined' && chrome.downloads && typeof chrome.downloads.download === 'function';
+  if (canDownload) {
+    var handle = bytesToDownloadUrl(textToUtf8Bytes(body), 'application/json');
+    try {
+      var write = await downloadOne(
+        handle.url,
+        'export-log.json',
+        'chatgpt-export/logs/' + log.runId + '.json',
+        opts.timeoutMs || 12000
+      );
+      if (write.ok) noteExportDownload(write.downloadId);
+      if (write.ok && chrome.downloads.onChanged) {
+        var written = await waitForDownloadComplete(write.downloadId, opts.timeoutMs || 12000);
+        if (!written) {
+          ok = false;
+          error = error || 'the log write did not complete';
+        }
+      } else if (!write.ok) {
+        ok = false;
+        error = write.error || error || 'download rejected';
+      }
+    } catch (err) {
+      ok = false;
+      error = (err && err.message) || String(err);
+    } finally {
+      if (handle) handle.revoke(handle.url);
+    }
+  }
+  return { ok: ok, error: error };
+}
+
+function searchDownloadPaths(filenameRegex, accept) {
+  return new Promise(function(resolve) {
+    if (typeof chrome === 'undefined' || !chrome.downloads || !chrome.downloads.search) {
+      resolve(null);
+      return;
+    }
+    chrome.downloads.search({ filenameRegex: filenameRegex }, function(items) {
+      var paths = [];
+      if (items) {
+        for (var i = 0; i < items.length; i++) {
+          var item = items[i];
+          if (!item || !item.filename) continue;
+          if (item.exists === false) continue;
+          if (item.state && item.state !== 'complete') continue;
+          if (accept(item.filename)) paths.push(item.filename);
+        }
+      }
+      resolve(paths);
+    });
+  });
+}
+
+function searchHtmlCompletePaths() {
+  if (typeof htmlCompleteDirFromDownloadPath !== 'function') return Promise.resolve(null);
+  return searchDownloadPaths('chatgpt-export/html/.+/export-complete\\.txt$', htmlCompleteDirFromDownloadPath);
+}
+
+function searchHtmlPagePaths() {
+  if (typeof htmlChatDirFromDownloadPath !== 'function') return Promise.resolve(null);
+  return searchDownloadPaths('chatgpt-export/html/.+/index\\.html$', htmlChatDirFromDownloadPath);
+}
+
+function htmlDirForConversation(conv) {
+  if (typeof sessionDirectory !== 'function' || !conv) return null;
+  return sessionDirectory({
+    id: conv.id || null,
+    title: conv.title || null,
+    slug: conv.slug || null,
+    projectId: conv.projectId || null,
+    projectTitle: conv.projectTitle || null,
+    projectSlug: conv.projectSlug || null,
+  });
+}
+
+function htmlChatLanded(conv, completePaths) {
+  if (!completePaths || typeof htmlCompleteDirFromDownloadPath !== 'function') return false;
+  var dir = htmlDirForConversation(conv);
+  if (!dir) return false;
+  var needle = dir.toLowerCase();
+  for (var i = 0; i < completePaths.length; i++) {
+    var found = htmlCompleteDirFromDownloadPath(completePaths[i]);
+    if (found && found.toLowerCase() === needle) return true;
+  }
+  return false;
+}
+
+function exportSavedLines(runLog, htmlSaved) {
+  var lines = [];
+  if (htmlSaved) lines.push('HTML: chatgpt-export/html/');
+  if (runLog && runLog.runId) lines.push('Log: chatgpt-export/logs/' + runLog.runId + '.json');
+  return lines.join('\n');
+}
+
+async function publishHtmlSessions(sessions) {
+  var earlier = typeof searchHtmlPagePaths === 'function' ? await searchHtmlPagePaths() : [];
+  if (earlier === null) earlier = [];
+  var laid = layoutStaticSite(sessions, earlier);
+  var write = await downloadStaticSite(laid);
+  noteExportDownload(write.downloadId);
+  return write;
+}
+
+if (typeof window !== 'undefined' && window.addEventListener) {
+  window.addEventListener('error', function(event) {
+    if (!activeRunLog) return;
+    var err = event && event.error;
+    pushLogEvent(activeRunLog, {
+      level: 'error',
+      phase: 'window',
+      outcome: 'exception',
+      message: (err && err.message) || (event && event.message) || 'error',
+      stack: err && err.stack,
+    });
+    flushRunLog(activeRunLog, activeRunLogOptions);
+  });
+  window.addEventListener('unhandledrejection', function(event) {
+    if (!activeRunLog) return;
+    var reason = event && event.reason;
+    pushLogEvent(activeRunLog, {
+      level: 'error',
+      phase: 'unhandledrejection',
+      outcome: 'exception',
+      message: (reason && reason.message) || String(reason || 'unhandled rejection'),
+      stack: reason && reason.stack,
+    });
+    flushRunLog(activeRunLog, activeRunLogOptions);
+  });
+}
+
 /** Walk the sidebar conversation list in the active tab, export each in turn. */
 async function runBatchExport(tab, options) {
   var downloadImages = options.downloadImages;
@@ -1118,7 +1358,35 @@ async function runBatchExport(tab, options) {
     return { ok: false, error: 'No conversations found in the sidebar. Open a ChatGPT Project page first.' };
   }
 
-  var pending = filterPendingConversations(conversations, completedPaths, projectSlug);
+  var wantHtmlRun = !!(options.htmlSiteDir || options.downloadHtml);
+  // null means the history could not be read. That is not proof the page is
+  // already there, so the run exports. A wrong skip loses the chat.
+  var htmlCompletePaths = wantHtmlRun ? await searchHtmlCompletePaths() : [];
+  var htmlHistoryKnown = htmlCompletePaths !== null;
+  if (!htmlHistoryKnown) htmlCompletePaths = [];
+  var htmlPagePaths = wantHtmlRun ? await searchHtmlPagePaths() : [];
+  if (htmlPagePaths === null) htmlPagePaths = [];
+  var markdownPending = filterPendingConversations(conversations, completedPaths, projectSlug);
+  var markdownPendingKeys = Object.create(null);
+  for (var m = 0; m < markdownPending.length; m++) {
+    markdownPendingKeys[markdownPending[m].id || markdownPending[m].slug] = true;
+  }
+  var pending = markdownPending.slice();
+  if (wantHtmlRun) {
+    var pendingKeys = Object.create(null);
+    for (var p = 0; p < pending.length; p++) {
+      pendingKeys[pending[p].id || pending[p].slug] = true;
+    }
+    for (var c = 0; c < conversations.length; c++) {
+      var candidate = conversations[c];
+      var key = candidate.id || candidate.slug;
+      if (pendingKeys[key]) continue;
+      if (!htmlHistoryKnown || !htmlChatLanded(candidate, htmlCompletePaths)) {
+        pending.push(candidate);
+        pendingKeys[key] = true;
+      }
+    }
+  }
   var skipped = conversations.length - pending.length;
   var exported = 0;
   var errors = [];
@@ -1133,6 +1401,23 @@ async function runBatchExport(tab, options) {
   var held = 0;
   var partial = 0;
   var htmlSessions = [];
+  var htmlOk = true;
+  var runLog = createRunLog('batch', {
+    runId: batchStamp || formatExportTimestamp(),
+    downloadImages: downloadImages,
+    downloadHtml: wantHtmlRun,
+  });
+  activeRunLog = runLog;
+  activeRunLogOptions = { htmlSiteDir: options.htmlSiteDir || null, downloadLog: true };
+  pushLogEvent(runLog, {
+    phase: 'run',
+    outcome: 'started',
+    counts: { listed: conversations.length, pending: pending.length },
+  });
+  var logOk = true;
+  var logError = null;
+  var startedLog = await flushRunLog(runLog, activeRunLogOptions);
+  if (!startedLog.ok) { logOk = false; logError = startedLog.error; }
   var maxAttempts = options.maxAttempts || 3;
   var maxHoldRounds = options.maxHoldRounds || 20;
   var controls = {
@@ -1261,7 +1546,11 @@ async function runBatchExport(tab, options) {
 
     var scanned = results?.[0]?.result;
     if (!scanned || !scanned.ok) {
-      return { ok: false, error: (scanned && scanned.error) || 'scan failed' };
+      return {
+        ok: false,
+        error: (scanned && scanned.error) || 'scan failed',
+        stack: scanned && scanned.stack,
+      };
     }
     return { ok: true, result: scanned };
   }
@@ -1287,12 +1576,22 @@ async function runBatchExport(tab, options) {
     // conversation that never lands and cannot be recovered by re-running.
     var liveMeta = null;
     var grewThisRound = false;
+    var verdict = null;
     if (exportIndex) {
       liveMeta = await readConversationMetadata(tab.id, conv);
-      var verdict = classifyAgainstIndex(exportIndex, conv.id, liveMeta).verdict;
+      verdict = classifyAgainstIndex(exportIndex, conv.id, liveMeta).verdict;
       if (verdict === 'unchanged') {
-        indexSkipped += 1;
-        continue;
+        var htmlMissing = wantHtmlRun && (!htmlHistoryKnown || !htmlChatLanded(conv, htmlCompletePaths));
+        if (!htmlMissing) {
+          indexSkipped += 1;
+          pushLogEvent(runLog, {
+            phase: 'skip',
+            outcome: 'unchanged',
+            conversationId: conv.id,
+            title: conv.title,
+          });
+          continue;
+        }
       }
       if (verdict === 'grown') {
         grewThisRound = true;
@@ -1311,7 +1610,11 @@ async function runBatchExport(tab, options) {
       try {
         outcome = await attemptConversation(conv);
       } catch (err) {
-        outcome = { ok: false, error: (err && err.message) || String(err) };
+        outcome = {
+          ok: false,
+          error: (err && err.message) || String(err),
+          stack: err && err.stack,
+        };
       }
       if (outcome.ok) break;
 
@@ -1348,6 +1651,17 @@ async function runBatchExport(tab, options) {
     if (controls.isCancelled()) break;
     if (!outcome || !outcome.ok) {
       errors.push((conv.title || conv.id) + ': ' + (lastError || 'failed'));
+      pushLogEvent(runLog, {
+        level: 'error',
+        phase: 'conversation',
+        outcome: 'failed',
+        conversationId: conv.id,
+        title: conv.title,
+        message: lastError || 'failed',
+        stack: outcome && outcome.stack,
+      });
+      var failedLog = await flushRunLog(runLog, activeRunLogOptions);
+      if (!failedLog.ok) { logOk = false; logError = failedLog.error; }
       continue;
     }
     var result = outcome.result;
@@ -1360,6 +1674,11 @@ async function runBatchExport(tab, options) {
     // the HTML page only after the markdown write returned ok made a refused
     // .md — the path a batch takes when file saving is forced — drop the chat
     // from the site entirely.
+    var markdownAlreadyLanded = !markdownPendingKeys[conv.id || conv.slug];
+    // The Markdown note is already on disk. Scanning again is for the HTML
+    // page, and writing another dated note would pile up copies the user did
+    // not ask for. A grown conversation still gets its new note.
+    var htmlOnly = wantHtmlRun && markdownAlreadyLanded && verdict !== 'grown';
     var markdownAttempted = false;
     // A conversation that GREW is stamped whether or not the option is ticked.
     // Chrome cannot append to a file and overwriting would destroy the earlier
@@ -1377,7 +1696,7 @@ async function runBatchExport(tab, options) {
     var stampThis = true;
     void useTimestamp;
     void grewThisRound;
-    if (downloadImages) {
+    if (downloadImages && !htmlOnly) {
       markdownAttempted = true;
       try {
         saved = await saveConversationExport(tab.id, result, {
@@ -1429,9 +1748,62 @@ async function runBatchExport(tab, options) {
         htmlResult = Object.assign({}, result, { partial: true });
       }
       var htmlSession = sessionFromExport(htmlConv, htmlResult);
-      htmlSessions.push(htmlSession);
-      htmlRecorded = true;
-      htmlPartial = !!htmlSession.partial;
+      var chatLaid = typeof layoutChatFiles === 'function' ? layoutChatFiles(htmlSession) : null;
+      var chatWriteOk = true;
+      var chatWriteError = null;
+      if (chatLaid && options.htmlSiteDir && typeof writeStaticSite === 'function') {
+        try {
+          writeStaticSite(options.htmlSiteDir, { files: chatLaid.files });
+        } catch (writeErr) {
+          chatWriteOk = false;
+          chatWriteError = (writeErr && writeErr.message) || String(writeErr);
+        }
+      }
+      if (chatWriteOk && chatLaid && options.downloadHtml) {
+        var chatDownload = await downloadStaticSite({ files: chatLaid.files });
+        noteExportDownload(chatDownload.downloadId);
+        if (!chatDownload.ok) {
+          chatWriteOk = false;
+          chatWriteError = chatDownload.error || 'the write did not complete';
+        }
+      }
+      if (!chatLaid) {
+        chatWriteOk = false;
+        chatWriteError = 'HTML layout is unavailable';
+      }
+      if (!chatWriteOk) {
+        errors.push((conv.title || conv.id) + ': HTML page not saved (' + (chatWriteError || 'the write did not complete') + ')');
+        htmlOk = false;
+        pushLogEvent(runLog, {
+          level: 'error',
+          phase: 'html',
+          outcome: 'failed',
+          conversationId: conv.id,
+          title: conv.title,
+          message: chatWriteError,
+        });
+      } else {
+        htmlSessions.push(htmlSession);
+        htmlRecorded = true;
+        htmlPartial = !!htmlSession.partial;
+        if (typeof layoutStaticSite === 'function') {
+          var progressSite = layoutStaticSite(htmlSessions, htmlPagePaths);
+          var progressIndexes = (progressSite.files || []).filter(function(file) {
+            return file.role === 'index' || file.role === 'project';
+          });
+          if (options.htmlSiteDir && typeof writeStaticSite === 'function') {
+            writeStaticSite(options.htmlSiteDir, { files: progressIndexes });
+          }
+          if (options.downloadHtml) {
+            var indexDownload = await downloadStaticSite({ files: progressIndexes });
+            noteExportDownload(indexDownload.downloadId);
+            if (!indexDownload.ok) {
+              errors.push('HTML index not saved (' + (indexDownload.error || 'the write did not complete') + ')');
+              htmlOk = false;
+            }
+          }
+        }
+      }
     }
 
     // A refused write is a failure, not an export. Counting it made a run whose
@@ -1440,6 +1812,16 @@ async function runBatchExport(tab, options) {
     // refusal used to erase the site.
     if (!htmlRecorded && (!markdownAttempted || !writeOk)) {
       errors.push((conv.title || conv.id) + ': not saved (' + (writeError || 'download rejected') + ')');
+      pushLogEvent(runLog, {
+        level: 'error',
+        phase: 'write',
+        outcome: 'failed',
+        conversationId: conv.id,
+        title: conv.title,
+        message: writeError || 'download rejected',
+      });
+      var rejectedLog = await flushRunLog(runLog, activeRunLogOptions);
+      if (!rejectedLog.ok) { logOk = false; logError = rejectedLog.error; }
       continue;
     }
     if (markdownAttempted && !writeOk) {
@@ -1477,6 +1859,19 @@ async function runBatchExport(tab, options) {
         });
       }
     }
+    pushLogEvent(runLog, {
+      level: (result.partial || htmlPartial || (markdownAttempted && !writeOk)) ? 'warn' : 'info',
+      phase: 'conversation',
+      outcome: (result.partial || htmlPartial) ? 'partial' : 'saved',
+      conversationId: conv.id,
+      title: conv.title,
+      counts: {
+        lines: result.lines || 0,
+        files: (saved && saved.savedFiles && saved.savedFiles.length) || 0,
+      },
+    });
+    var savedLog = await flushRunLog(runLog, activeRunLogOptions);
+    if (!savedLog.ok) { logOk = false; logError = savedLog.error; }
   }
 
   var zipName = null;
@@ -1526,20 +1921,36 @@ async function runBatchExport(tab, options) {
   }
 
   var htmlSite = null;
-  var htmlOk = true;
   if (htmlSessions.length && typeof layoutStaticSite === 'function') {
-    htmlSite = layoutStaticSite(htmlSessions);
+    htmlSite = layoutStaticSite(htmlSessions, htmlPagePaths);
+    var finalIndexes = (htmlSite.files || []).filter(function(file) {
+      return file.role === 'index' || file.role === 'project';
+    });
     if (options.htmlSiteDir && typeof writeStaticSite === 'function') {
-      writeStaticSite(options.htmlSiteDir, htmlSite);
+      writeStaticSite(options.htmlSiteDir, { files: finalIndexes });
     }
     if (options.downloadHtml) {
-      var htmlWrite = await downloadStaticSite(htmlSite);
+      var htmlWrite = await downloadStaticSite({ files: finalIndexes });
+      noteExportDownload(htmlWrite.downloadId);
       if (!htmlWrite.ok) {
-        errors.push('HTML site not saved (' + (htmlWrite.error || 'the write did not complete') + ')');
+        errors.push('HTML index not saved (' + (htmlWrite.error || 'the write did not complete') + ')');
         htmlOk = false;
       }
     }
   }
+
+  if (!logOk) errors.push('execution log not saved (' + (logError || 'the write did not complete') + ')');
+  pushLogEvent(runLog, {
+    phase: 'run',
+    outcome: controls.isCancelled() ? 'cancelled' : 'finished',
+    counts: { exported: exported, skipped: skipped, partial: partial },
+  });
+  var finishedLog = await flushRunLog(runLog, activeRunLogOptions);
+  if (!finishedLog.ok && logOk) {
+    errors.push('execution log not saved (' + (finishedLog.error || 'the write did not complete') + ')');
+    logOk = false;
+  }
+  activeRunLog = null;
 
   return {
     ok: true,
@@ -1572,6 +1983,8 @@ async function runBatchExport(tab, options) {
     zipName: zipName,
     htmlFiles: htmlSite ? htmlSite.files.length : 0,
     htmlOk: htmlOk,
+    logOk: logOk,
+    logPath: 'chatgpt-export/logs/' + runLog.runId + '.json',
   };
 }
 
@@ -1584,6 +1997,7 @@ async function runBatchExport(tab, options) {
 async function downloadStaticSite(laid) {
   var files = (laid && laid.files) || [];
   var failed = [];
+  var lastId = null;
   var canObserveCompletion = typeof chrome !== 'undefined' &&
     chrome.downloads && chrome.downloads.onChanged;
   for (var i = 0; i < files.length; i++) {
@@ -1593,6 +2007,7 @@ async function downloadStaticSite(laid) {
     var leaf = String(entry.path).split('/').pop();
     try {
       var write = await downloadOne(handle.url, leaf, 'chatgpt-export/html/' + entry.path, MD_WRITE_TIMEOUT_MS);
+      if (write.ok) lastId = write.downloadId;
       if (write.ok && canObserveCompletion) {
         var written = await waitForDownloadComplete(write.downloadId, MD_WRITE_TIMEOUT_MS);
         if (!written) {
@@ -1610,6 +2025,7 @@ async function downloadStaticSite(laid) {
     error: failed.length ? failed.join('; ') : null,
     written: files.length - failed.length,
     failed: failed.length,
+    downloadId: lastId,
   };
 }
 
@@ -1746,7 +2162,13 @@ btn.addEventListener('click', async () => {
         summary += '\nScroll the sidebar to the end and re-run to pick up anything missing.';
       }
       if (batchResult.zipName) summary += '\nZip: ' + batchResult.zipName;
+      if (chkHtml && chkHtml.checked) {
+        summary += '\n' + exportSavedLines({ runId: batchStamp }, true);
+      } else if (batchResult.logPath) {
+        summary += '\nLog: ' + batchResult.logPath;
+      }
       if (batchResult.errors.length) summary += '\nErrors: ' + batchResult.errors.join('; ');
+      markExportFolderVisible();
       showStatus(
         batchResult.htmlOk === false ? 'error' : (batchResult.listComplete ? 'success' : 'warning'),
         summary
@@ -1789,6 +2211,20 @@ btn.addEventListener('click', async () => {
     const slug = result.slug || null;
     const mdName = buildMdFilename(slug, true);
     const partialSuffix = result.partial ? ' (partial export)' : '';
+    var singleLog = createRunLog('single', {
+      runId: formatExportTimestamp(),
+      downloadImages: downloadImages,
+      downloadHtml: !!(chkHtml && chkHtml.checked),
+    });
+    activeRunLog = singleLog;
+    activeRunLogOptions = { downloadLog: !!(downloadImages || (chkHtml && chkHtml.checked)) };
+    pushLogEvent(singleLog, {
+      phase: 'scan',
+      outcome: result.partial ? 'partial' : 'ok',
+      conversationId: conversationIdFromLocation(tab.url),
+      title: result.title,
+      counts: { lines: result.lines || 0 },
+    });
 
     if (downloadImages && typeof chrome.downloads !== 'undefined') {
       var saved = await saveConversationExport(tab.id, result, {
@@ -1808,7 +2244,6 @@ btn.addEventListener('click', async () => {
         words: result.words,
         partialSuffix: partialSuffix,
       });
-      showStatus(saveStatus.type, saveStatus.text);
       if (chkHtml && chkHtml.checked && typeof sessionFromExport === 'function' && typeof layoutStaticSite === 'function') {
         var projectMatch = String(tab.url || '').match(/\/g\/(g-p-[A-Za-z0-9]+)\//);
         var htmlSession = sessionFromExport({
@@ -1825,12 +2260,17 @@ btn.addEventListener('click', async () => {
           slug: result.slug,
           partial: result.partial || (saved.dlErrors && saved.dlErrors.length > 0),
         });
-        var htmlWithFiles = await downloadStaticSite(layoutStaticSite([htmlSession]));
+        var htmlWithFiles = await publishHtmlSessions([htmlSession]);
         if (!htmlWithFiles.ok) {
-          showStatus('error', saveStatus.text + '\nHTML site not saved: ' +
-            (htmlWithFiles.error || 'the write did not complete'));
+          saveStatus.type = 'error';
+          saveStatus.text += '\nHTML site not saved: ' +
+            (htmlWithFiles.error || 'the write did not complete');
         }
       }
+      saveStatus.text += '\n' + exportSavedLines(singleLog, !!(chkHtml && chkHtml.checked));
+      showStatus(saveStatus.type, saveStatus.text);
+      markExportFolderVisible();
+      await flushRunLog(singleLog, activeRunLogOptions);
 
       // NOT copied to the clipboard. With the save option on, the file is the
       // deliverable and the clipboard is a second copy nobody asked for — and it
@@ -1849,14 +2289,17 @@ btn.addEventListener('click', async () => {
         title: result.title,
         slug: result.slug,
       }, { md: md, title: result.title, slug: result.slug, partial: result.partial });
-      var htmlWrite = await downloadStaticSite(layoutStaticSite([htmlOnly]));
+      var htmlWrite = await publishHtmlSessions([htmlOnly]);
       if (!htmlWrite.ok) {
         showStatus('error', 'HTML site not saved: ' + (htmlWrite.error || 'the write did not complete'));
         btn.disabled = false;
         return;
       }
       var htmlPartialSuffix = (result.partial || htmlOnly.partial) ? ' (partial export)' : '';
-      showStatus('success', '✓ Saved HTML site' + htmlPartialSuffix + ' ' + result.lines + ' lines · ' + result.words + ' words');
+      showStatus('success', '✓ Saved HTML site' + htmlPartialSuffix + ' ' + result.lines + ' lines · ' + result.words + ' words\n' +
+        exportSavedLines(singleLog, true));
+      markExportFolderVisible();
+      await flushRunLog(singleLog, activeRunLogOptions);
       btn.disabled = false;
       return;
     }
@@ -1870,8 +2313,17 @@ btn.addEventListener('click', async () => {
       '✓ Copied!' + partialSuffix + ' ' + result.lines + ' lines · ' + result.words + ' words'
     );
   } catch (err) {
+    pushLogEvent(activeRunLog, {
+      level: 'error',
+      phase: 'single export',
+      outcome: 'exception',
+      message: (err && err.message) || String(err),
+      stack: err && err.stack,
+    });
+    if (activeRunLog) await flushRunLog(activeRunLog, activeRunLogOptions);
     reportFailure('single export', err);
   } finally {
+    activeRunLog = null;
     stopProgressPolling();
     scanningTabId = null;
     btnCancel.classList.remove('visible');
@@ -1923,6 +2375,9 @@ if (typeof module !== 'undefined' && module.exports) {
     parseFileRefs: parseFileRefs,
     parseImageRefs: parseImageRefs,
     runBatchExport: runBatchExport,
+    sanitizeLogText: sanitizeLogText,
+    noteExportDownload: noteExportDownload,
+    revealExportFolder: revealExportFolder,
     searchCompletedDownloadPaths: searchCompletedDownloadPaths,
     readExportIndex: readExportIndex,
     recordExportedConversation: recordExportedConversation,

@@ -219,7 +219,8 @@ function markdownToHtml(markdown) {
         i += 1;
       }
       if (i < lines.length) i += 1;
-      html += '<pre><code>' + escapeHtml(code.join('\n')) + '</code></pre>';
+      html += '<div class="code-block"><button type="button" class="md-btn" data-copy-code>Copy code</button>' +
+        '<pre><code>' + escapeHtml(code.join('\n')) + '</code></pre></div>';
       continue;
     }
     if (isTableStart(lines, i)) {
@@ -271,6 +272,11 @@ function documentStyle() {
     'a{color:#1d4e89}' +
     'img{max-width:100%;height:auto}' +
     'pre{overflow:auto;padding:.9rem 1rem;background:#221e19;color:#f6f1e7;border-radius:8px}' +
+    '.code-block{position:relative;margin:0 0 1rem}' +
+    '.code-block pre{margin:0}' +
+    '.code-block .md-btn{position:absolute;top:.45rem;right:.45rem;font-size:.8rem}' +
+    '.archive-search{width:100%;box-sizing:border-box;margin:.4rem 0 1.25rem;padding:.55rem .7rem;' +
+      'border:1px solid #d9d1c3;border-radius:8px;font:inherit;background:#fff;color:#1f1a14}' +
     'code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.9em}' +
     'table{border-collapse:collapse;width:100%;margin:0 0 1rem}' +
     'th,td{border:1px solid #d9d1c3;padding:.45rem .65rem;text-align:left;vertical-align:top;overflow-wrap:anywhere}' +
@@ -336,7 +342,22 @@ function markdownActions(href, mdPath) {
  *  next to the page; otherwise it is the path inside the saved site. */
 function markdownCopyScript() {
   return '<script>' +
+    'function fallback(value){var area=document.createElement("textarea");area.value=value;' +
+    'document.body.appendChild(area);area.select();var ok=false;' +
+    'try{ok=document.execCommand("copy");}catch(e){}area.remove();return ok;}' +
+    'function finish(button,ok,done,failed){var previous=button.getAttribute("data-md-label")||button.textContent;' +
+    'if(!button.getAttribute("data-md-label"))button.setAttribute("data-md-label",previous);' +
+    'button.textContent=ok?done:failed;' +
+    'setTimeout(function(){button.textContent=button.getAttribute("data-md-label");},1500);}' +
+    'function writeText(button,value,done,failed){' +
+    'if(navigator.clipboard&&navigator.clipboard.writeText){' +
+    'navigator.clipboard.writeText(value).then(function(){finish(button,true,done,failed);},function(){finish(button,fallback(value),done,failed);});}' +
+    'else{finish(button,fallback(value),done,failed);}}' +
     'document.addEventListener("click",function(event){' +
+    'var codeBtn=event.target&&event.target.closest?event.target.closest("[data-copy-code]"):null;' +
+    'if(codeBtn){var holder=codeBtn.parentElement;' +
+    'var code=holder&&holder.querySelector?holder.querySelector("code"):null;' +
+    'writeText(codeBtn,code?code.textContent:"","Code copied","Code not copied");return;}' +
     'var button=event.target&&event.target.closest?event.target.closest("[data-md-path]"):null;' +
     'if(!button)return;' +
     'var path=button.getAttribute("data-md-path")||"";' +
@@ -346,17 +367,27 @@ function markdownCopyScript() {
     'var cut=page.lastIndexOf("/");' +
     'var leaf=path.split("/").pop()||"conversation.md";' +
     'if(cut>=0)path=page.slice(0,cut+1)+leaf;}catch(e){}}' +
-    'function finish(ok){var previous=button.getAttribute("data-md-label")||button.textContent;' +
-    'if(!button.getAttribute("data-md-label"))button.setAttribute("data-md-label",previous);' +
-    'button.textContent=ok?"Path copied":"Path not copied";' +
-    'setTimeout(function(){button.textContent=button.getAttribute("data-md-label");},1500);}' +
-    'function fallback(value){var area=document.createElement("textarea");area.value=value;' +
-    'document.body.appendChild(area);area.select();var ok=false;' +
-    'try{ok=document.execCommand("copy");}catch(e){}area.remove();return ok;}' +
-    'if(navigator.clipboard&&navigator.clipboard.writeText){' +
-    'navigator.clipboard.writeText(path).then(function(){finish(true);},function(){finish(fallback(path));});}' +
-    'else{finish(fallback(path));}});' +
+    'writeText(button,path,"Path copied","Path not copied");});' +
     '</script>';
+}
+
+/** Filter on the archive index. A constant: chat titles are read from the
+ *  list items at input time, never copied into this script. */
+function archiveSearchScript() {
+  return '<script>' +
+    'document.addEventListener("input",function(event){' +
+    'var box=event.target;' +
+    'if(!box||!box.getAttribute||box.getAttribute("data-archive-search")===null)return;' +
+    'var q=String(box.value||"").toLowerCase();' +
+    'var items=document.querySelectorAll("li");' +
+    'for(var i=0;i<items.length;i++){' +
+    'var text=String(items[i].textContent||"").toLowerCase();' +
+    'items[i].style.display=!q||text.indexOf(q)!==-1?"":"none";}});' +
+    '</script>';
+}
+
+function archiveSearchBox() {
+  return '<p><label>Search chats<input class="archive-search" type="search" data-archive-search></label></p>';
 }
 
 function renderSessionHtml(session, link) {
@@ -421,62 +452,165 @@ function sessionDirectory(session) {
 }
 
 function pageShell(title, body) {
-  return documentShell(title, body);
+  return documentShell(title, archiveSearchBox() + body, archiveSearchScript());
 }
 
-function layoutStaticSite(sessions) {
-  var list = sessions || [];
+function chatLinkForSession(session) {
+  var dir = sessionDirectory(session);
+  var project = projectSegment(session);
+  return {
+    title: session.title || chatSegment(session),
+    href: dir + '/index.html',
+    dir: dir,
+    partial: !!(session.partial || (session.missing && session.missing.length)),
+    projectSlug: project,
+    projectTitle: session.projectTitle || project,
+  };
+}
+
+/** Files for one chat. The root index is a separate write, so a run can put
+ *  this chat on disk before it knows what the rest of the archive will be. */
+function layoutChatFiles(session) {
+  var dir = sessionDirectory(session);
+  var saved = session.saved || [];
+  var markdownName = markdownFileName(saved);
+  var markdownPath = dir + '/' + markdownName;
+  var rendered = renderSessionHtml(session, {
+    href: './' + markdownName,
+    path: markdownPath,
+  });
+  var files = [{
+    path: dir + '/index.html',
+    body: rendered.html,
+    mime: 'text/html; charset=utf-8',
+    role: 'chat',
+  }, {
+    path: markdownPath,
+    body: sessionMarkdown(session),
+    mime: 'text/markdown; charset=utf-8',
+    role: 'markdown',
+  }];
+  for (var s = 0; s < saved.length; s++) {
+    files.push({
+      path: dir + '/' + saved[s].name,
+      body: saved[s].bytes,
+      mime: 'application/octet-stream',
+      role: 'file',
+    });
+  }
+  // A partial page stays readable, and its directory must not look finished.
+  // The marker is a separate file so resume can tell the two apart from the
+  // name alone. Chrome cannot delete the marker later; a chat that was once
+  // incomplete is exported again, which is the cheap direction.
+  if (!session.partial && !(session.missing && session.missing.length)) {
+    files.push({
+      path: dir + '/export-complete.txt',
+      body: 'complete\n',
+      mime: 'text/plain; charset=utf-8',
+      role: 'marker',
+    });
+  }
+  return { files: files, link: chatLinkForSession(session) };
+}
+
+/** Two-segment chat directory inside chatgpt-export/html/, or null.
+ *  The root index and a project index are one segment and are not chats. */
+function htmlChatDirFromDownloadPath(downloadPath) {
+  var normalized = String(downloadPath || '').replace(/\\/g, '/');
+  var marker = 'chatgpt-export/html/';
+  var at = normalized.toLowerCase().indexOf(marker);
+  if (at < 0) return null;
+  var rest = normalized.slice(at + marker.length);
+  if (!/\/index\.html$/i.test(rest)) return null;
+  var dir = rest.replace(/\/index\.html$/i, '');
+  var parts = dir.split('/').filter(Boolean);
+  if (parts.length !== 2) return null;
+  if (parts[0].indexOf('..') !== -1 || parts[1].indexOf('..') !== -1) return null;
+  return parts.join('/');
+}
+
+function htmlCompleteDirFromDownloadPath(downloadPath) {
+  var normalized = String(downloadPath || '').replace(/\\/g, '/');
+  var marker = 'chatgpt-export/html/';
+  var at = normalized.toLowerCase().indexOf(marker);
+  if (at < 0) return null;
+  var rest = normalized.slice(at + marker.length);
+  if (!/\/export-complete\.txt$/i.test(rest)) return null;
+  var dir = rest.replace(/\/export-complete\.txt$/i, '');
+  var parts = dir.split('/').filter(Boolean);
+  if (parts.length !== 2) return null;
+  if (parts[0].indexOf('..') !== -1 || parts[1].indexOf('..') !== -1) return null;
+  return parts.join('/');
+}
+
+function titleFromChatDir(dir) {
+  var leaf = String(dir || '').split('/').pop() || 'chat';
+  var cut = leaf.indexOf('~');
+  var base = cut >= 0 ? leaf.slice(0, cut) : leaf;
+  var title = base.replace(/-/g, ' ').trim();
+  return title || leaf;
+}
+
+/** Links for chat pages already downloaded. This run's own pages replace
+ *  any link with the same directory, so a title from this run wins. */
+function earlierChatLinksFromPaths(paths) {
+  var links = [];
+  var seen = Object.create(null);
+  var list = paths || [];
+  for (var i = 0; i < list.length; i++) {
+    var dir = htmlChatDirFromDownloadPath(list[i]);
+    if (!dir) continue;
+    var key = dir.toLowerCase();
+    if (seen[key]) continue;
+    seen[key] = true;
+    var parts = dir.split('/');
+    var project = parts[0] === 'chats' ? null : parts[0];
+    links.push({
+      title: titleFromChatDir(dir),
+      href: dir + '/index.html',
+      dir: dir,
+      partial: false,
+      projectSlug: project,
+      projectTitle: project,
+      earlier: true,
+    });
+  }
+  return links;
+}
+
+function chatListItem(chat, href) {
+  var mark = chat.partial ? ' <span class="partial">incomplete</span>' : '';
+  return '<li><a href="' + escapeHtml(href) + '">' + escapeHtml(chat.title) + '</a>' + mark + '</li>';
+}
+
+function layoutIndexFiles(links) {
   var files = [];
   var projects = {};
   var projectOrder = [];
   var loose = [];
+  var list = links || [];
   for (var i = 0; i < list.length; i++) {
-    var session = list[i];
-    var dir = sessionDirectory(session);
-    var project = projectSegment(session);
-    var saved = session.saved || [];
-    var markdownName = markdownFileName(saved);
-    var markdownPath = dir + '/' + markdownName;
-    var rendered = renderSessionHtml(session, {
-      href: './' + markdownName,
-      path: markdownPath,
-    });
-    files.push({
-      path: dir + '/index.html',
-      body: rendered.html,
-      mime: 'text/html; charset=utf-8',
-      role: 'chat',
-    });
-    files.push({
-      path: markdownPath,
-      body: sessionMarkdown(session),
-      mime: 'text/markdown; charset=utf-8',
-      role: 'markdown',
-    });
-    for (var s = 0; s < saved.length; s++) {
-      files.push({
-        path: dir + '/' + saved[s].name,
-        body: saved[s].bytes,
-        mime: 'application/octet-stream',
-        role: 'file',
-      });
-    }
-    var chatLink = { title: session.title || chatSegment(session), href: dir + '/index.html', dir: dir };
-    if (project) {
-      if (!projects[project]) {
-        projects[project] = { slug: project, title: session.projectTitle || project, chats: [] };
-        projectOrder.push(project);
+    var chat = list[i];
+    if (!chat || !chat.dir) continue;
+    if (chat.projectSlug) {
+      if (!projects[chat.projectSlug]) {
+        projects[chat.projectSlug] = {
+          slug: chat.projectSlug,
+          title: chat.projectTitle || chat.projectSlug,
+          chats: [],
+        };
+        projectOrder.push(chat.projectSlug);
       }
-      projects[project].chats.push(chatLink);
+      projects[chat.projectSlug].chats.push(chat);
     } else {
-      loose.push(chatLink);
+      loose.push(chat);
     }
   }
   for (var p = 0; p < projectOrder.length; p++) {
     var group = projects[projectOrder[p]];
     var items = group.chats.map(function(chat) {
       var relative = chat.dir.slice(group.slug.length + 1) + '/index.html';
-      return '<li><a href="' + escapeHtml(relative) + '">' + escapeHtml(chat.title) + '</a></li>';
+      return chatListItem(chat, relative);
     }).join('');
     files.push({
       path: group.slug + '/index.html',
@@ -494,7 +628,7 @@ function layoutStaticSite(sessions) {
   }
   if (loose.length) {
     indexBody += '<section><h2>Chats</h2><ul>' + loose.map(function(chat) {
-      return '<li><a href="' + escapeHtml(chat.href) + '">' + escapeHtml(chat.title) + '</a></li>';
+      return chatListItem(chat, chat.href);
     }).join('') + '</ul></section>';
   }
   if (!indexBody) indexBody = '<p>No conversations exported.</p>';
@@ -504,7 +638,36 @@ function layoutStaticSite(sessions) {
     mime: 'text/html; charset=utf-8',
     role: 'index',
   });
-  return { files: files };
+  return files;
+}
+
+function mergeChatLinks(current, earlierPaths) {
+  var merged = [];
+  var seen = Object.create(null);
+  var list = current || [];
+  for (var i = 0; i < list.length; i++) {
+    merged.push(list[i]);
+    if (list[i] && list[i].dir) seen[String(list[i].dir).toLowerCase()] = true;
+  }
+  var earlier = earlierChatLinksFromPaths(earlierPaths);
+  for (var e = 0; e < earlier.length; e++) {
+    if (seen[String(earlier[e].dir).toLowerCase()]) continue;
+    merged.push(earlier[e]);
+  }
+  return merged;
+}
+
+function layoutStaticSite(sessions, earlierPaths) {
+  var list = sessions || [];
+  var files = [];
+  var links = [];
+  for (var i = 0; i < list.length; i++) {
+    var chat = layoutChatFiles(list[i]);
+    files = files.concat(chat.files);
+    links.push(chat.link);
+  }
+  var indexes = layoutIndexFiles(mergeChatLinks(links, earlierPaths));
+  return { files: indexes.concat(files) };
 }
 
 function writeStaticSite(dir, laid) {
@@ -545,7 +708,10 @@ if (typeof module !== 'undefined' && module.exports) {
     markdownToHtml: markdownToHtml,
     renderSessionHtml: renderSessionHtml,
     sessionDirectory: sessionDirectory,
+    layoutChatFiles: layoutChatFiles,
     layoutStaticSite: layoutStaticSite,
+    htmlChatDirFromDownloadPath: htmlChatDirFromDownloadPath,
+    htmlCompleteDirFromDownloadPath: htmlCompleteDirFromDownloadPath,
     writeStaticSite: writeStaticSite,
     sessionFromExport: sessionFromExport,
     slugSegment: slugSegment,

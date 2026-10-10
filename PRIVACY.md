@@ -70,6 +70,23 @@ From version 1.3.0 the extension also records its most recent failure in the sam
 
 This exists because earlier versions recorded nothing at all: a failure part-way through a long export left the user with a message that vanished with the popup and no way to find out what happened.
 
+## The execution log
+
+A run that saves Markdown or HTML also writes a log file under
+`chatgpt-export/logs/`, and an HTML export copies it to `export-log.json` in
+the HTML folder. The file is there so a failed or partial export can be
+inspected after the popup has closed. It records the extension version, the
+options used, the phase, the outcome, numeric counts, the conversation id,
+the conversation title, and a sanitized error message and stack.
+
+It does not contain message text, attachment bytes, signed URLs, request
+headers, or the session token. Web addresses and token-like parameters are
+removed before the line is written. The same local-only rule as the export
+index applies: the file stays on this computer, it is not sent anywhere, and
+the developer has no access to it. A clipboard-only copy does not write it.
+Closing the popup can still lose the lines that were not flushed yet; each
+finished conversation flushes the log so the lines before a crash remain.
+
 ## The zip archive
 
 When a batch export is asked to produce a single archive, the `.zip` is built **in the
@@ -81,7 +98,8 @@ the export already wrote to your Downloads folder.
 ## What the extension never does
 
 - collects no telemetry or analytics;
-- stores no conversation content or user identifiers;
+- stores no conversation content in `chrome.storage`, and the execution log
+  described above does not copy message text;
 - operates no server and no cloud service of its own. The optional reader in `server.js` is a separate program you start on this computer. It only reads the HTML folder already saved here, listens on 127.0.0.1, and does not upload files or contact ChatGPT;
 - sends conversation content to no third party;
 - does not sell or share data; and

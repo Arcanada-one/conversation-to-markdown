@@ -2918,6 +2918,30 @@ function knownProjectName(doc) {
   return null;
 }
 
+/** Project name shown on the unfurl row that contains this conversation link.
+ *  The row is a sibling of the link, so the search starts at the parent.
+ *  A link with no parent returns null. The name is capped because it becomes
+ *  a folder segment. */
+function projectTitleForConversationLink(link) {
+  var current = link;
+  var depth;
+  for (depth = 0; depth < 8 && current; depth++) {
+    current = current.parentElement;
+    if (!current || typeof current.querySelector !== 'function') continue;
+    var row = null;
+    try {
+      row = current.querySelector('[class*="project-unfurl-row"]');
+    } catch (_e) {
+      row = null;
+    }
+    if (!row) continue;
+    var label = String(row.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!label) continue;
+    return label.slice(0, 80);
+  }
+  return null;
+}
+
 /**
  * Enumerate the conversation links CURRENTLY MOUNTED in the sidebar.
  * Verified against production: matches both /c/{id} and the project-scoped
@@ -2958,6 +2982,7 @@ function listSidebarConversations(doc) {
       // reached through /c/{id} loses its project context.
       href: href,
       projectId: projectId,
+      projectTitle: projectTitleForConversationLink(link),
       title: title,
       slug: slugifyTitle(title) || id,
     });
@@ -3919,7 +3944,7 @@ async function getConversationMarkdown(settings) {
       words: md.split(/\s+/).filter(Boolean).length,
     };
   } catch (error) {
-    return { ok: false, error: error.message || String(error) };
+    return { ok: false, error: error.message || String(error), stack: (error && error.stack) || null };
   }
 }
 

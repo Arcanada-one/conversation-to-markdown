@@ -59,13 +59,17 @@ function resolveHttpUrl(rawUrl, allowedQueryNames) {
   }
 }
 
-/** Resolve an image URL preserving query parameters (SAS tokens etc. needed for fetch). */
+/** Preserve signed ChatGPT file links, but do not copy third-party query strings. */
 function resolveImageUrl(rawUrl) {
   if (!rawUrl) return null;
   try {
     const baseUrl = typeof location !== 'undefined' ? location.href : 'https://chatgpt.com/';
     const resolved = new URL(rawUrl, baseUrl);
     if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') return null;
+    if (resolved.hostname !== 'files.oaiusercontent.com' &&
+        resolved.hostname !== 'chatgpt.com' && resolved.hostname !== 'chat.openai.com') {
+      stripUrlQuery(resolved);
+    }
     return resolved.href;
   } catch (_error) {
     return null;
@@ -120,9 +124,17 @@ function labelFromAttachmentChip(node) {
   }
 }
 
+function markdownDestination(href) {
+  return /[()]/.test(href) ? '<' + href + '>' : href;
+}
+
+function markdownLabel(label) {
+  return String(label).replace(/([\\\[\]])/g, '\\$1');
+}
+
 function markdownLink(label, href) {
   const safeLabel = (label || href).trim();
-  return safeLabel ? '[' + safeLabel + '](' + href + ')' : href;
+  return safeLabel ? '[' + markdownLabel(safeLabel) + '](' + markdownDestination(href) + ')' : href;
 }
 
 function nodeToMarkdown(node, depth) {
@@ -237,7 +249,7 @@ function nodeToMarkdown(node, depth) {
       }
       const absHref = resolveHttpUrl(href);
       if (!absHref) return text;
-      return text ? '[' + text + '](' + absHref + ')' : absHref;
+      return text ? markdownLink(text, absHref) : absHref;
     }
     case 'img': {
       // Skip favicons, decorative icons, and aria-hidden images
@@ -249,7 +261,7 @@ function nodeToMarkdown(node, depth) {
       const absSrc = resolveImageUrl(src);
       if (!absSrc) return '';
       const alt = (node.getAttribute('alt') || '').trim();
-      return '![' + alt + '](' + absSrc + ')\n\n';
+      return '![' + markdownLabel(alt) + '](' + markdownDestination(absSrc) + ')\n\n';
     }
     case 'hr':
       return '---\n\n';
@@ -319,7 +331,7 @@ function extractImages(section) {
     seenSrcs.add(absSrc);
 
     const alt = (img.getAttribute('alt') || '').trim();
-    results.push('![' + alt + '](' + absSrc + ')');
+    results.push('![' + markdownLabel(alt) + '](' + markdownDestination(absSrc) + ')');
   }
 
   return results;
@@ -504,7 +516,12 @@ async function fetchConversationMetadata(conversationId, options) {
     });
     if (!response || !response.ok) return null;
     const body = await response.json();
-    if (!body) return null;
+    if (!body || typeof body !== 'object') return null;
+    const updateTime = typeof body.update_time === 'number' && Number.isFinite(body.update_time)
+      ? body.update_time : null;
+    const currentNode = body.current_node ? String(body.current_node) : null;
+    if (updateTime === null && !currentNode &&
+        (!body.mapping || typeof body.mapping !== 'object' || !Object.keys(body.mapping).length)) return null;
     // Count MESSAGES, not mapping nodes. The measured thread reported 1147 nodes
     // and 1146 messages: branch points and system nodes carry no message body.
     // A count compared against a differently-derived one is not a comparison.
@@ -514,8 +531,8 @@ async function fetchConversationMetadata(conversationId, options) {
       if (mapping[key] && mapping[key].message) messageCount += 1;
     }
     return {
-      updateTime: typeof body.update_time === 'number' ? body.update_time : null,
-      currentNode: body.current_node ? String(body.current_node) : null,
+      updateTime: updateTime,
+      currentNode: currentNode,
       messageCount: messageCount,
     };
   } catch (_e) {
@@ -3404,13 +3421,13 @@ async function collectSidebarConversations(options) {
       if (!clickedAny) break;
     }
   }
+  let projectsExhausted = findCollapsedProjectRows(doc).length === 0;
 
   if (!scroller) {
-    // Nothing to scroll. Either the whole list already fits, or the container
-    // moved and we cannot tell how much is missing — say which.
+    // The mounted rows may be only one window; no scroller means no proof.
     return {
       conversations: Array.from(byId.values()),
-      complete: true,
+      complete: false,
       reason: 'no-scroll-container',
     };
   }
@@ -3493,6 +3510,7 @@ async function collectSidebarConversations(options) {
       barrenShowMoreClicks = revealed ? 0 : barrenShowMoreClicks + 1;
       if (barrenShowMoreClicks >= 2) break;
     }
+    if (findShowMoreControl(doc)) showMoreExhausted = false;
 
     const nowTop = scroller.scrollTop || 0;
     const nowMaxTop = Math.max(0, (scroller.scrollHeight || 0) - (scroller.clientHeight || 0));
@@ -3565,6 +3583,8 @@ async function collectSidebarConversations(options) {
         }
         await sleep(settleMs);
         absorb();
+        if (findShowMoreControl(doc)) showMoreExhausted = false;
+        if (findCollapsedProjectRows(doc).length) projectsExhausted = false;
         position += sweepStep;
       }
       if (byId.size === before) break;
@@ -3578,6 +3598,10 @@ async function collectSidebarConversations(options) {
         visitedTop && visitedBottom && sweptTail.proven;
     }
   }
+
+  if (findShowMoreControl(doc)) showMoreExhausted = false;
+  if (findCollapsedProjectRows(doc).length) projectsExhausted = false;
+  if (!showMoreExhausted || !projectsExhausted) complete = false;
 
   // Put the sidebar back where the user left it.
   try {
@@ -3593,6 +3617,8 @@ async function collectSidebarConversations(options) {
     reason = 'scroll-blocked';
   } else if (!showMoreExhausted) {
     reason = 'show-more-pending';
+  } else if (!projectsExhausted) {
+    reason = 'project-expansion-pending';
   } else if (tailReason === 'successor-exists-not-mounted' ||
              tailReason === 'tail-unprovable') {
     // A row exists past everything captured, or the list carries no structure to
@@ -3955,6 +3981,11 @@ async function fetchImageDataUrls(urls) {
   const results = [];
   for (const url of urls) {
     try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== 'https:' || !['chatgpt.com', 'chat.openai.com', 'files.oaiusercontent.com'].includes(parsed.hostname)) {
+        results.push(null);
+        continue;
+      }
       const response = await fetch(url);
       if (!response.ok) { results.push(null); continue; }
       const blob = await response.blob();

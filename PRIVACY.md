@@ -6,8 +6,9 @@ The extension's content script is present only on the two sites declared in the 
 
 Copying a conversation uses two permissions:
 
-- `scripting` — runs the parser inside the ChatGPT page, because the conversation exists only as rendered page content. It is authorised by the host permissions declared in the manifest, and the popup refuses to run on any other site.
+- `scripting` — runs the parser inside the ChatGPT page, because the conversation exists only as rendered page content. It is authorised by the host permissions declared in the manifest, and the panel refuses to run on any other site.
 - `clipboardWrite` — writes the finished Markdown to your clipboard.
+- `sidePanel` — shows the export controls in a side panel. The panel document stays open when you click the page. A popup document does not, and a running export used to die with it. This permission does not read the page and does not grant access to any site.
 
 ## Saving files and artifacts
 
@@ -22,6 +23,8 @@ such citations is marked incomplete instead of being recorded as a complete
 batch export.
 
 In this mode the extension requests each file directly from that host, converts the bytes in memory, and hands the result to the browser's own download mechanism. Requests go to the declared ChatGPT and file hosts, not to a developer-operated endpoint. API requests include conversation, message, and file-path identifiers needed to locate the files. The extension does not upload conversation text or file bytes.
+
+Images hosted outside those declared hosts are not fetched by the extension. Their outbound addresses remain in the Markdown, with ordinary query parameters removed, and file-saving exports report them as unavailable rather than silently treating them as saved. A generated HTML page shows a remote image as a link that requires a click; opening the page does not load that image from its host.
 
 To discover generated files and batch metadata, the extension reads the conversation API using your existing signed-in session. It obtains the access token from the same-origin session endpoint and sends it in an Authorization header to same-origin ChatGPT API endpoints. The token is held transiently in memory; it is not persisted, added to Markdown, or sent to a developer server. The extension does not ask for your password. File bytes are downloaded only from supported hosts. API metadata availability does not imply that a file download is supported.
 
@@ -58,7 +61,9 @@ For each conversation you have exported, the index stores five values and nothin
 - how many bytes the saved Markdown was;
 - how many files were saved alongside it.
 
-**No conversation content is stored.** Not the Markdown, not the message text, not the title, not the attachments. The index is a list of identifiers and numbers used to decide whether a conversation needs exporting again, and that restriction is enforced by a test in the repository, not only by this document.
+**No conversation content is stored.** Not the Markdown, not the message text, not the attachments. The index is a list of identifiers and numbers used to decide whether a conversation needs exporting again, and that restriction is enforced by a test in the repository, not only by this document. The index does not store the title.
+
+Unfinished batches are kept as separate records in the same local storage. Each keeps the conversation id, page address, title, and Project id, so an export can continue on a later day without another panel replacing its saved list. They do not keep message text. Removing the extension discards them with the index.
 
 It is stored in `chrome.storage.local`, which means it stays on this computer. The extension does not use `chrome.storage.sync`, so nothing about your conversations is copied to your Google account — also enforced by a test. The index never leaves your browser, is sent to no server, and the developer has no access to it.
 
@@ -92,8 +97,8 @@ finished conversation flushes the log so the lines before a crash remain.
 When a batch export is asked to produce a single archive, the `.zip` is built **in the
 extension popup's memory** by code shipped in this extension and handed to the browser's
 download mechanism like any other file. Nothing is uploaded, no compression service is
-contacted, and no library is fetched at runtime. The archive contains exactly the files
-the export already wrote to your Downloads folder.
+contacted, and no library is fetched at runtime. The archive contains only new or
+updated files written in that run; the on-disk folder is the cumulative backup.
 
 ## What the extension never does
 

@@ -31,15 +31,15 @@ A typical single-conversation export looks like:
 
 ```text
 Downloads/chatgpt-export/Example-conversation/
-  Example-conversation--20260924-1808.md
-  Example-conversation-001-example.zip
+  Example-conversation--20260924-1808-a1b2-1.md
+  Example-conversation-001-example--20260924-1808-a1b2-1.zip
 ```
 
 The Markdown groups messages under `#### You said:` and `#### ChatGPT said:`.
-Filenames use the local date and time to the minute. Re-exporting within the same
-minute can overwrite the same Markdown filename. Attachment names can also be
-reused and overwritten; dated Markdown copies are not independent snapshots of
-attachment bytes. An unavailable title falls back to a generic filename.
+Markdown filenames include the local date and time plus a unique suffix, so
+re-exporting within the same minute keeps both Markdown files. Downloaded
+attachments carry the same run suffix, so earlier Markdown files keep their
+own attachment bytes. An unavailable title falls back to a generic filename.
 
 ## Understand an incomplete export
 
@@ -65,13 +65,22 @@ Batch mode walks the conversation list visible through the Project sidebar and
 navigates the current tab through those conversations. With the HTML option
 off, it turns file saving on and holds it there. With **Save a static HTML site**
 on, that markdown option stays yours, and a markdown file Chrome does not
-finish does not drop the HTML page. Keep the popup open; pause, resume, and cancel controls apply to the run.
-A restarted batch uses download history and a local metadata index to avoid
-re-exporting unchanged conversations. Incomplete exports are not recorded as
-complete. The list is taken from the sidebar, not an authoritative Project
-membership API; verify that the intended Project is selected before starting.
+finish does not drop the HTML page. The toolbar button opens a side panel, which stays open while you use the page. Pause stores the batch: you can close the panel and resume it later, including on another day. Cancel stops the run and keeps what already landed.
+A restarted or resumed batch checks live metadata against a local index to avoid
+re-exporting unchanged conversations. Without an index entry, it exports again:
+an old filename cannot prove that a chat has not changed. Incomplete exports are not recorded as
+complete; a failed attachment, HTML page, or HTML index remains eligible for retry.
+Pause becomes available after the conversation list is stored. If local storage
+fails, the panel warns that closing it cannot preserve the run. A new sync walks the sidebar. Resume keeps the saved list and also
+checks the open sidebar, adding chats in the saved job's projects that appeared since the pause and keeping
+chats the sidebar no longer shows. It is not an authoritative Project
+membership API; scroll the sidebar to the end and have the intended Project
+open before starting. A personal-chat resume keeps its saved list but cannot
+identify which account owns newly visible personal chats; start a new sync to
+include those later chats.
 
-An optional ZIP combines batch output in memory. Large batches need sufficient
+An optional ZIP combines only the new or updated files written in that run;
+the on-disk folder is the cumulative backup. Large batches need sufficient
 browser memory. Cancelled or interrupted runs keep files already downloaded.
 
 ## Static HTML site
@@ -80,9 +89,11 @@ Check **Save a static HTML site** to write an HTML page for the active
 conversation, plus an index. Chats that belong to a project are grouped under
 that project. Chats with no project stay in their own folders. Two chats with
 the same title each get a directory ending in `~` and the conversation id, so
-one does not replace the other. Files the export retrieved sit beside the chat
+one does not replace the other. Project directories also end in `~` and the
+project id, keeping same-title projects separate. Files the export retrieved sit beside the chat
 page and are linked with relative URLs. A file that could not be retrieved is
-named on the page, and that export stays incomplete. The pages escape
+named on the page, and that export stays incomplete. Images on other web hosts
+are shown as links; opening a saved page does not request them automatically. The pages escape
 conversation text and carry their own styles, so a page opened on its own is
 readable. Each chat folder also contains `conversation.md`. On the page,
 **Get in markdown** opens that file, and **Copy path to markdown version**
@@ -122,6 +133,7 @@ land under `chatgpt-export/html/`.
 - Text scanning depends on ChatGPT's live page structure. The extension reports incomplete scans when it cannot establish the conversation boundaries. It does not export every alternate branch, hidden message, or unsupported canvas representation.
 - Signed attachment links left after a failed download may expire and can grant temporary access to the file. Review exports before sharing them.
 - Ordinary link query parameters are removed; links that require those parameters may stop working.
+- Images hosted outside ChatGPT's declared file hosts are not fetched by the extension. Their links remain in Markdown without query parameters; click an external image link in the HTML site only if you want to contact its host.
 
 The current development build is **not accepted as a complete attachment backup**.
 See [the feature checklist](FEATURES.md) for verification scope and
@@ -133,7 +145,8 @@ that every current ChatGPT layout works.
 - `clipboardWrite`: deliver Markdown to the clipboard when saving is unchecked.
 - `scripting`: run extraction in the ChatGPT tab.
 - `downloads`: save files and inspect export download history for batch resume.
-- `storage`: keep a local metadata index and the most recent error, not conversation text or file contents.
+- `storage`: keep a local metadata index, the most recent error, and unfinished batches (conversation id, address, title, and Project id), not message text or file contents.
+- `sidePanel`: open the export controls in a side panel so a click on the page does not cancel a running export.
 
 Host access covers `chatgpt.com`, `chat.openai.com`, and `files.oaiusercontent.com`.
 File and batch metadata requests use your existing ChatGPT session. No developer
@@ -144,8 +157,12 @@ local-storage, and signed-link handling.
 ## Development and publishing
 
 Tests use Node.js (CI uses Node 24); there are no package dependencies to install.
+Runtime source lives under `src/content/` and `src/popup/`. Run `npm run build`
+after editing it; the generated entry scripts are committed so an unpacked
+extension needs no build step.
 
 ```sh
+npm run build
 npm test
 npm run check
 ```

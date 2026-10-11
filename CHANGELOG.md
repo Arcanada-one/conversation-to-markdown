@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grouped under that project. Chats with no project stay under `chats/`. Two
   chats with the same title get separate directories ending in `~` and the
   conversation id.
+- Project directories include the project id, so projects with the same title
+  stay separate in the HTML index.
 - Retrieved files sit beside the chat page and are linked with relative URLs.
   A file that was not retrieved is named on the page, and that export stays
   incomplete.
@@ -37,9 +39,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   incomplete chat is marked. Code blocks have **Copy code**.
 - **Show export folder** reveals the download in the file manager. The status
   line names `chatgpt-export/html/` and the log file.
+- The toolbar button opens a side panel. The panel stays open when the page
+  is clicked, so a long export is not cancelled by using ChatGPT.
+- A batch waits when it would start more than 30 ChatGPT calls in a minute.
+  A rate-limit response holds the run instead of skipping the conversation.
+- Pause stores the batch. Closing the panel, or coming back on a later day,
+  offers **Resume saved export**. Conversations already saved are skipped.
+  A resumed run stamps new files with the time of that resume, so a
+  conversation that grew is written beside the earlier file.
+- **Sync backup** saves chats that are new, updated, or unfinished, and leaves
+  unchanged chats on disk. Resuming a paused backup checks the open sidebar
+  and adds chats in the saved job's projects that appeared since the pause. Chats already on the saved
+  list stay on it when the sidebar does not show them.
 
 ### Fixed
 
+- A failed or interrupted attachment, HTML page, or HTML index no longer advances
+  the backup index. The next sync can repair it, and a partial batch keeps its
+  saved conversation list. Failed writes no longer show a green completion status.
+- A download that finishes before its completion listener is attached is checked
+  in Chrome's history, so a good file is not incorrectly reported as incomplete.
+- Resumed jobs created before batch file saving was required use the blob Markdown
+  writer too, so a long Cyrillic conversation does not exceed Chrome's URL limit.
+- Pause appears only after the batch list is stored. A storage failure warns that
+  the run cannot resume after closing the panel. A sidebar with no detectable
+  scroller no longer claims its mounted rows are the complete list.
+- Later HTML indexes retain the incomplete badge for earlier partial chat pages.
+- Sync checks metadata even when a Markdown file already exists. Without an
+  index entry it exports again; a filename alone cannot prove the chat is current.
+- HTML resume requires both the chat page and a completion marker newer than
+  that page, so a deleted page or a later partial rewrite is not skipped.
+- Resume loads the sidebar collector on a freshly opened ChatGPT page. A
+  finished job cannot be changed back to paused by its old button.
+- **Show export folder** selects an export file rather than the run log.
 - A conversation already saved as Markdown is still exported as HTML when its
   HTML page is not complete. A later HTML export does not replace the archive
   index with only the chats from that run.

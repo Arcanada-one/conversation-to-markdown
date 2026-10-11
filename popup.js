@@ -30,6 +30,7 @@ const btnShowFolder = document.getElementById('btn-show-folder');
 function exportButtonLabel() {
   var saveMd = !!(chkImages && chkImages.checked);
   var saveHtml = !!(chkHtml && chkHtml.checked);
+  if (chkBatch && chkBatch.checked && (saveMd || saveHtml)) return 'Sync backup';
   if (saveMd && saveHtml) return 'Save Markdown and HTML';
   if (saveHtml) return 'Save HTML site';
   if (saveMd) return 'Save Markdown';
@@ -84,22 +85,40 @@ var scanningTabId = null;
 var progressTimer = null;
 var batchCancelled = false;
 var batchPaused = false;
+var batchRunActive = false;
 
 function showStatus(type, message) {
   status.className = type;
   status.textContent = message;
 }
 
+/** Read HTTP Markdown references, including escaped labels and angle URLs. */
+function markdownHttpRefs(md) {
+  const refs = [];
+  const re = /(!?)\[((?:\\.|[^\]])*)\]\((?:<(https?:\/\/[^>\s]+)>|(https?:\/\/[^)\s]+))\)/g;
+  let match;
+  while ((match = re.exec(md)) !== null) {
+    refs.push({
+      image: match[1] === '!',
+      label: match[2].replace(/\\([\\\[\]])/g, '$1'),
+      url: match[3] || match[4],
+    });
+  }
+  return refs;
+}
+
 /** Parse ![](url) references from Markdown, return {url, label, kind} pairs. */
 function parseImageRefs(md) {
   const seen = new Set();
   const refs = [];
-  const re = /!\[([^\]]*)\]\((https?:\/\/[^)]+)\)/g;
-  let m;
-  while ((m = re.exec(md)) !== null) {
-    if (!seen.has(m[2])) {
-      seen.add(m[2]);
-      refs.push({ url: m[2], label: m[1], kind: 'image' });
+  for (const ref of markdownHttpRefs(md)) {
+    if (!ref.image || seen.has(ref.url)) continue;
+    let parsed;
+    try { parsed = new URL(ref.url); } catch (_e) { continue; }
+    if (parsed.protocol === 'https:' &&
+        ['chatgpt.com', 'chat.openai.com', 'files.oaiusercontent.com'].includes(parsed.hostname)) {
+      seen.add(ref.url);
+      refs.push({ url: ref.url, label: ref.label, kind: 'image' });
     }
   }
   return refs;
@@ -109,12 +128,10 @@ function parseImageRefs(md) {
 function parseFileRefs(md) {
   const seen = new Set();
   const refs = [];
-  const re = /(?<!!)\[([^\]]*)\]\((https?:\/\/[^)]+)\)/g;
-  let m;
-  while ((m = re.exec(md)) !== null) {
-    if (!seen.has(m[2]) && isDownloadableFileUrl(m[2])) {
-      seen.add(m[2]);
-      refs.push({ url: m[2], label: m[1], kind: 'file' });
+  for (const ref of markdownHttpRefs(md)) {
+    if (!ref.image && !seen.has(ref.url) && isDownloadableFileUrl(ref.url)) {
+      seen.add(ref.url);
+      refs.push({ url: ref.url, label: ref.label, kind: 'file' });
     }
   }
   return refs;
@@ -127,6 +144,7 @@ function parseArtifactRefs(md) {
 function isDownloadableFileUrl(url) {
   try {
     const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') return false;
     if (parsed.hostname === 'files.oaiusercontent.com') return true;
     if (parsed.hostname === 'chatgpt.com' || parsed.hostname === 'chat.openai.com') {
       return parsed.pathname.includes('/files/') || parsed.pathname.includes('/estuary/');
@@ -246,12 +264,17 @@ function foldExceptId(key) {
   return String(key).slice(0, at).toLowerCase() + String(key).slice(at);
 }
 
-/** Format a date as YYYYMMDD-HHMM for timestamped re-exports. */
+var EXPORT_STAMP_NONCE = typeof crypto !== 'undefined' && crypto.randomUUID
+  ? crypto.randomUUID() : Math.random().toString(36).slice(2).padEnd(8, '0');
+var exportStampSequence = 0;
+
+/** Format a unique run stamp; older YYYYMMDD-HHMM stamps remain readable. */
 function formatExportTimestamp(date) {
   var d = date || new Date();
   var pad = function(n) { return String(n).padStart(2, '0'); };
   return String(d.getFullYear()) + pad(d.getMonth() + 1) + pad(d.getDate()) +
-    '-' + pad(d.getHours()) + pad(d.getMinutes());
+    '-' + pad(d.getHours()) + pad(d.getMinutes()) + '-' +
+    EXPORT_STAMP_NONCE + '-' + (++exportStampSequence).toString(36);
 }
 
 /** Build the .md filename; timestamp suffix implements re-export without uniquify suffixes. */
@@ -378,7 +401,7 @@ function candidateExportNames(conv, projectSlug, stamps) {
   return { owned: owned, legacy: legacy };
 }
 
-/** The `YYYYMMDD-HHMM` stamps that appear in these download names.
+/** The current unique stamps and older `YYYYMMDD-HHMM` stamps in download names.
  *
  *  Collected so `candidateExportNames` can generate the stamped names that could
  *  exist, instead of trying to recognise a stamp inside a name it did not build. A
@@ -391,7 +414,7 @@ function stampsInPaths(paths) {
     // stamp is followed by the marker, not by another separator.
     var fields = mdStem(paths[i]).split(/--|~/);
     for (var f = 0; f < fields.length; f++) {
-      if (/^\d{8}-\d{4}$/.test(fields[f])) stamps.add(fields[f]);
+      if (/^\d{8}-\d{4}(?:-[a-z0-9-]{8,36}-[a-z0-9]+)?$/.test(fields[f])) stamps.add(fields[f]);
     }
   }
   return Array.from(stamps);
@@ -477,7 +500,6 @@ function filterPendingConversations(conversations, completedPaths, projectSlug) 
   });
 }
 
-
 /** Classify a per-conversation failure so the run can react instead of
  *  burning through the remaining list.
  *
@@ -489,7 +511,7 @@ function classifyBatchFailure(message) {
   var text = String(message || '').toLowerCase();
   if (typeof navigator !== 'undefined' && navigator && navigator.onLine === false) return 'offline';
   if (/failed to fetch|network ?error|net::|err_internet|err_network|err_name_not_resolved|err_connection/.test(text)) return 'offline';
-  if (/\b(?:502|503|504)\b|bad gateway|service unavailable|gateway timeout|too many requests|\b429\b/.test(text)) return 'unreachable';
+  if (/\b(?:502|503|504)\b|bad gateway|service unavailable|gateway timeout|too many requests|\b429\b|rate limit|slow down|try again later/.test(text)) return 'unreachable';
   if (/did not load|timed out|timeout/.test(text)) return 'transient';
   return 'conversation';
 }
@@ -501,6 +523,70 @@ function backoffDelayMs(attempt) {
 
 function sleep(ms) {
   return new Promise(function(resolve) { setTimeout(resolve, ms); });
+}
+
+/** How many ChatGPT calls a batch may start in one minute.
+ *
+ *  Observed on 2026-10-10: a continuous export began receiving errors from
+ *  ChatGPT after about 50 sessions, with no pause between them. The rate that
+ *  still succeeds was not measured, so 30 is not a midpoint between two
+ *  populations. Each session is counted as OPENAI_PAGE_LOAD_CALLS for the
+ *  page load the navigation causes, plus the extension's own reads. Fifty
+ *  page loads is 200 counted calls, a little over six minutes of budget
+ *  before the time the scans themselves take. A slower run can be resumed.
+ *  Reading a rate-limit error as "this conversation is broken" and skipping
+ *  it cannot be repaired by re-running if the skip is then treated as done.
+ */
+var OPENAI_CALLS_PER_MINUTE = 30;
+var OPENAI_CALL_WINDOW_MS = 60000;
+var OPENAI_PAGE_LOAD_CALLS = 4;
+var OPENAI_METADATA_CALLS = 2;
+var OPENAI_FILE_LOOKUP_CALLS = 2;
+
+/** Sliding window of call times. `take(n)` waits until n more calls fit. */
+function createCallQuota(limit, windowMs, now, wait, onWait) {
+  var times = [];
+  var cap = typeof limit === 'number' ? limit : OPENAI_CALLS_PER_MINUTE;
+  var span = typeof windowMs === 'number' ? windowMs : OPENAI_CALL_WINDOW_MS;
+  var clock = now || function() { return Date.now(); };
+  var sleepFn = wait || sleep;
+  return {
+    limit: cap,
+    take: async function(count) {
+      var need = count > 0 ? Math.floor(count) : 1;
+      var frozen = 0;
+      for (;;) {
+        var t = clock();
+        var kept = [];
+        for (var i = 0; i < times.length; i++) {
+          if (t - times[i] < span) kept.push(times[i]);
+        }
+        times = kept;
+        if (times.length + need <= cap) {
+          for (var n = 0; n < need; n++) times.push(t);
+          return;
+        }
+        var delay = span - (t - times[0]);
+        if (delay < 1) delay = 1;
+        if (onWait) onWait(delay);
+        var before = t;
+        await sleepFn(delay);
+        // A harness that collapses timers without moving the clock would spin
+        // here forever. One collapsed sleep is ignored; a second means the
+        // clock is not a clock, and the run continues. Date.now advances
+        // during a real sleep, so this branch is not the production path.
+        if (clock() === before) {
+          frozen += 1;
+          if (frozen > 1) {
+            for (var k = 0; k < need; k++) times.push(clock());
+            return;
+          }
+        } else {
+          frozen = 0;
+        }
+      }
+    },
+  };
 }
 
 /** Block while the operator has paused, and report cancellation. */
@@ -539,6 +625,13 @@ async function waitWhilePaused(controls) {
  * ------------------------------------------------------------------------- */
 
 var INDEX_KEY = 'c2mExportIndex';
+/** One paused or running batch. Ids, addresses and titles only — never the
+ *  message text. The files on disk and the export index stay the authority
+ *  for what already landed; this record is how a run continues days later. */
+var BATCH_JOB_KEY = 'c2mBatchJob';
+var BATCH_JOB_PREFIX = BATCH_JOB_KEY + ':';
+var activeBatchJob = null;
+var batchJobStored = false;
 /** Deliberately far below the 10MB quota. The index is a convenience; the files
  *  on disk remain the source of truth, so it may be trimmed but must never grow
  *  until Chrome refuses writes for the whole extension. */
@@ -548,6 +641,170 @@ var INDEX_BYTE_BUDGET = 1048576;
 function storageArea() {
   if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) return null;
   return chrome.storage.local;
+}
+
+/** The fields a resumed batch needs. Anything else on the sidebar row,
+ *  including message text a caller might have attached, is dropped. */
+function conversationJobRecord(conv) {
+  var source = conv || {};
+  return {
+    id: source.id || null,
+    href: source.href || null,
+    title: source.title || null,
+    slug: source.slug || null,
+    projectId: source.projectId || null,
+    projectTitle: source.projectTitle || null,
+  };
+}
+
+function writeBatchJob(job) {
+  return new Promise(function(resolve) {
+    var area = storageArea();
+    if (!area || typeof area.set !== 'function') {
+      resolve({ ok: false, error: 'no storage' });
+      return;
+    }
+    var payload = {};
+    payload[BATCH_JOB_KEY] = job;
+    if (job && job.jobId && job.status !== 'done') {
+      payload[BATCH_JOB_PREFIX + job.jobId] = job;
+    }
+    try {
+      area.set(payload, function() {
+        var err = chrome.runtime && chrome.runtime.lastError;
+        if (err) { resolve({ ok: false, error: err.message }); return; }
+        if (job && job.jobId && job.status === 'done' && typeof area.remove === 'function') {
+          area.remove(BATCH_JOB_PREFIX + job.jobId, function() {
+            var removalError = chrome.runtime && chrome.runtime.lastError;
+            resolve(removalError ? { ok: false, error: removalError.message } : { ok: true });
+          });
+        } else {
+          resolve({ ok: true });
+        }
+      });
+    } catch (err) {
+      resolve({ ok: false, error: (err && err.message) || String(err) });
+    }
+  });
+}
+
+function readBatchJob(projectId) {
+  return new Promise(function(resolve) {
+    var area = storageArea();
+    if (!area || typeof area.get !== 'function') { resolve(null); return; }
+    try {
+      area.get(null, function(data) {
+        if (chrome.runtime && chrome.runtime.lastError) { resolve(null); return; }
+        var jobs = [];
+        for (var key of Object.keys(data || {})) {
+          if (key.indexOf(BATCH_JOB_PREFIX) !== 0) continue;
+          var candidate = data[key];
+          if (!candidate || !Array.isArray(candidate.conversations) || candidate.status === 'done') continue;
+          if (projectId !== undefined && (candidate.projectId || null) !== projectId) continue;
+          jobs.push(candidate);
+        }
+        jobs.sort(function(a, b) { return String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')); });
+        if (jobs.length) { resolve(jobs[0]); return; }
+        // Older releases stored only one job under the unscoped key. The
+        // second read also supports small Chrome shims that lack get(null).
+        area.get(BATCH_JOB_KEY, function(legacyData) {
+          var legacy = legacyData && legacyData[BATCH_JOB_KEY];
+          var legacyScope = legacy && legacy.projectId !== undefined ? legacy.projectId : null;
+          if (legacy && legacy.projectId === undefined && Array.isArray(legacy.conversations)) {
+            for (var row of legacy.conversations) {
+              if (row.projectId) { legacyScope = row.projectId; break; }
+            }
+          }
+          if (legacy && Array.isArray(legacy.conversations) &&
+              (projectId === undefined || legacyScope === projectId)) {
+            resolve(legacy);
+          } else {
+            resolve(null);
+          }
+        });
+      });
+    } catch (_e) {
+      resolve(null);
+    }
+  });
+}
+
+/** Union a saved backup with a fresh sidebar walk.
+ *
+ *  Saved rows stay, in their order, even when this sidebar no longer shows
+ *  them. A chat that exists only on the sidebar is appended. Dropping a saved
+ *  row would lose a chat the user paused on; an extra sidebar chat costs one
+ *  more export. The same id is kept once. `added` is how many sidebar rows
+ *  were not already in the saved list. */
+function mergeBackupConversations(saved, discovered) {
+  var out = [];
+  var seen = Object.create(null);
+  function keyOf(row) {
+    if (row && row.id) return 'id:' + row.id;
+    if (row && row.href) return 'href:' + row.href;
+    return '';
+  }
+  function add(row) {
+    var record = conversationJobRecord(row);
+    var key = keyOf(record);
+    if (!key || seen[key]) return false;
+    seen[key] = true;
+    out.push(record);
+    return true;
+  }
+  var base = Array.isArray(saved) ? saved : [];
+  var extra = Array.isArray(discovered) ? discovered : [];
+  for (var i = 0; i < base.length; i++) add(base[i]);
+  var added = 0;
+  for (var j = 0; j < extra.length; j++) {
+    if (add(extra[j])) added += 1;
+  }
+  return { conversations: out, added: added };
+}
+
+async function readSidebarConversations(tabId) {
+  await chrome.scripting.executeScript({ target: { tabId: tabId }, files: ['content.js'] });
+  var listResult = await chrome.scripting.executeScript({
+    target: { tabId: tabId },
+    func: async function() {
+      // Scroll the virtualized sidebar so every row mounts. The one-frame
+      // reader is the fallback only: it can return a subset, and a subset
+      // exported as "the whole Project" is invisible to the user.
+      if (typeof collectSidebarConversations === 'function') {
+        return await collectSidebarConversations();
+      }
+      if (typeof listSidebarConversations === 'function') {
+        return { conversations: listSidebarConversations(), complete: false, reason: 'no-collector' };
+      }
+      return { conversations: [], complete: false, reason: 'no-collector' };
+    },
+  });
+  var listed = listResult?.[0]?.result || {};
+  return {
+    conversations: (listed && listed.conversations) || [],
+    complete: !!(listed && listed.complete),
+    reason: (listed && listed.reason) || 'unknown',
+  };
+}
+
+async function rememberBatchJob(job) {
+  activeBatchJob = job;
+  var stored = await writeBatchJob(job);
+  batchJobStored = stored.ok;
+  if (batchRunActive && batchJobStored && btnPause) btnPause.classList.add('visible');
+  return stored;
+}
+
+/** The panel document is going away. The loop dies with it. A running job has
+ *  to be marked paused here, or the only copy left says the run is still going
+ *  and the next open has to guess. A finished job stays finished: closing the
+ *  panel after success must not offer a resume of work that already ended. */
+function handlePanelHide() {
+  if (!batchJobStored || !activeBatchJob || activeBatchJob.status === 'done') return;
+  batchPaused = true;
+  activeBatchJob.status = 'paused';
+  activeBatchJob.updatedAt = new Date().toISOString();
+  writeBatchJob(activeBatchJob);
 }
 
 /** Read the whole index. An unreadable or corrupt store reads as empty, which
@@ -629,6 +886,9 @@ function classifyAgainstIndex(index, conversationId, live) {
   var row = index ? index[String(conversationId)] : null;
   if (!row) return { verdict: 'new', stored: null };
   if (!live) return { verdict: 'unknown', stored: row };
+  if (live.updateTime == null && live.currentNode == null && !(live.messageCount > 0)) {
+    return { verdict: 'unknown', stored: row };
+  }
 
   var sameNode = row.currentNode != null && live.currentNode != null
     ? String(row.currentNode) === String(live.currentNode)
@@ -646,6 +906,7 @@ function classifyAgainstIndex(index, conversationId, live) {
 
 /** Resume a batch by reading prior download paths — the fallback when no index
  *  is available, and still a cross-check on the files actually present. */
+
 function searchCompletedDownloadPaths(projectSlug) {
   return new Promise(function(resolve) {
     if (typeof chrome === 'undefined' || !chrome.downloads || !chrome.downloads.search) {
@@ -813,6 +1074,18 @@ function waitForDownloadComplete(downloadId, timeoutMs) {
     };
     var timer = setTimeout(function() { finish(false); }, timeoutMs || 120000);
     chrome.downloads.onChanged.addListener(listener);
+    // A small file can finish between the download callback and this listener.
+    if (typeof chrome.downloads.search === 'function') {
+      try {
+        chrome.downloads.search({ id: downloadId }, function(items) {
+          if (chrome.runtime && chrome.runtime.lastError) return;
+          var item = items && items[0];
+          if (!item || item.id !== downloadId) return;
+          if (item.state === 'interrupted') finish(false);
+          else if (item.state === 'complete' && item.exists === true) finish(true);
+        });
+      } catch (_e) { /* the event listener still observes later completion */ }
+    }
   });
 }
 
@@ -875,7 +1148,7 @@ function stopProgressPolling() {
 async function saveConversationExport(tabId, result, options) {
   var downloadImages = options.downloadImages;
   var useTimestamp = options.useTimestamp;
-  var batchStamp = options.batchStamp;
+  var batchStamp = options.batchStamp || formatExportTimestamp();
   var projectSlug = options.projectSlug;
   var zipEntries = options.zipEntries;
   var slug = result.slug || null;
@@ -929,16 +1202,30 @@ async function saveConversationExport(tabId, result, options) {
     }
 
     mdFinal = md;
-    for (var i = 0; i < extracted.length; i++) {
+    for (var i = 0; i < refs.length; i++) {
       var ex = extracted[i];
       if (ex && ex.dataUrl) {
         var ref = refs[i] || {};
         var fname = artifactFilename(ex.url, ref.label || '', i, slug, ref.kind || 'image');
+        var dot = fname.lastIndexOf('.');
+        fname = fname.slice(0, dot) + '--' + batchStamp + fname.slice(dot);
         var targetPath = folderPath + '/' + fname;
         var r = await downloadOne(ex.dataUrl, fname, targetPath);
+        if (r.ok && chrome.downloads.onChanged) {
+          if (!(await waitForDownloadComplete(r.downloadId, MD_WRITE_TIMEOUT_MS))) {
+            r.ok = false;
+            r.error = 'the attachment write did not complete';
+          }
+        } else if (r.ok) {
+          r.ok = false;
+          r.error = 'attachment completion could not be checked';
+        }
         if (r.ok) {
           dlOk++;
-          mdFinal = mdFinal.split(ex.url).join('./' + r.filename);
+          var localUrl = './' + r.filename.replace(/[ #%?()[\]]/g, function(char) {
+            return '%' + char.charCodeAt(0).toString(16).toUpperCase();
+          });
+          mdFinal = mdFinal.split(ex.url).join(localUrl);
           var dataPart = ex.dataUrl.split(',')[1] || '';
           var bin = Uint8Array.from(atob(dataPart), function(c) { return c.charCodeAt(0); });
           savedFiles.push({ url: ex.url, name: fname, bytes: bin });
@@ -946,6 +1233,8 @@ async function saveConversationExport(tabId, result, options) {
         } else {
           dlErrors.push(r.error || 'unknown');
         }
+      } else {
+        dlErrors.push('attachment unavailable: ' + (refs[i].label || 'file ' + (i + 1)));
       }
     }
   }
@@ -991,6 +1280,7 @@ async function saveConversationExport(tabId, result, options) {
     }
   }
   mdHandle.revoke(mdHandle.url);
+  if (mdWrite.ok) noteExportDownload(mdWrite.downloadId);
   if (zipEntries) addZipEntry(zipEntries, projectSlug, convSlug, mdName, mdFinal);
 
   return {
@@ -1005,6 +1295,7 @@ async function saveConversationExport(tabId, result, options) {
     savedFiles: savedFiles,
   };
 }
+
 
 /** Where the last failure is kept so it outlives the popup. */
 var LAST_ERROR_KEY = 'c2mLastError';
@@ -1021,20 +1312,20 @@ var LAST_ERROR_KEY = 'c2mLastError';
  *  DevTools is attached and carries the STACK, which the status never showed.
  *  chrome.storage survives the popup closing entirely, which is the case that
  *  left the operator with nothing. */
-function reportFailure(phase, err, extra) {
+function reportFailure(phase, err) {
   var message = (err && err.message) || String(err) || 'unknown error';
   showStatus('error', message);
 
-  var detail = Object.assign({
-    phase: phase,
-    message: message,
-    stack: (err && err.stack) || null,
+  var detail = {
+    phase: sanitizeLogText(phase),
+    message: sanitizeLogText(message),
+    stack: err && err.stack ? sanitizeLogText(err.stack) : null,
     at: new Date().toISOString(),
-  }, extra || {});
+  };
 
   // eslint-disable-next-line no-console
   if (typeof console !== 'undefined' && console.error) {
-    console.error('[conversation-to-markdown] ' + phase + ' failed:', detail, err);
+    console.error('[conversation-to-markdown] ' + phase + ' failed:', detail);
   }
 
   // Best effort by design: a failure to record a failure must not replace it.
@@ -1069,18 +1360,25 @@ function buildSaveStatus(parts) {
     };
   }
 
-  var head = '✓ Saved' + parts.partialSuffix + ' ' + counts + '\n' + saved.mdName;
-  if (refs.length === 0) return { type: 'success', text: head };
-  if (saved.dlOk > 0) {
-    return { type: 'success', text: head + ' + ' + saved.dlOk + '/' + refs.length + ' files' };
+  var incomplete = !!parts.partialSuffix || saved.dlOk < refs.length;
+  var head = (incomplete ? '⚠ Saved incompletely' : '✓ Saved') + ' ' + counts + '\n' + saved.mdName;
+  if (refs.length === 0) return {
+    type: incomplete ? 'warning' : 'success',
+    text: head + (incomplete ? '\nRe-run to complete it.' : ''),
+  };
+  if (saved.dlOk === refs.length) {
+    return {
+      type: incomplete ? 'warning' : 'success',
+      text: head + ' + ' + saved.dlOk + '/' + refs.length + ' files' +
+        (incomplete ? '\nRe-run to complete it.' : ''),
+    };
   }
-  // Files were referenced and none arrived. Said plainly, because the .md then
-  // holds URLs that expire: the export looks complete today and is empty later.
+  // A missing attachment leaves an expiring URL in the saved Markdown.
   var reason = (saved.dlErrors && saved.dlErrors.length > 0) ? ' (' + saved.dlErrors[0] + ')' : '';
   return {
-    type: 'success',
-    text: head + '\n0/' + refs.length + ' files fetched' + reason +
-      ' — the .md keeps their original links, which expire.',
+    type: 'warning',
+    text: head + '\n' + saved.dlOk + '/' + refs.length + ' files fetched' + reason +
+      ' — missing files remain as links that expire. Re-run to repair.',
   };
 }
 
@@ -1203,7 +1501,6 @@ async function flushRunLog(log, options) {
         'chatgpt-export/logs/' + log.runId + '.json',
         opts.timeoutMs || 12000
       );
-      if (write.ok) noteExportDownload(write.downloadId);
       if (write.ok && chrome.downloads.onChanged) {
         var written = await waitForDownloadComplete(write.downloadId, opts.timeoutMs || 12000);
         if (!written) {
@@ -1248,7 +1545,40 @@ function searchDownloadPaths(filenameRegex, accept) {
 
 function searchHtmlCompletePaths() {
   if (typeof htmlCompleteDirFromDownloadPath !== 'function') return Promise.resolve(null);
-  return searchDownloadPaths('chatgpt-export/html/.+/export-complete\\.txt$', htmlCompleteDirFromDownloadPath);
+  return new Promise(function(resolve) {
+    if (typeof chrome === 'undefined' || !chrome.downloads || !chrome.downloads.search) {
+      resolve(null);
+      return;
+    }
+    chrome.downloads.search({ filenameRegex: 'chatgpt-export/html/.+/(index\\.html|export-complete\\.txt)$' }, function(items) {
+      if (chrome.runtime && chrome.runtime.lastError) { resolve(null); return; }
+      var dirs = Object.create(null);
+      for (var i = 0; i < (items || []).length; i++) {
+        var item = items[i];
+        if (!item || !item.filename) continue;
+        var pageDir = htmlChatDirFromDownloadPath(item.filename);
+        var markerDir = htmlCompleteDirFromDownloadPath(item.filename);
+        var dir = pageDir || markerDir;
+        if (!dir) continue;
+        var row = dirs[dir] || (dirs[dir] = {});
+        var field = pageDir ? 'page' : 'marker';
+        if (!row[field] || (typeof item.id === 'number' && item.id > row[field].id)) row[field] = item;
+      }
+      var complete = [];
+      for (var dir in dirs) {
+        var row = dirs[dir];
+        // The marker is written after the page. A later page write without a
+        // later marker is partial, and a marker without a page proves nothing.
+        if (row.page && row.marker && row.page.exists === true && row.marker.exists === true &&
+            row.page.state === 'complete' && row.marker.state === 'complete' &&
+            typeof row.page.id === 'number' && typeof row.marker.id === 'number' &&
+            row.marker.id > row.page.id) {
+          complete.push(row.marker.filename);
+        }
+      }
+      resolve(complete);
+    });
+  });
 }
 
 function searchHtmlPagePaths() {
@@ -1290,7 +1620,8 @@ function exportSavedLines(runLog, htmlSaved) {
 async function publishHtmlSessions(sessions) {
   var earlier = typeof searchHtmlPagePaths === 'function' ? await searchHtmlPagePaths() : [];
   if (earlier === null) earlier = [];
-  var laid = layoutStaticSite(sessions, earlier);
+  var complete = typeof searchHtmlCompletePaths === 'function' ? await searchHtmlCompletePaths() : null;
+  var laid = layoutStaticSite(sessions, earlier, complete);
   var write = await downloadStaticSite(laid);
   noteExportDownload(write.downloadId);
   return write;
@@ -1321,39 +1652,71 @@ if (typeof window !== 'undefined' && window.addEventListener) {
     });
     flushRunLog(activeRunLog, activeRunLogOptions);
   });
+  window.addEventListener('pagehide', handlePanelHide);
 }
 
 /** Walk the sidebar conversation list in the active tab, export each in turn. */
 async function runBatchExport(tab, options) {
   var downloadImages = options.downloadImages;
   var useTimestamp = options.useTimestamp;
+  var projectId = options.projectId === undefined
+    ? projectIdFromLocation(tab && tab.url) : options.projectId;
+  var scopeKnown = options.projectId !== undefined || !!(tab && tab.url);
   var projectSlug = options.projectSlug;
-  var batchStamp = options.batchStamp;
+  var batchStamp = options.batchStamp || formatExportTimestamp();
   var onProgress = options.onProgress;
   var zipEntries = options.buildZip ? [] : null;
   if (zipEntries && typeof options.zipByteBudget === 'number') {
     zipEntries.budget = options.zipByteBudget;
   }
   var completedPaths = await searchCompletedDownloadPaths(projectSlug);
-  var listResult = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func: async function() {
-      // Scroll the virtualized sidebar so every row mounts. The one-frame
-      // reader is the fallback only: it can return a subset, and a subset
-      // exported as "the whole Project" is invisible to the user.
-      if (typeof collectSidebarConversations === 'function') {
-        return await collectSidebarConversations();
+  var conversations;
+  var listComplete;
+  var listReason;
+  var discovered = 0;
+  // A saved list alone is the paused backup. `discover` walks the open sidebar
+  // and appends chats that were not on that list. The saved rows are never
+  // dropped: the page open days later may be a different project, and following
+  // only that sidebar would lose the chats the user paused.
+  if (options.discover && Array.isArray(options.conversations)) {
+    var found = [];
+    var walk = { complete: false, reason: 'unknown' };
+    try {
+      walk = await readSidebarConversations(tab.id);
+      var projects = Object.create(null);
+      for (var savedRow of options.conversations) {
+        if (savedRow.projectId) projects[String(savedRow.projectId)] = true;
       }
-      if (typeof listSidebarConversations === 'function') {
-        return { conversations: listSidebarConversations(), complete: false, reason: 'no-collector' };
-      }
-      return { conversations: [], complete: false, reason: 'no-collector' };
-    },
-  });
-  var listed = listResult?.[0]?.result || {};
-  var conversations = (listed && listed.conversations) || [];
-  var listComplete = !!(listed && listed.complete);
-  var listReason = (listed && listed.reason) || 'unknown';
+      found = walk.conversations.filter(function(row) {
+        return row.projectId && projects[String(row.projectId)];
+      });
+    } catch (_e) {
+      found = [];
+    }
+    var merged = mergeBackupConversations(options.conversations, found);
+    conversations = merged.conversations;
+    discovered = merged.added;
+    if (!found.length) {
+      listComplete = false;
+      listReason = 'saved-job';
+    } else {
+      listComplete = walk.complete;
+      listReason = 'sync';
+    }
+  } else if (Array.isArray(options.conversations)) {
+    conversations = options.conversations.map(conversationJobRecord).filter(function(row) {
+      return row.id || row.href;
+    });
+    listComplete = options.listComplete !== false;
+    listReason = 'saved-job';
+  } else {
+    var listed = await readSidebarConversations(tab.id);
+    conversations = scopeKnown ? listed.conversations.filter(function(row) {
+      return (row.projectId || null) === (projectId || null);
+    }) : listed.conversations;
+    listComplete = listed.complete;
+    listReason = listed.reason;
+  }
   if (!conversations.length) {
     return { ok: false, error: 'No conversations found in the sidebar. Open a ChatGPT Project page first.' };
   }
@@ -1366,41 +1729,26 @@ async function runBatchExport(tab, options) {
   if (!htmlHistoryKnown) htmlCompletePaths = [];
   var htmlPagePaths = wantHtmlRun ? await searchHtmlPagePaths() : [];
   if (htmlPagePaths === null) htmlPagePaths = [];
+  var exportIndex = await readExportIndex();
+  var wantMarkdown = !!downloadImages || !wantHtmlRun;
   var markdownPending = filterPendingConversations(conversations, completedPaths, projectSlug);
   var markdownPendingKeys = Object.create(null);
   for (var m = 0; m < markdownPending.length; m++) {
     markdownPendingKeys[markdownPending[m].id || markdownPending[m].slug] = true;
   }
-  var pending = markdownPending.slice();
-  if (wantHtmlRun) {
-    var pendingKeys = Object.create(null);
-    for (var p = 0; p < pending.length; p++) {
-      pendingKeys[pending[p].id || pending[p].slug] = true;
-    }
-    for (var c = 0; c < conversations.length; c++) {
-      var candidate = conversations[c];
-      var key = candidate.id || candidate.slug;
-      if (pendingKeys[key]) continue;
-      if (!htmlHistoryKnown || !htmlChatLanded(candidate, htmlCompletePaths)) {
-        pending.push(candidate);
-        pendingKeys[key] = true;
-      }
-    }
-  }
-  var skipped = conversations.length - pending.length;
+  // A filename says a file landed once, not whether the chat changed since.
+  // With no index row we cannot prove it is unchanged, so inspect it too.
+  var pending = conversations;
   var exported = 0;
   var errors = [];
-  // Null when the storage permission is absent, which makes every index check a
-  // no-op and leaves the download-history path in charge — the pre-1.2.0
-  // behaviour, unchanged.
-  var exportIndex = await readExportIndex();
   var indexSkipped = 0;
   var grown = 0;
 
   var retried = 0;
   var held = 0;
   var partial = 0;
-  var htmlSessions = [];
+  var htmlLinks = [];
+  var htmlChatFiles = 0;
   var htmlOk = true;
   var runLog = createRunLog('batch', {
     runId: batchStamp || formatExportTimestamp(),
@@ -1412,7 +1760,7 @@ async function runBatchExport(tab, options) {
   pushLogEvent(runLog, {
     phase: 'run',
     outcome: 'started',
-    counts: { listed: conversations.length, pending: pending.length },
+    counts: { listed: conversations.length, pending: pending.length, discovered: discovered },
   });
   var logOk = true;
   var logError = null;
@@ -1424,6 +1772,38 @@ async function runBatchExport(tab, options) {
     isPaused: options.isPaused || function() { return batchPaused; },
     isCancelled: options.isCancelled || function() { return batchCancelled; },
   };
+  var callQuota = options.callQuota || createCallQuota(
+    OPENAI_CALLS_PER_MINUTE,
+    OPENAI_CALL_WINDOW_MS,
+    null,
+    null,
+    function(delayMs) {
+      pushLogEvent(runLog, {
+        phase: 'quota',
+        outcome: 'waiting',
+        counts: { delayMs: delayMs },
+      });
+    }
+  );
+  var jobStored = await rememberBatchJob({
+    version: 1,
+    jobId: options.jobId || batchStamp || runLog.runId,
+    status: 'running',
+    updatedAt: new Date().toISOString(),
+    projectId: projectId || null,
+    projectSlug: projectSlug || null,
+    batchStamp: batchStamp || runLog.runId,
+    downloadImages: !!downloadImages,
+    downloadHtml: wantHtmlRun,
+    listComplete: listComplete,
+    conversations: conversations.map(conversationJobRecord),
+  });
+  if (!jobStored.ok) {
+    if (jobStored.error !== 'no storage') {
+      errors.push('saved export could not be stored (' + jobStored.error + ')');
+    }
+    showStatus('warning', 'Backup is running, but cannot be resumed after closing this panel (' + jobStored.error + ').');
+  }
 
   /** Fetch one conversation. Returns {ok, result} or {ok:false, error}. */
   /** Wait for the tab to finish navigating before scripting it again.
@@ -1471,6 +1851,7 @@ async function runBatchExport(tab, options) {
    *  Any failure returns null, which classifies as 'unknown' and exports. */
   async function readConversationMetadata(tabId, conv) {
     try {
+      await callQuota.take(OPENAI_PAGE_LOAD_CALLS);
       var navigated = await (async function() {
         await chrome.scripting.executeScript({
           target: { tabId: tabId },
@@ -1481,6 +1862,7 @@ async function runBatchExport(tab, options) {
       })();
       if (!navigated) return null;
       await chrome.scripting.executeScript({ target: { tabId: tabId }, files: ['content.js'] });
+      await callQuota.take(OPENAI_METADATA_CALLS);
       var out = await chrome.scripting.executeScript({
         target: { tabId: tabId },
         func: async function(conversationId) {
@@ -1496,6 +1878,7 @@ async function runBatchExport(tab, options) {
   }
 
   async function attemptConversation(conv) {
+    await callQuota.take(OPENAI_PAGE_LOAD_CALLS);
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: function(href) { window.location.href = href; },
@@ -1535,6 +1918,7 @@ async function runBatchExport(tab, options) {
     startProgressPolling(tab.id);
     var results;
     try {
+      if (downloadImages) await callQuota.take(OPENAI_FILE_LOOKUP_CALLS);
       results = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: async function(wantFiles) { return getConversationMarkdown({ downloadFiles: wantFiles }); },
@@ -1559,6 +1943,17 @@ async function runBatchExport(tab, options) {
     if (controls.isCancelled()) break;
     // Pause is honoured BETWEEN conversations and inside the retry wait below,
     // so a long run can be held without losing the conversations already done.
+    // The saved job is written when the pause starts, so closing the panel
+    // during the hold still leaves something to resume.
+    if (controls.isPaused() && activeBatchJob && activeBatchJob.status !== 'paused') {
+      activeBatchJob.status = 'paused';
+      activeBatchJob.updatedAt = new Date().toISOString();
+      await writeBatchJob(activeBatchJob);
+    } else if (!controls.isPaused() && activeBatchJob && activeBatchJob.status === 'paused') {
+      activeBatchJob.status = 'running';
+      activeBatchJob.updatedAt = new Date().toISOString();
+      await writeBatchJob(activeBatchJob);
+    }
     if (!(await waitWhilePaused(controls))) break;
     var conv = pending[index];
     var progressTitle = conv.title || conv.slug || conv.id;
@@ -1582,7 +1977,8 @@ async function runBatchExport(tab, options) {
       verdict = classifyAgainstIndex(exportIndex, conv.id, liveMeta).verdict;
       if (verdict === 'unchanged') {
         var htmlMissing = wantHtmlRun && (!htmlHistoryKnown || !htmlChatLanded(conv, htmlCompletePaths));
-        if (!htmlMissing) {
+        var markdownMissing = wantMarkdown && markdownPendingKeys[conv.id || conv.slug];
+        if (!htmlMissing && !markdownMissing) {
           indexSkipped += 1;
           pushLogEvent(runLog, {
             phase: 'skip',
@@ -1678,7 +2074,7 @@ async function runBatchExport(tab, options) {
     // The Markdown note is already on disk. Scanning again is for the HTML
     // page, and writing another dated note would pile up copies the user did
     // not ask for. A grown conversation still gets its new note.
-    var htmlOnly = wantHtmlRun && markdownAlreadyLanded && verdict !== 'grown';
+    var htmlOnly = wantHtmlRun && markdownAlreadyLanded && verdict === 'unchanged';
     var markdownAttempted = false;
     // A conversation that GREW is stamped whether or not the option is ticked.
     // Chrome cannot append to a file and overwriting would destroy the earlier
@@ -1687,20 +2083,16 @@ async function runBatchExport(tab, options) {
     // ALWAYS stamped. Every export records the moment it was taken, so a folder of
     // backups is readable at a glance and no file silently replaces another.
     //
-    // This is only safe because the skip decision moved to the export index. A
-    // stamped name is unique by construction, so rebuilding it to look for it in
-    // the download history can never match — a stamp-always build that still
-    // relied on filename matching would re-export the whole project every run.
-    // `filterPendingConversations` remains as the fallback for the case where the
-    // index is unavailable, where it still recognises unstamped legacy exports.
+    // The export index decides whether the chat changed. Download history only
+    // proves whether the old Markdown file is still present.
     var stampThis = true;
     void useTimestamp;
     void grewThisRound;
-    if (downloadImages && !htmlOnly) {
+    if ((downloadImages && !htmlOnly) || !wantHtml) {
       markdownAttempted = true;
       try {
         saved = await saveConversationExport(tab.id, result, {
-          downloadImages: true,
+          downloadImages: !!downloadImages,
           useTimestamp: stampThis,
           batchStamp: batchStamp,
           projectSlug: projectSlug,
@@ -1714,19 +2106,6 @@ async function runBatchExport(tab, options) {
         writeOk = false;
         writeError = (saveErr && saveErr.message) || String(saveErr);
       }
-    } else if (!wantHtml) {
-      markdownAttempted = true;
-      var slug = result.slug || conv.slug || conv.id;
-      var mdName = batchMdFilename(slug, conv.id, stampThis, batchStamp, result.partial);
-      var folder = conversationFolderPath(slug, projectSlug);
-      var write = await downloadOne(
-        'data:text/markdown;charset=utf-8,' + encodeURIComponent(result.md),
-        mdName,
-        folder + '/' + mdName
-      );
-      writeOk = write.ok;
-      writeError = write.error;
-      if (writeOk && zipEntries) addZipEntry(zipEntries, projectSlug, slug, mdName, result.md);
     }
 
     // HTML is built from the scan's original Markdown plus the bytes that
@@ -1737,6 +2116,7 @@ async function runBatchExport(tab, options) {
     // is the deliverable the HTML option asked for.
     var htmlPartial = false;
     var htmlRecorded = false;
+    var htmlIndexOk = true;
     if (wantHtml && typeof sessionFromExport === 'function') {
       var retrievedFiles = (conv && conv.retrievedFiles) || null;
       if (downloadImages && saved && saved.savedFiles && saved.savedFiles.length) {
@@ -1783,14 +2163,12 @@ async function runBatchExport(tab, options) {
           message: chatWriteError,
         });
       } else {
-        htmlSessions.push(htmlSession);
+        htmlLinks.push(chatLaid.link);
+        htmlChatFiles += chatLaid.files.length;
         htmlRecorded = true;
         htmlPartial = !!htmlSession.partial;
-        if (typeof layoutStaticSite === 'function') {
-          var progressSite = layoutStaticSite(htmlSessions, htmlPagePaths);
-          var progressIndexes = (progressSite.files || []).filter(function(file) {
-            return file.role === 'index' || file.role === 'project';
-          });
+        if (typeof layoutIndexFiles === 'function' && typeof mergeChatLinks === 'function') {
+          var progressIndexes = layoutIndexFiles(mergeChatLinks(htmlLinks, htmlPagePaths, htmlCompletePaths));
           if (options.htmlSiteDir && typeof writeStaticSite === 'function') {
             writeStaticSite(options.htmlSiteDir, { files: progressIndexes });
           }
@@ -1800,6 +2178,7 @@ async function runBatchExport(tab, options) {
             if (!indexDownload.ok) {
               errors.push('HTML index not saved (' + (indexDownload.error || 'the write did not complete') + ')');
               htmlOk = false;
+              htmlIndexOk = false;
             }
           }
         }
@@ -1830,7 +2209,10 @@ async function runBatchExport(tab, options) {
 
     exported += 1;
     var exportSlug = result.slug || conv.slug || conv.id;
-    if (result.partial || htmlPartial || (markdownAttempted && !writeOk)) {
+    var attachmentPartial = !!(saved && (saved.dlErrors.length || saved.dlOk < saved.dlTotal));
+    var conversationPartial = !!(result.partial || htmlPartial || attachmentPartial ||
+      (markdownAttempted && !writeOk) || (wantHtml && (!htmlRecorded || !htmlIndexOk)));
+    if (conversationPartial) {
       // A stall-truncated export must NOT be banked as done. Banking it made the
       // next run skip the conversation as "already exported", so the one action
       // that could repair a truncated file was the one action refused — while the
@@ -1839,30 +2221,32 @@ async function runBatchExport(tab, options) {
       // file that was refused is already named above; it must not be described
       // again as a missing attachment.
       partial += 1;
-      if (result.partial || htmlPartial) {
+      if (result.partial || htmlPartial || attachmentPartial) {
         errors.push(result.partial
           ? (conv.title || conv.id) + ': saved incompletely (scan did not reach the end) — re-run to finish it'
           : (conv.title || conv.id) + ': saved incompletely (a file was not retrieved) — re-run to finish it');
       }
-    } else if (markdownAttempted && writeOk) {
-      completedPaths.add(mdDownloadPath(exportSlug, projectSlug, stampThis, batchStamp, conv.id));
+    } else {
+      if (markdownAttempted && writeOk) {
+        completedPaths.add(mdDownloadPath(exportSlug, projectSlug, stampThis, batchStamp, conv.id));
+      }
       // Record only a COMPLETE export. A partial one is deliberately not banked,
       // for the same reason it is not added to completedPaths: the next run must
       // be free to finish it rather than skip it as done.
-      if (liveMeta) {
+      if (liveMeta && ((markdownAttempted && writeOk) || htmlRecorded)) {
         await recordExportedConversation(conv.id, {
           updateTime: liveMeta.updateTime,
           currentNode: liveMeta.currentNode,
           messageCount: liveMeta.messageCount,
           bytes: result.md ? result.md.length : null,
-          files: 0,
+          files: saved ? saved.dlOk : 0,
         });
       }
     }
     pushLogEvent(runLog, {
-      level: (result.partial || htmlPartial || (markdownAttempted && !writeOk)) ? 'warn' : 'info',
+      level: conversationPartial ? 'warn' : 'info',
       phase: 'conversation',
-      outcome: (result.partial || htmlPartial) ? 'partial' : 'saved',
+      outcome: conversationPartial ? 'partial' : 'saved',
       conversationId: conv.id,
       title: conv.title,
       counts: {
@@ -1907,6 +2291,7 @@ async function runBatchExport(tab, options) {
         var written = await waitForDownloadComplete(zipWrite.downloadId, ZIP_WRITE_TIMEOUT_MS);
         if (written) {
           zipName = candidateName;
+          noteExportDownload(zipWrite.downloadId);
         } else {
           errors.push('archive not completed — the exported files are still on disk');
         }
@@ -1920,12 +2305,10 @@ async function runBatchExport(tab, options) {
     }
   }
 
-  var htmlSite = null;
-  if (htmlSessions.length && typeof layoutStaticSite === 'function') {
-    htmlSite = layoutStaticSite(htmlSessions, htmlPagePaths);
-    var finalIndexes = (htmlSite.files || []).filter(function(file) {
-      return file.role === 'index' || file.role === 'project';
-    });
+  var htmlIndexFiles = 0;
+  if (htmlLinks.length && typeof layoutIndexFiles === 'function' && typeof mergeChatLinks === 'function') {
+    var finalIndexes = layoutIndexFiles(mergeChatLinks(htmlLinks, htmlPagePaths, htmlCompletePaths));
+    htmlIndexFiles = finalIndexes.length;
     if (options.htmlSiteDir && typeof writeStaticSite === 'function') {
       writeStaticSite(options.htmlSiteDir, { files: finalIndexes });
     }
@@ -1943,7 +2326,7 @@ async function runBatchExport(tab, options) {
   pushLogEvent(runLog, {
     phase: 'run',
     outcome: controls.isCancelled() ? 'cancelled' : 'finished',
-    counts: { exported: exported, skipped: skipped, partial: partial },
+    counts: { exported: exported, unchanged: indexSkipped, partial: partial },
   });
   var finishedLog = await flushRunLog(runLog, activeRunLogOptions);
   if (!finishedLog.ok && logOk) {
@@ -1951,18 +2334,22 @@ async function runBatchExport(tab, options) {
     logOk = false;
   }
   activeRunLog = null;
+  if (activeBatchJob) {
+    activeBatchJob.status = controls.isCancelled() || controls.isPaused() ||
+      partial > 0 || exported + indexSkipped < conversations.length || !htmlOk || !listComplete
+      ? 'paused' : 'done';
+    activeBatchJob.updatedAt = new Date().toISOString();
+    var finalJob = await writeBatchJob(activeBatchJob);
+    if (!finalJob.ok && finalJob.error !== 'no storage') {
+      errors.push('saved export could not be stored (' + finalJob.error + ')');
+    }
+  }
 
   return {
     ok: true,
     total: conversations.length,
     exported: exported,
-    // Reported explicitly: a conversation skipped because it was already on
-    // disk is not a failure, but silence about it reads as success.
-    skipped: skipped,
-    // Skipped because the index proved the conversation had not changed since it
-    // was exported. Counted separately from `skipped`, which is a filename
-    // match: this one is a content decision and the user is entitled to see
-    // that the run examined the conversation rather than merely recognised a name.
+    // Metadata proved the conversation had not changed since it was exported.
     unchanged: indexSkipped,
     // Conversations that gained messages since the last export and were written
     // beside the earlier file under their own stamp, not over it.
@@ -1979,9 +2366,10 @@ async function runBatchExport(tab, options) {
     // whole point: the user cannot detect a missing conversation themselves.
     listComplete: listComplete,
     listReason: listReason,
+    discovered: discovered,
     errors: errors,
     zipName: zipName,
-    htmlFiles: htmlSite ? htmlSite.files.length : 0,
+    htmlFiles: htmlChatFiles + htmlIndexFiles,
     htmlOk: htmlOk,
     logOk: logOk,
     logPath: 'chatgpt-export/logs/' + runLog.runId + '.json',
@@ -2035,15 +2423,167 @@ function conversationIdFromLocation(url) {
   return match ? match[1] : null;
 }
 
+function projectIdFromLocation(url) {
+  var match = String(url || '').match(/\/g\/(g-p-[A-Za-z0-9]+)(?=[/?#]|$)/);
+  return match ? match[1] : null;
+}
+
 /** Hold the run without losing it. A long export over a network the extension
  *  does not control needs a hold that is not a cancel: cancelling keeps what
  *  landed but ends the run, while pausing resumes exactly where it stopped. */
 if (btnPause) {
   btnPause.addEventListener('click', () => {
+    if (!batchRunActive) {
+      if (!btn.disabled && batchJobStored && activeBatchJob && activeBatchJob.status !== 'done') resumeSavedBatch();
+      return;
+    }
+    if (!batchJobStored) return;
     batchPaused = !batchPaused;
     btnPause.textContent = batchPaused ? 'Resume' : 'Pause';
-    if (batchPaused) showStatus('', 'Paused — press Resume to continue.');
+    if (batchPaused) {
+      if (activeBatchJob) {
+        activeBatchJob.status = 'paused';
+        activeBatchJob.updatedAt = new Date().toISOString();
+        writeBatchJob(activeBatchJob);
+      }
+      showStatus('warning', 'Paused. You can close this panel and resume later. Conversations already saved stay saved.');
+    } else if (activeBatchJob) {
+      activeBatchJob.status = 'running';
+      activeBatchJob.updatedAt = new Date().toISOString();
+      writeBatchJob(activeBatchJob);
+    }
   });
+}
+
+async function executeBatch(tab, batchOptions) {
+  batchRunActive = true;
+  batchJobStored = false;
+  activeBatchJob = null;
+  lastExportDownloadId = null;
+  scanningTabId = tab.id;
+  if (btnPause) {
+    batchPaused = false;
+    btnPause.textContent = 'Pause';
+    btnPause.classList.remove('visible');
+  }
+  try {
+    var batchResult = await runBatchExport(tab, batchOptions);
+    if (!batchResult.ok) {
+      showStatus('error', batchResult.error || 'Batch export failed.');
+      return batchResult;
+    }
+
+    var incomplete = batchResult.partial > 0 || batchResult.exported + batchResult.unchanged < batchResult.total;
+    var summary = batchResult.htmlOk === false
+      ? 'HTML site not saved'
+      : batchResult.listComplete && !incomplete && !batchResult.cancelled && !batchResult.errors.length
+        ? '✓ Batch export complete: ' + batchResult.exported + ' saved'
+        : '⚠ Backup needs attention: ' + batchResult.exported + ' saved';
+    if (batchResult.unchanged > 0) {
+      summary += ', ' + batchResult.unchanged + ' unchanged';
+    }
+    if (batchResult.discovered > 0) {
+      summary += ', ' + batchResult.discovered
+        + (batchResult.discovered === 1 ? ' new chat on the sidebar' : ' new chats on the sidebar');
+    }
+    if (batchResult.grown > 0) {
+      summary += ', ' + batchResult.grown
+        + (batchResult.grown === 1 ? ' updated (saved as a new dated copy)'
+                                   : ' updated (saved as new dated copies)');
+    }
+    if (batchResult.partial > 0) {
+      summary += ', ' + batchResult.partial + ' incomplete (re-run to repair)';
+    }
+    if (batchResult.cancelled) summary += ' — stopped early';
+    if (!batchResult.listComplete) {
+      summary += '\nScroll the sidebar to the end and re-run to pick up anything missing.';
+    }
+    if (batchResult.zipName) summary += '\nZip: ' + batchResult.zipName;
+    if (batchOptions.downloadHtml) {
+      summary += '\n' + exportSavedLines({ runId: batchOptions.batchStamp }, true);
+    } else if (batchResult.logPath) {
+      summary += '\nLog: ' + batchResult.logPath;
+    }
+    if (batchResult.errors.length) summary += '\nErrors: ' + batchResult.errors.join('; ');
+    markExportFolderVisible();
+    showStatus(
+      batchResult.htmlOk === false ? 'error' :
+        (batchResult.listComplete && !incomplete && !batchResult.cancelled && !batchResult.errors.length
+          ? 'success' : 'warning'),
+      summary
+    );
+    return batchResult;
+  } finally {
+    batchRunActive = false;
+    if (btnPause) {
+      if (batchJobStored && activeBatchJob && activeBatchJob.status !== 'done') {
+        btnPause.textContent = 'Resume saved export';
+        btnPause.classList.add('visible');
+      } else {
+        btnPause.classList.remove('visible');
+      }
+    }
+  }
+}
+
+async function resumeSavedBatch() {
+  var tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  var tab = tabs && tabs[0];
+  if (!tab || !tab.url || !tab.url.match(/https:\/\/(chatgpt\.com|chat\.openai\.com)\//)) {
+    showStatus('error', 'Open a ChatGPT page first, then resume.');
+    return;
+  }
+  var job = await readBatchJob(projectIdFromLocation(tab.url));
+  if (!job || !job.conversations || !job.conversations.length || job.status === 'done') {
+    showStatus('error', 'No saved export for this page. Open the Project or account page where it started.');
+    return;
+  }
+  btn.disabled = true;
+  batchCancelled = false;
+  btnCancel.classList.add('visible');
+  btnCancel.disabled = false;
+  btnCancel.textContent = 'Stop export';
+  try {
+    return await executeBatch(tab, {
+      downloadImages: !!job.downloadImages,
+      projectId: job.projectId,
+      projectSlug: job.projectSlug,
+      jobId: job.jobId || job.batchStamp,
+      // A new stamp for this sitting. The Markdown name is slug--stamp~id, and
+      // Chrome overwrites that path. Reusing the paused run's stamp would
+      // replace a chat that grew during a pause of hours or days.
+      batchStamp: formatExportTimestamp(),
+      buildZip: true,
+      downloadHtml: !!job.downloadHtml,
+      conversations: job.conversations,
+      discover: true,
+      onProgress: function(index, total, title) {
+        btn.textContent = 'Exporting ' + formatBatchProgress(index, total, title);
+      },
+    });
+  } catch (err) {
+    reportFailure('resume export', err);
+  } finally {
+    btn.disabled = false;
+    refreshExportButtonLabel();
+    scanningTabId = null;
+    btnCancel.classList.remove('visible');
+  }
+}
+
+function showSavedBatch() {
+  chrome.tabs.query({ active: true, currentWindow: true }).then(function(tabs) {
+    var tab = tabs && tabs[0];
+    return readBatchJob(tab && tab.url ? projectIdFromLocation(tab.url) : undefined);
+  }).then(function(job) {
+    if (!job || job.status === 'done' || batchRunActive || activeBatchJob) return;
+    activeBatchJob = job;
+    batchJobStored = true;
+    if (!btnPause) return;
+    btnPause.classList.add('visible');
+    btnPause.textContent = 'Resume saved export';
+    showStatus('warning', 'A saved backup is waiting (' + job.conversations.length + ' conversations). Resume checks the open sidebar for chats added since, then saves new and updated ones.');
+  }).catch(function() {});
 }
 
 btnCancel.addEventListener('click', async () => {
@@ -2062,16 +2602,17 @@ btnCancel.addEventListener('click', async () => {
 });
 
 btn.addEventListener('click', async () => {
+  lastExportDownloadId = null;
   btn.disabled = true;
   batchCancelled = false;
   const batchMode = chkBatch && chkBatch.checked;
-  btn.textContent = batchMode ? 'Preparing batch export…' : 'Scanning conversation…';
+  btn.textContent = batchMode ? 'Preparing backup…' : 'Scanning conversation…';
   btnCancel.classList.add('visible');
   btnCancel.disabled = false;
   if (btnPause) {
     batchPaused = false;
     btnPause.textContent = 'Pause';
-    btnPause.classList.add('visible');
+    btnPause.classList.remove('visible');
   }
   btnCancel.textContent = batchMode ? 'Stop export' : 'Stop scanning';
   status.className = '';
@@ -2104,14 +2645,14 @@ btn.addEventListener('click', async () => {
           return { title: title, slug: slug || 'project-batch' };
         },
       });
-      var projectSlug = projectInfo?.[0]?.result?.slug || 'project-batch';
+      var activeProjectId = projectIdFromLocation(tab.url);
+      var projectSlug = activeProjectId ? (projectInfo?.[0]?.result?.slug || 'project-batch') : null;
       // One stamp for the whole run, so every file from a single batch carries the
       // same moment rather than drifting minute by minute as the run progresses.
       var batchStamp = formatExportTimestamp();
-      scanningTabId = tab.id;
-
-      var batchResult = await runBatchExport(tab, {
+      await executeBatch(tab, {
         downloadImages: downloadImages,
+        projectId: activeProjectId,
         projectSlug: projectSlug,
         batchStamp: batchStamp,
         buildZip: true,
@@ -2120,59 +2661,6 @@ btn.addEventListener('click', async () => {
           btn.textContent = 'Exporting ' + formatBatchProgress(index, total, title);
         },
       });
-
-      if (!batchResult.ok) {
-        showStatus('error', batchResult.error || 'Batch export failed.');
-        return;
-      }
-
-      // "Complete" is claimed ONLY when the sidebar walk proved it reached the
-      // end of the list. Otherwise the run covered the conversations it could
-      // see, which may be a subset — and the user cannot notice a conversation
-      // that was never listed, so the wording has to carry the doubt.
-      var summary = batchResult.htmlOk === false
-        ? 'HTML site not saved'
-        : batchResult.listComplete
-          ? '✓ Batch export complete: ' + batchResult.exported + ' saved'
-          : '⚠ Exported ' + batchResult.exported + ' of the conversations the sidebar listed'
-            + ' — the full list could not be confirmed';
-      if (batchResult.skipped > 0) {
-        // Never "already exported" on an unconfirmed list: that phrasing reads as
-        // verified coverage and argues the user out of checking.
-        summary += batchResult.listComplete
-          ? ', ' + batchResult.skipped + ' skipped (already exported)'
-          : ', ' + batchResult.skipped + ' skipped (files already on disk)';
-      }
-      if (batchResult.unchanged > 0) {
-        summary += ', ' + batchResult.unchanged + ' unchanged';
-      }
-      if (batchResult.grown > 0) {
-        // Say that a NEW file was written rather than the old one updated: the
-        // user will find two files for one conversation and should know why
-        // before wondering whether the export duplicated itself.
-        summary += ', ' + batchResult.grown
-          + (batchResult.grown === 1 ? ' updated (saved as a new dated copy)'
-                                     : ' updated (saved as new dated copies)');
-      }
-      if (batchResult.partial > 0) {
-        summary += ', ' + batchResult.partial + ' incomplete (re-run to repair)';
-      }
-      if (batchResult.cancelled) summary += ' — stopped early';
-      if (!batchResult.listComplete) {
-        summary += '\nScroll the sidebar to the end and re-run to pick up anything missing.';
-      }
-      if (batchResult.zipName) summary += '\nZip: ' + batchResult.zipName;
-      if (chkHtml && chkHtml.checked) {
-        summary += '\n' + exportSavedLines({ runId: batchStamp }, true);
-      } else if (batchResult.logPath) {
-        summary += '\nLog: ' + batchResult.logPath;
-      }
-      if (batchResult.errors.length) summary += '\nErrors: ' + batchResult.errors.join('; ');
-      markExportFolderVisible();
-      showStatus(
-        batchResult.htmlOk === false ? 'error' : (batchResult.listComplete ? 'success' : 'warning'),
-        summary
-      );
       return;
     }
 
@@ -2207,12 +2695,10 @@ btn.addEventListener('click', async () => {
     }
 
     let md = result.md;
-    // Conversation title drives both the .md filename and its export folder.
-    const slug = result.slug || null;
-    const mdName = buildMdFilename(slug, true);
     const partialSuffix = result.partial ? ' (partial export)' : '';
+    var runStamp = formatExportTimestamp();
     var singleLog = createRunLog('single', {
-      runId: formatExportTimestamp(),
+      runId: runStamp,
       downloadImages: downloadImages,
       downloadHtml: !!(chkHtml && chkHtml.checked),
     });
@@ -2230,6 +2716,7 @@ btn.addEventListener('click', async () => {
       var saved = await saveConversationExport(tab.id, result, {
         downloadImages: true,
         useTimestamp: true,
+        batchStamp: runStamp,
         projectSlug: null,
         zipEntries: null,
       });
@@ -2296,8 +2783,10 @@ btn.addEventListener('click', async () => {
         return;
       }
       var htmlPartialSuffix = (result.partial || htmlOnly.partial) ? ' (partial export)' : '';
-      showStatus('success', '✓ Saved HTML site' + htmlPartialSuffix + ' ' + result.lines + ' lines · ' + result.words + ' words\n' +
-        exportSavedLines(singleLog, true));
+      showStatus(htmlPartialSuffix ? 'warning' : 'success',
+        (htmlPartialSuffix ? '⚠ Saved incomplete HTML site' : '✓ Saved HTML site') +
+        ' ' + result.lines + ' lines · ' + result.words + ' words\n' +
+        exportSavedLines(singleLog, true) + (htmlPartialSuffix ? '\nRe-run to complete it.' : ''));
       markExportFolderVisible();
       await flushRunLog(singleLog, activeRunLogOptions);
       btn.disabled = false;
@@ -2329,9 +2818,14 @@ btn.addEventListener('click', async () => {
     btnCancel.classList.remove('visible');
     if (batchWarning) batchWarning.classList.remove('visible');
     btn.disabled = false;
+    if (btnPause && (!activeBatchJob || activeBatchJob.status === 'done')) {
+      btnPause.classList.remove('visible');
+    }
     refreshExportButtonLabel();
   }
 });
+
+showSavedBatch();
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
@@ -2378,6 +2872,19 @@ if (typeof module !== 'undefined' && module.exports) {
     sanitizeLogText: sanitizeLogText,
     noteExportDownload: noteExportDownload,
     revealExportFolder: revealExportFolder,
+    mergeBackupConversations: mergeBackupConversations,
+    rememberBatchJob: rememberBatchJob,
+    resumeSavedBatch: resumeSavedBatch,
+    createCallQuota: createCallQuota,
+    OPENAI_CALLS_PER_MINUTE: OPENAI_CALLS_PER_MINUTE,
+    OPENAI_CALL_WINDOW_MS: OPENAI_CALL_WINDOW_MS,
+    OPENAI_PAGE_LOAD_CALLS: OPENAI_PAGE_LOAD_CALLS,
+    OPENAI_METADATA_CALLS: OPENAI_METADATA_CALLS,
+    OPENAI_FILE_LOOKUP_CALLS: OPENAI_FILE_LOOKUP_CALLS,
+    conversationJobRecord: conversationJobRecord,
+    readBatchJob: readBatchJob,
+    writeBatchJob: writeBatchJob,
+    BATCH_JOB_KEY: BATCH_JOB_KEY,
     searchCompletedDownloadPaths: searchCompletedDownloadPaths,
     readExportIndex: readExportIndex,
     recordExportedConversation: recordExportedConversation,

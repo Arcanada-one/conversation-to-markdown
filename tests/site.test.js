@@ -251,7 +251,9 @@ function runHtmlBatch(conversations, htmlSiteDir, options) {
             return [{ result: { conversations, complete: true, reason: 'reached-end' } }];
           }
           if (/waitForConversationReady/.test(source)) return [{ result: { ready: true } }];
-          if (/fetchConversationMetadata/.test(source)) return [{ result: null }];
+          if (/fetchConversationMetadata/.test(source)) {
+            return [{ result: (options.liveMetadata || {})[(call.args && call.args[0]) || ''] || null }];
+          }
           if (/getConversationMarkdown/.test(source)) {
             const tabUrl = String(context.__tabUrl || '');
             let conv = conversations[0];
@@ -277,7 +279,8 @@ function runHtmlBatch(conversations, htmlSiteDir, options) {
       downloads: {
         download(item, callback) {
           if (options.trace) options.trace.push(item && item.filename);
-          if (options.rejectDownloads) {
+          if (options.rejectDownloads &&
+              (typeof options.rejectDownloads !== 'function' || options.rejectDownloads(item.filename))) {
             context.chrome.runtime.lastError = { message: 'blocked' };
             callback(undefined);
             context.chrome.runtime.lastError = null;
@@ -308,17 +311,45 @@ function runHtmlBatch(conversations, htmlSiteDir, options) {
     Math,
     Date,
   };
+  if (options.storageStore) {
+    context.chrome.storage = { local: {
+      get(keys, callback) {
+        const names = Array.isArray(keys) ? keys : [keys];
+        const out = {};
+        for (const name of names) out[name] = options.storageStore[name];
+        callback(out);
+      },
+      set(values, callback) {
+        Object.assign(options.storageStore, values);
+        callback();
+      },
+    } };
+  }
   context.window = context;
-  vm.runInNewContext(zipSource, context);
+  vm.runInNewContext(zipSource, context, { filename: path.join(__dirname, '..', 'zip.js') });
   context.buildStoreZip = context.module.exports.buildStoreZip;
   context.module = { exports: {} };
-  vm.runInNewContext(siteSource, context);
+  vm.runInNewContext(siteSource, context, { filename: path.join(__dirname, '..', 'site.js') });
   const siteExports = context.module.exports;
   context.sessionFromExport = siteExports.sessionFromExport;
   context.layoutStaticSite = siteExports.layoutStaticSite;
   context.writeStaticSite = siteExports.writeStaticSite;
+  if (options.observeChatLayout) {
+    const layoutChatFiles = context.layoutChatFiles;
+    context.layoutChatFiles = (session) => {
+      options.observeChatLayout(session);
+      return layoutChatFiles(session);
+    };
+  }
+  if (options.observeIndexLinks) {
+    const layoutIndexFiles = context.layoutIndexFiles;
+    context.layoutIndexFiles = (links) => {
+      options.observeIndexLinks(links);
+      return layoutIndexFiles(links);
+    };
+  }
   context.module = { exports: {} };
-  vm.runInNewContext(popupSource, context);
+  vm.runInNewContext(popupSource, context, { filename: path.join(__dirname, '..', 'popup.js') });
   return context.module.exports.runBatchExport({ id: 1 }, {
     downloadImages: !!options.downloadImages,
     buildZip: false,
@@ -333,6 +364,36 @@ function runHtmlBatch(conversations, htmlSiteDir, options) {
     downloadHtml: !!options.downloadHtml,
   });
 }
+
+test('a batch lays out each HTML chat once and retains only link metadata for later indexes', async () => {
+  const outputDir = tempDir('c2m-site-memory-');
+  const layouts = [];
+  const indexLinks = [];
+  const conversations = ['first', 'second'].map((id) => {
+    const url = 'https://files.oaiusercontent.com/file/' + id + '.bin';
+    return {
+      id, href: '/c/' + id, title: id, slug: id,
+      md: '# ' + id + '\n\n[file](' + url + ')\n',
+      retrievedFiles: [{ url, name: id + '.bin', bytes: Uint8Array.from([65]) }],
+    };
+  });
+  try {
+    const result = await runHtmlBatch(conversations, outputDir, {
+      observeChatLayout: (session) => layouts.push(session.id),
+      observeIndexLinks: (links) => indexLinks.push(Array.from(links)),
+    });
+    assert.equal(result.exported, 2);
+    assert.deepEqual(layouts, ['first', 'second'], 'prior chats must not be re-laid out for each index');
+    assert.equal(indexLinks.at(-1).length, 2, 'both chats must stay in the final index');
+    assert.ok(indexLinks.at(-1).every((link) => !('markdown' in link) && !('saved' in link)),
+      'retained index links must not carry transcript or attachment bytes');
+    const index = fs.readFileSync(path.join(outputDir, 'index.html'), 'utf8');
+    assert.match(index, /first/);
+    assert.match(index, /second/);
+  } finally {
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
 
 test('batch export groups a project chat and leaves a loose chat addressable', async () => {
   const outputDir = tempDir('c2m-site-');
@@ -363,17 +424,17 @@ test('batch export groups a project chat and leaves a loose chat addressable', a
     assert.equal(result.partial, 0, JSON.stringify(result.errors));
 
     const index = fs.readFileSync(path.join(outputDir, 'index.html'), 'utf8');
-    assert.match(index, /href="Budget\/index\.html"/);
+    assert.match(index, /href="Budget~g-p-budget\/index\.html"/);
     assert.match(index, /href="chats\/Inbox-notes~loose-chat\/index\.html"/);
-    const project = fs.readFileSync(path.join(outputDir, 'Budget', 'index.html'), 'utf8');
+    const project = fs.readFileSync(path.join(outputDir, 'Budget~g-p-budget', 'index.html'), 'utf8');
     assert.match(project, /href="Spec~proj-chat\/index\.html"/);
-    const spec = fs.readFileSync(path.join(outputDir, 'Budget', 'Spec~proj-chat', 'index.html'), 'utf8');
+    const spec = fs.readFileSync(path.join(outputDir, 'Budget~g-p-budget', 'Spec~proj-chat', 'index.html'), 'utf8');
     assert.match(spec, /PROJECT-SPEC-LINE/);
     assert.match(spec, /src="\.\/chart\.png"/);
     assert.match(spec, /href="\.\/conversation\.md"/);
-    assert.match(spec, /data-md-path="Budget\/Spec~proj-chat\/conversation\.md"/);
+    assert.match(spec, /data-md-path="Budget~g-p-budget\/Spec~proj-chat\/conversation\.md"/);
     assert.equal(spec.includes('LOOSE-INBOX-LINE'), false);
-    const specMd = fs.readFileSync(path.join(outputDir, 'Budget', 'Spec~proj-chat', 'conversation.md'), 'utf8');
+    const specMd = fs.readFileSync(path.join(outputDir, 'Budget~g-p-budget', 'Spec~proj-chat', 'conversation.md'), 'utf8');
     assert.match(specMd, /PROJECT-SPEC-LINE/);
     assert.equal(specMd.includes('LOOSE-INBOX-LINE'), false);
     const loose = fs.readFileSync(path.join(outputDir, 'chats', 'Inbox-notes~loose-chat', 'index.html'), 'utf8');
@@ -382,11 +443,110 @@ test('batch export groups a project chat and leaves a loose chat addressable', a
     assert.match(looseMd, /LOOSE-INBOX-LINE/);
     assert.equal(looseMd.includes('PROJECT-SPEC-LINE'), false);
     assert.equal(fs.existsSync(path.join(outputDir, 'chats', 'Spec', 'index.html')), false);
-    const written = fs.readFileSync(path.join(outputDir, 'Budget', 'Spec~proj-chat', 'chart.png'));
+    const written = fs.readFileSync(path.join(outputDir, 'Budget~g-p-budget', 'Spec~proj-chat', 'chart.png'));
     assert.deepEqual(written, chartBytes);
   } finally {
     fs.rmSync(outputDir, { recursive: true, force: true });
   }
+});
+
+test('projects with the same title keep separate directories and index links', () => {
+  const site = require('../site.js');
+  const a = { id: 'chat-a', title: 'First', projectId: 'g-p-a', projectTitle: 'Work', markdown: 'A' };
+  const b = { id: 'chat-b', title: 'Second', projectId: 'g-p-b', projectTitle: 'Work', markdown: 'B' };
+  const laid = site.layoutStaticSite([a, b]);
+  assert.notEqual(site.sessionDirectory(a), site.sessionDirectory(b));
+  const indexes = laid.files.filter((file) => file.role === 'project');
+  assert.equal(indexes.length, 2);
+  assert.equal((laid.files[0].body.match(/>Work<\/a>/g) || []).length, 2);
+});
+
+test('HTML attachment binding saves reserved names and distinct same-name files', () => {
+  const site = require('../site.js');
+  const first = 'https://files.oaiusercontent.com/file/first';
+  const second = 'https://files.oaiusercontent.com/file/second';
+  const third = 'https://files.oaiusercontent.com/file/third';
+  const fourth = 'https://files.oaiusercontent.com/file/fourth';
+  const bound = site.bindRetrievedFiles(`[first](${first}) [second](${second}) [third](${third}) [fourth](${fourth})`, [
+    { url: first, name: 'constructor', bytes: Buffer.from('FIRST') },
+    { url: second, name: 'report.pdf', bytes: Buffer.from('SECOND') },
+    { url: third, name: 'report.pdf', bytes: Buffer.from('THIRD') },
+    { url: fourth, name: 'REPORT.pdf', bytes: Buffer.from('FOURTH') },
+  ]);
+  assert.equal(bound.partial, false);
+  assert.equal(bound.saved.length, 4);
+  assert.equal(new Set(bound.saved.map((file) => file.name.toLowerCase())).size, 4);
+  for (const file of bound.saved) {
+    assert.match(bound.markdown, new RegExp('\\./' + file.name.replace('.', '\\.')));
+  }
+  const laid = site.layoutChatFiles({ id: 'names', title: 'Names', markdown: bound.markdown, saved: bound.saved });
+  assert.equal(laid.files.filter((file) => file.role === 'file').length, 4);
+  assert.ok(laid.files.some((file) => file.role === 'marker'));
+});
+
+test('bound attachment paths with parentheses remain valid HTML links', () => {
+  const site = require('../site.js');
+  const url = 'https://files.oaiusercontent.com/file/report';
+  const bound = site.bindRetrievedFiles(`[report](${url})`, [
+    { url, name: 'report (final).pdf', bytes: Buffer.from('PDF') },
+  ]);
+  assert.match(bound.markdown, /\[report\]\(<\.\/report \(final\)\.pdf>\)/);
+  assert.match(site.markdownToHtml(bound.markdown), /href="\.\/report \(final\)\.pdf"/);
+  const dotted = site.bindRetrievedFiles(`[draft](${url})`, [
+    { url, name: 'report..draft.pdf', bytes: Buffer.from('PDF') },
+  ]);
+  assert.match(site.markdownToHtml(dotted.markdown), /href="\.\/report\.\.draft\.pdf"/);
+});
+
+test('saved HTML loads local images but leaves remote images inert until clicked', () => {
+  const site = require('../site.js');
+  const remote = 'https://outside.example/pixel?' + ['token', 'private'].join('=');
+  const html = site.markdownToHtml(`![local](./chart.png)\n\n![remote](${remote})`);
+  assert.match(html, /<img[^>]+src="\.\/chart\.png"/);
+  assert.doesNotMatch(html, /<img[^>]+src="https?:\/\//);
+  assert.match(html, /<a[^>]+href="https:\/\/outside\.example\/pixel/);
+});
+
+test('saved HTML binds angle-wrapped file URLs with escaped labels', () => {
+  const site = require('../site.js');
+  const url = 'https://files.oaiusercontent.com/file/report(final).pdf';
+  const markdown = `[report \\[final\\].pdf](<${url}>)`;
+  const bound = site.bindRetrievedFiles(markdown, [
+    { url, name: 'report(final).pdf', bytes: Buffer.from('PDF') },
+  ]);
+  assert.equal(bound.partial, false);
+  assert.equal(bound.saved.length, 1);
+  assert.match(bound.markdown, /\.\/report\(final\)\.pdf/);
+  const html = site.markdownToHtml(bound.markdown);
+  assert.match(html, /href="\.\/report\(final\)\.pdf"/);
+  assert.match(html, /report \[final\]\.pdf/);
+});
+
+test('saving images fetches only declared ChatGPT file hosts', async () => {
+  const priorFetch = global.fetch;
+  const requested = [];
+  global.fetch = async (url) => { requested.push(url); return { ok: false }; };
+  try {
+    const outside = 'https://outside.example/pixel?' + ['token', 'private'].join('=');
+    const trusted = 'https://files.oaiusercontent.com/file/chart.png';
+    const fetched = await content.fetchImageDataUrls([outside, trusted]);
+    assert.deepEqual(requested, [trusted]);
+    assert.deepEqual(fetched, [null, null]);
+  } finally {
+    global.fetch = priorFetch;
+  }
+});
+
+test('project and chat directory segments strip controls and private-use characters', () => {
+  const site = require('../site.js');
+  const directory = site.sessionDirectory({
+    title: 'Chat\uE000\u0085Name',
+    id: 'abc',
+    projectTitle: 'Project\uE001\u0090Name',
+    projectId: 'g-p-\uE00242',
+  });
+  assert.doesNotMatch(directory, /[\u0000-\u001f\u007f-\u009f\uE000-\uF8FF]/);
+  assert.match(directory, /^Project-Name~g-p-+42\/Chat-Name~abc$/);
 });
 
 test('a refused markdown write still leaves the HTML page', async () => {
@@ -538,10 +698,12 @@ function loadDownloadPopup(chromeDownloads) {
     __order: [],
   };
   context.window = context;
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'zip.js'), 'utf8'), context);
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'zip.js'), 'utf8'), context,
+    { filename: path.join(__dirname, '..', 'zip.js') });
   context.buildStoreZip = context.module.exports.buildStoreZip;
   context.module = { exports: {} };
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'popup.js'), 'utf8'), context);
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'popup.js'), 'utf8'), context,
+    { filename: path.join(__dirname, '..', 'popup.js') });
   return context;
 }
 
@@ -658,6 +820,39 @@ test('the index keeps earlier chats, marks an incomplete one, and can be searche
   assert.equal(donePage.body.includes('incomplete'), false);
 });
 
+test('a later index preserves the incomplete badge for an earlier partial page', () => {
+  const site = require('../site.js');
+  const partial = '/Downloads/chatgpt-export/html/chats/Partial~old/index.html';
+  const complete = '/Downloads/chatgpt-export/html/chats/Complete~older/index.html';
+  const marker = '/Downloads/chatgpt-export/html/chats/Complete~older/export-complete.txt';
+  const index = site.layoutStaticSite([], [partial, complete], [marker]).files[0].body;
+  assert.match(index, /Partial<\/a> <span class="partial">incomplete<\/span>/);
+  assert.match(index, /Complete<\/a><\/li>/);
+});
+
+test('batch index rebuild carries completion evidence for earlier pages', async () => {
+  const outputDir = tempDir('c2m-earlier-partial-');
+  try {
+    const old = '/Downloads/chatgpt-export/html/chats/Partial~old/index.html';
+    const done = '/Downloads/chatgpt-export/html/chats/Complete~older/index.html';
+    const marker = '/Downloads/chatgpt-export/html/chats/Complete~older/export-complete.txt';
+    await runHtmlBatch([
+      { id: 'now', title: 'Now', slug: 'Now', href: '/c/now', md: 'NOW\n' },
+    ], outputDir, {
+      downloadRows: [
+        { filename: old, id: 1, exists: true, state: 'complete' },
+        { filename: done, id: 2, exists: true, state: 'complete' },
+        { filename: marker, id: 3, exists: true, state: 'complete' },
+      ],
+    });
+    const index = fs.readFileSync(path.join(outputDir, 'index.html'), 'utf8');
+    assert.match(index, /Partial<\/a> <span class="partial">incomplete<\/span>/);
+    assert.match(index, /Complete<\/a><\/li>/);
+  } finally {
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
 test('a chat page is written before the next conversation is scanned', async () => {
   const outputDir = tempDir('c2m-site-order-');
   const trace = [];
@@ -713,6 +908,14 @@ test('markdown already on disk still gets an HTML page, and the log omits the co
     const result = await runHtmlBatch(conversations, outputDir, {
       downloadImages: true,
       trace: trace,
+      storageStore: { c2mExportIndex: {
+        'keep-html': { updateTime: 1, currentNode: 'same', messageCount: 2 },
+        'gap-html': { updateTime: 1, currentNode: 'same', messageCount: 2 },
+      } },
+      liveMetadata: {
+        'keep-html': { updateTime: 1, currentNode: 'same', messageCount: 2 },
+        'gap-html': { updateTime: 1, currentNode: 'same', messageCount: 2 },
+      },
       downloadRows: [
         {
           filename: '/Downloads/chatgpt-export/proj/Notes/Notes~keep-html.md',
@@ -726,6 +929,13 @@ test('markdown already on disk still gets an HTML page, and the log omits the co
         },
         {
           filename: '/Downloads/chatgpt-export/html/chats/Notes~keep-html/export-complete.txt',
+          id: 2,
+          exists: true,
+          state: 'complete',
+        },
+        {
+          filename: '/Downloads/chatgpt-export/html/chats/Notes~keep-html/index.html',
+          id: 1,
           exists: true,
           state: 'complete',
         },
@@ -745,9 +955,9 @@ test('markdown already on disk still gets an HTML page, and the log omits the co
     assert.equal(fs.existsSync(path.join(outputDir, 'chats', 'Notes~keep-html', 'index.html')), false);
     const gapPage = fs.readFileSync(path.join(outputDir, 'chats', 'Gap~gap-html', 'index.html'), 'utf8');
     assert.match(gapPage, /GAP-BODY/);
-    const gapNote = trace.filter((name) => /Gap--\d{8}-\d{4}~gap-html\.md$/.test(String(name)));
+    const gapNote = trace.filter((name) => /Gap--\d{8}-\d{4}(?:-[a-z0-9-]+)?~gap-html\.md$/i.test(String(name)));
     assert.equal(gapNote.length, 0, 'a landed note must not be written again: ' + trace.join(' | '));
-    const otherNote = trace.filter((name) => /Other--\d{8}-\d{4}~need-html\.md$/.test(String(name)));
+    const otherNote = trace.filter((name) => /Other--\d{8}-\d{4}(?:-[a-z0-9-]+)?~need-html\.md$/i.test(String(name)));
     assert.equal(otherNote.length, 1, 'positive control: a new conversation still writes its note: ' + trace.join(' | '));
     const page = fs.readFileSync(path.join(outputDir, 'chats', 'Other~need-html', 'index.html'), 'utf8');
     assert.match(page, /NEED-BODY-SENTINEL/);
@@ -765,6 +975,116 @@ test('markdown already on disk still gets an HTML page, and the log omits the co
     assert.equal(log.includes('NEED-BODY-SENTINEL'), false);
     assert.equal(log.includes('sig='), false);
     assert.equal(log.includes(secretUrl), false);
+  } finally {
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+test('an HTML marker cannot excuse a missing page or a newer partial page', async () => {
+  const conversation = { id: 'keep-html', title: 'Notes', slug: 'Notes', href: '/c/keep-html', md: 'CURRENT-BODY\n' };
+  const md = { filename: '/Downloads/chatgpt-export/proj/Notes/Notes~keep-html.md', exists: true, state: 'complete' };
+  const marker = { filename: '/Downloads/chatgpt-export/html/chats/Notes~keep-html/export-complete.txt', id: 2, exists: true, state: 'complete' };
+  const page = { filename: '/Downloads/chatgpt-export/html/chats/Notes~keep-html/index.html', id: 3, exists: true, state: 'complete' };
+  const oldPage = { filename: page.filename, id: 1, exists: true, state: 'complete' };
+  const interrupted = { filename: page.filename, id: 3, exists: true, state: 'interrupted' };
+  for (const rows of [[md, marker], [md, marker, page], [md, oldPage, marker, interrupted]]) {
+    const outputDir = tempDir('c2m-stale-marker-');
+    try {
+      const meta = { updateTime: 1, currentNode: 'same', messageCount: 1 };
+      const result = await runHtmlBatch([conversation], outputDir, {
+        downloadRows: rows,
+        storageStore: { c2mExportIndex: { 'keep-html': meta } },
+        liveMetadata: { 'keep-html': meta },
+      });
+      assert.equal(result.exported, 1, JSON.stringify({ rows, result }));
+      assert.match(fs.readFileSync(path.join(outputDir, 'chats', 'Notes~keep-html', 'index.html'), 'utf8'), /CURRENT-BODY/);
+    } finally {
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('an HTML-only export records metadata so a changed chat is synced later', async () => {
+  const outputDir = tempDir('c2m-html-index-');
+  const storageStore = {};
+  const conv = { id: 'html-only', title: 'Notes', slug: 'Notes', href: '/c/html-only', md: 'BODY\n' };
+  const oldMeta = { updateTime: 1, currentNode: 'old', messageCount: 1 };
+  const newMeta = { updateTime: 2, currentNode: 'new', messageCount: 2 };
+  const downloadRows = [
+    { filename: '/Downloads/chatgpt-export/html/chats/Notes~html-only/index.html', id: 1, exists: true, state: 'complete' },
+    { filename: '/Downloads/chatgpt-export/html/chats/Notes~html-only/export-complete.txt', id: 2, exists: true, state: 'complete' },
+  ];
+  try {
+    const first = await runHtmlBatch([conv], outputDir, {
+      storageStore, liveMetadata: { 'html-only': oldMeta },
+    });
+    assert.equal(first.exported, 1);
+    assert.equal(storageStore.c2mExportIndex['html-only'].currentNode, 'old');
+    const same = await runHtmlBatch([conv], outputDir, {
+      storageStore, liveMetadata: { 'html-only': oldMeta }, downloadRows,
+    });
+    assert.equal(same.unchanged, 1, JSON.stringify(same));
+    const changed = await runHtmlBatch([conv], outputDir, {
+      storageStore, liveMetadata: { 'html-only': newMeta }, downloadRows,
+    });
+    assert.equal(changed.grown, 1, JSON.stringify(changed));
+    assert.equal(changed.exported, 1, JSON.stringify(changed));
+  } finally {
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+test('a failed HTML rewrite does not bank newer metadata from successful Markdown', async () => {
+  const outputDir = tempDir('c2m-html-retry-');
+  const conv = { id: 'html-id', title: 'Notes', slug: 'Notes', href: '/c/html-id', md: 'NEW-BODY\n' };
+  const oldMeta = { updateTime: 1, currentNode: 'old', messageCount: 1 };
+  const newMeta = { updateTime: 2, currentNode: 'new', messageCount: 2 };
+  const storageStore = { c2mExportIndex: { 'html-id': oldMeta } };
+  const downloadRows = [
+    { filename: '/Downloads/chatgpt-export/proj/Notes/Notes~html-id.md', exists: true, state: 'complete' },
+    { filename: '/Downloads/chatgpt-export/html/chats/Notes~html-id/index.html', id: 1, exists: true, state: 'complete' },
+    { filename: '/Downloads/chatgpt-export/html/chats/Notes~html-id/export-complete.txt', id: 2, exists: true, state: 'complete' },
+  ];
+  try {
+    const first = await runHtmlBatch([conv], outputDir, {
+      downloadImages: true, downloadHtml: true, storageStore, downloadRows,
+      liveMetadata: { 'html-id': newMeta },
+      rejectDownloads: (name) => /html\/chats\/Notes~html-id\/index\.html$/.test(name),
+    });
+    assert.equal(first.partial, 1, JSON.stringify(first));
+    assert.equal(storageStore.c2mExportIndex['html-id'].currentNode, 'old');
+    const retry = await runHtmlBatch([conv], outputDir, {
+      downloadImages: true, downloadHtml: true, storageStore, downloadRows,
+      liveMetadata: { 'html-id': newMeta },
+    });
+    assert.equal(retry.exported, 1, JSON.stringify(retry));
+    assert.equal(retry.unchanged, 0);
+  } finally {
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+test('a failed HTML index remains retryable after its chat page lands', async () => {
+  const outputDir = tempDir('c2m-index-retry-');
+  const conv = { id: 'index-id', title: 'Notes', slug: 'Notes', href: '/c/index-id', md: 'BODY\n' };
+  const meta = { updateTime: 1, currentNode: 'last', messageCount: 1 };
+  const storageStore = {};
+  const downloadRows = [
+    { filename: '/Downloads/chatgpt-export/html/chats/Notes~index-id/index.html', id: 1, exists: true, state: 'complete' },
+    { filename: '/Downloads/chatgpt-export/html/chats/Notes~index-id/export-complete.txt', id: 2, exists: true, state: 'complete' },
+  ];
+  try {
+    const first = await runHtmlBatch([conv], outputDir, {
+      downloadHtml: true, storageStore, liveMetadata: { 'index-id': meta },
+      rejectDownloads: (name) => name === 'chatgpt-export/html/index.html',
+    });
+    assert.equal(first.partial, 1, JSON.stringify(first));
+    assert.equal(storageStore.c2mExportIndex?.['index-id'], undefined);
+    const retry = await runHtmlBatch([conv], outputDir, {
+      downloadHtml: true, storageStore, downloadRows,
+      liveMetadata: { 'index-id': meta },
+    });
+    assert.equal(retry.exported, 1, JSON.stringify(retry));
   } finally {
     fs.rmSync(outputDir, { recursive: true, force: true });
   }
@@ -791,4 +1111,22 @@ test('showing the export folder uses the download that just finished', () => {
   fresh.module.exports.revealExportFolder();
   assert.equal(fresh.shownDefault, true);
   assert.equal(fresh.shown, undefined);
+});
+
+test('writing the run log does not replace the HTML file selected by Show export folder', async () => {
+  let nextId = 7;
+  const context = loadDownloadPopup({
+    download(_options, callback) { callback(++nextId); },
+    search(_query, callback) { callback([]); },
+    show(id) { context.shown = id; },
+  });
+  context.module.exports.noteExportDownload(7);
+  context.__log = {
+    version: 'test', runId: 'run', kind: 'batch', startedAt: '2026-01-01',
+    options: {}, events: [],
+  };
+  const result = await vm.runInNewContext('flushRunLog(__log, { downloadLog: true })', context);
+  assert.equal(result.ok, true, result.error);
+  context.module.exports.revealExportFolder();
+  assert.equal(context.shown, 7);
 });

@@ -32,7 +32,7 @@ test('content.js survives being injected twice into one document', () => {
     module: undefined,
   });
 
-  vm.runInContext(source, context, { filename: 'content.js#1' });
+  vm.runInContext(source, context, { filename: path.join(__dirname, '..', 'content.js') });
   // Positive control: the first injection must actually define the binding the
   // second one would collide with, or this test passes over an empty file.
   assert.equal(
@@ -41,7 +41,7 @@ test('content.js survives being injected twice into one document', () => {
   );
 
   assert.doesNotThrow(
-    () => vm.runInContext(source, context, { filename: 'content.js#2' }),
+    () => vm.runInContext(source, context, { filename: path.join(__dirname, '..', 'content.js') }),
     're-injecting into a document that already has the script must be a no-op',
   );
 });
@@ -1871,7 +1871,7 @@ test('derives a filename for an estuary URL that carries no extension', () => {
     decodeURIComponent,
     btoa,
   };
-  vm.runInNewContext(require('fs').readFileSync(popupPath, 'utf8'), context);
+  vm.runInNewContext(require('fs').readFileSync(popupPath, 'utf8'), context, { filename: popupPath });
   const popup = context.module.exports;
 
   const estuary = 'https://chatgpt.com/backend-api/estuary/content?id=file_synth_0002&ts=1&p=fs';
@@ -2506,6 +2506,40 @@ test('preserves sandbox Code Interpreter links visibly in markdown', () => {
     assert.match(markdown, /Code Interpreter file/);
     assert.match(markdown, /sandbox:\/mnt\/data\/output\.csv/);
     assert.doesNotMatch(markdown, /\[output\.csv\]\(https?:/);
+  } finally {
+    global.Node = previousNode;
+    global.location = previousLocation;
+  }
+});
+
+test('file links keep bracketed names and parenthesized URLs readable by the downloader', () => {
+  const previousNode = global.Node;
+  const previousLocation = global.location;
+  global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
+  global.location = { href: 'https://' + 'chatgpt.com/c/example' };
+  try {
+    const link = element('a', [textNode('report [final].pdf')], {
+      href: 'https://files.oaiusercontent.com/report(final).pdf',
+    });
+    assert.equal(parser.nodeToMarkdown(link),
+      '[report \\[final\\].pdf](<https://files.oaiusercontent.com/report(final).pdf>)');
+  } finally {
+    global.Node = previousNode;
+    global.location = previousLocation;
+  }
+});
+
+test('external image query strings do not enter exported Markdown', () => {
+  const previousNode = global.Node;
+  const previousLocation = global.location;
+  global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
+  global.location = { href: 'https://' + 'chatgpt.com/c/example' };
+  try {
+    const external = element('img', [], { src: 'https://example.com/picture.png?secret=abc', alt: 'photo' });
+    const signedUrl = 'https://files.oaiusercontent.com/picture.png?' + ['sig', 'abc'].join('=');
+    const attachment = element('img', [], { src: signedUrl, alt: 'file' });
+    assert.equal(parser.nodeToMarkdown(external), '![photo](https://example.com/picture.png)\n\n');
+    assert.equal(parser.nodeToMarkdown(attachment), '![file](' + signedUrl + ')\n\n');
   } finally {
     global.Node = previousNode;
     global.location = previousLocation;
@@ -4001,6 +4035,11 @@ test('unreadable metadata returns null rather than a shape that reads as unchang
       : { ok: false, status: 404 }),
   });
   assert.equal(httpError, null, 'an HTTP error means no answer');
+
+  const emptySuccess = await parser.fetchConversationMetadata('conv-1', {
+    token: 't', fetchImpl: async () => ({ ok: true, json: async () => ({}) }),
+  });
+  assert.equal(emptySuccess, null, 'a 200 response with no metadata cannot prove unchanged');
 
   const threw = await parser.fetchConversationMetadata('conv-1', {
     fetchImpl: async () => { throw new Error('offline'); },
@@ -5532,7 +5571,7 @@ test('modern DOM: real export preserves both sides per turn-key without toolbar 
     getComputedStyle: () => ({ overflowY: 'visible' }),
     setTimeout: fn => { fn(); return 0; }, clearTimeout() {},
   });
-  vm.runInContext(source, context);
+  vm.runInContext(source, context, { filename: path.join(__dirname, '..', 'content.js') });
   assert.equal(document.querySelectorAll('[data-turn-id]').length, 0);
   assert.equal(document.querySelectorAll('[data-message-author-role]').length, 0);
   assert.equal(document.querySelectorAll('[data-user-message-bubble]').length, 2);
@@ -5560,7 +5599,7 @@ test('modern file-saving export stays partial when a Library citation has no byt
       String(url).includes('/api/auth/session') ? { accessToken: 'fixture' } : { mapping: {} } }),
     setTimeout: fn => { fn(); return 0; }, clearTimeout() {},
   });
-  vm.runInContext(source, context);
+  vm.runInContext(source, context, { filename: path.join(__dirname, '..', 'content.js') });
   const result = await context.getConversationMarkdown({ downloadFiles: true });
   assert.equal(result.ok, true, result.error);
   assert.equal(result.partial, true);
@@ -5603,7 +5642,8 @@ test('modern DOM: export scans separately mounted exchanges and restores scroll 
     getComputedStyle: () => ({ overflowY: 'visible' }),
     setTimeout: fn => { fn(); return 0; }, clearTimeout() {},
   });
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8'), context,
+    { filename: path.join(__dirname, '..', 'content.js') });
   // Positive control: the initially mounted pair contains no first question.
   assert.equal(document.querySelectorAll('[data-chatgpt-search-unit-key]').length, 2);
   assert.match(document.querySelectorAll('[data-chatgpt-search-unit-key]')[0].textContent, /Вопрос 1/);
@@ -5633,7 +5673,8 @@ test('modern history boundary: exhausted history avoids the blanket partial warn
       getComputedStyle: () => ({ overflowY: 'visible' }),
       setTimeout: fn => { fn(); return 0; }, clearTimeout() {},
     });
-    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8'), context);
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8'), context,
+      { filename: path.join(__dirname, '..', 'content.js') });
     const result = await context.getConversationMarkdown({ downloadFiles: false });
     assert.equal(result.ok, true, result.error);
     assert.equal((result.md.match(/#### You said:/g) || []).length, 2);
@@ -5672,7 +5713,8 @@ function retainedExportContext(fixture, overrides = {}) {
       String(url).includes('/api/auth/session') ? { accessToken: 'fixture' } : { mapping: {} } }),
     setTimeout: (fn, ms) => { if (ms < 10000) fn(); return 0; }, clearTimeout() {}, ...overrides,
   });
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8'), context,
+    { filename: path.join(__dirname, '..', 'content.js') });
   return context;
 }
 

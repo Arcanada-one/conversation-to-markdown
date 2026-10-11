@@ -173,11 +173,19 @@ test('a sidebar that fits entirely is complete without scrolling', async () => {
 
   const walked = await parser.collectSidebarConversations({
     doc: fixture.doc,
+    scroller: fixture.scroller,
     sleep: immediate,
   });
 
   assert.equal(walked.conversations.length, 5);
   assert.equal(walked.complete, true);
+});
+
+test('a missing scroll container cannot certify a virtualized subset', async () => {
+  const fixture = createVirtualSidebar({ total: 60, windowSize: 8, scrollable: false });
+  const walked = await parser.collectSidebarConversations({ doc: fixture.doc, sleep: immediate });
+  assert.equal(walked.conversations.length, 8, 'the fixture must hide later rows');
+  assert.equal(walked.complete, false);
 });
 
 test('the walk restores the scroll position it started from', async () => {
@@ -239,6 +247,7 @@ function createLateAppendingSidebar(appendAfter) {
   const doc = {
     querySelectorAll(selector) {
       if (selector === 'nav li') return lastBuiltListItems;
+      if (!isConversationLinkSelector(selector)) return [];
       const maxTop = Math.max(0, ids.length * rowHeight - windowSize * rowHeight);
       if (scroller.scrollTop >= maxTop - 1 && !appended) {
         bottomPolls += 1;
@@ -658,6 +667,89 @@ for (const { locale, label } of PAGINATION_LABELS) {
     assert.equal(walked.reason, 'show-more-pending');
   });
 }
+
+test('a pagination budget reached before the quiet-bottom verdict remains incomplete after the final sweep', async () => {
+  const fixture = createShowMoreSidebar([['first'], ['unread']], 'Show more');
+  const query = fixture.doc.querySelectorAll.bind(fixture.doc);
+  fixture.doc.querySelectorAll = (selector) => {
+    const rows = query(selector);
+    if (isConversationLinkSelector(selector)) rows.forEach((row, index) => {
+      row.getBoundingClientRect = () => ({ top: index * 10, bottom: (index + 1) * 10 });
+    });
+    return rows;
+  };
+  const walked = await parser.collectSidebarConversations({
+    doc: fixture.doc,
+    scroller: fixture.scroller,
+    sleep: immediate,
+    maxRounds: 1,
+    maxShowMoreClicks: 0,
+  });
+
+  assert.equal(walked.conversations.length, 1, 'the fixture must hide a second page');
+  assert.equal(walked.complete, false);
+  assert.equal(walked.reason, 'show-more-pending');
+
+  const full = await parser.collectSidebarConversations({
+    doc: fixture.doc,
+    scroller: fixture.scroller,
+    sleep: immediate,
+    maxRounds: 1,
+    maxShowMoreClicks: 1,
+  });
+  assert.equal(full.conversations.length, 2, 'the control must reveal the second page');
+  assert.equal(full.complete, true);
+});
+
+test('an unexpanded project cannot be certified as a complete sidebar', async () => {
+  let expanded = false;
+  const control = { click() { expanded = true; } };
+  const container = {
+    tagName: 'LI',
+    querySelectorAll(selector) {
+      return isConversationLinkSelector(selector) && expanded ? [{}] : [];
+    },
+  };
+  const projectRow = {
+    textContent: 'Project with a hidden chat',
+    parentElement: container,
+    getAttribute() { return null; },
+    querySelector(selector) { return selector === '[role="button"]' ? control : null; },
+  };
+  const link = (id, href) => ({
+    getAttribute(name) { return name === 'href' ? href : null; },
+    querySelector() { return null; },
+    textContent: id,
+  });
+  const scroller = { scrollTop: 0, clientHeight: 100, scrollHeight: 100 };
+  const doc = {
+    querySelectorAll(selector) {
+      if (selector === '[class*="project-unfurl-row"]') return expanded ? [] : [projectRow];
+      if (selector === 'nav li') return lastBuiltListItems;
+      if (isConversationLinkSelector(selector)) {
+        const rows = [link('personal', '/c/personal')];
+        if (expanded) rows.push(link('project', '/g/g-p-one/c/project'));
+        return linkListWithItems(rows, false);
+      }
+      return [];
+    },
+    querySelector(selector) {
+      return isConversationLinkSelector(selector) ? link('personal', '/c/personal') : null;
+    },
+  };
+  const limited = await parser.collectSidebarConversations({
+    doc, scroller, sleep: immediate, maxProjectExpansions: 0,
+  });
+  assert.equal(limited.conversations.length, 1, 'the unread project must really stay hidden');
+  assert.equal(limited.complete, false);
+  assert.equal(limited.reason, 'project-expansion-pending');
+
+  const enough = await parser.collectSidebarConversations({
+    doc, scroller, sleep: immediate, maxProjectExpansions: 1,
+  });
+  assert.equal(enough.conversations.length, 2, 'one expansion must reveal the missing chat');
+  assert.equal(enough.complete, true);
+});
 
 test('a list still growing taller is not declared finished', async () => {
   // The rows exist but have not mounted yet, so a read returns nothing new while

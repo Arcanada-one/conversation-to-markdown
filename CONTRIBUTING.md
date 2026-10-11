@@ -7,15 +7,18 @@ Thanks for helping make conversation exports more reliable.
 1. Keep the extension dependency-free unless a dependency is essential and discussed first.
 2. Preserve local-only processing: no telemetry or developer-operated remote service. Review any additional storage or host access explicitly against PRIVACY.md. Existing local metadata storage must never contain conversation text or file bytes.
 3. Add or update a regression test for every behavior change.
-4. Run the complete checks:
+4. Edit `src/content/` and `src/popup/`, then regenerate the shipped scripts with
+   `npm run build`. The checked-in `content.js` and `popup.js` are built from
+   these sources so the extension can run without a build tool installed.
+5. Run the complete checks:
 
    ```bash
    npm test
    npm run check
    ```
 
-5. Test the unpacked extension in current Chrome on a non-sensitive sample conversation.
-6. Update the README or privacy statement if user-visible behavior or permissions change.
+6. Test the unpacked extension in current Chrome on a non-sensitive sample conversation.
+7. Update the README or privacy statement if user-visible behavior or permissions change.
 
 ## Pull requests
 

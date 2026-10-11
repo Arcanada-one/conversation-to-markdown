@@ -124,17 +124,20 @@ translated interface. Its permission-justification fields are separate from the
 store description. Complete every field shown for the uploaded package before
 submitting the update. In particular, use this justification for `storage`:
 
-> The storage permission keeps an export metadata index and the latest error in
-> chrome.storage.local. The index supports resuming batch exports and finding
-> conversations updated since their last export. The error record supports
+> The storage permission keeps an export metadata index, one paused batch, and
+> the latest error in chrome.storage.local. The index supports resuming batch
+> exports and finding conversations updated since their last export. The paused
+> batch keeps conversation ids, addresses, and titles so a run can continue on
+> a later day. Message text is not stored. The error record supports
 > troubleshooting. Conversation text, attachment contents, and authentication
 > tokens are not stored. This data stays on the user's device and is not synced
 > or sent to the developer.
 
 The other declared permissions have distinct purposes: `scripting` runs the
 exporter in the ChatGPT tab, `clipboardWrite` copies Markdown when clipboard
-mode is selected, and `downloads` saves exported files and checks export
-download history for batch resume. The declared ChatGPT and file-service hosts
+mode is selected, `downloads` saves exported files and checks export
+download history for batch resume, and `sidePanel` shows the controls in a
+side panel so a click on the page does not cancel a running export. The declared ChatGPT and file-service hosts
 are used to read conversations and retrieve supported attachments with the
 user's existing session. State the single purpose as exporting ChatGPT
 conversations and supported attachments to local Markdown files or the

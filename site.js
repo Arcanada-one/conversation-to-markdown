@@ -29,7 +29,7 @@ function sanitizeFileName(value) {
 function slugSegment(value) {
   var slug = String(value || '')
     .normalize('NFC')
-    .replace(/[\\/:*?"<>|~]+/g, ' ')
+    .replace(/[\\/:*?"<>|~\u0000-\u001f\u007f-\u009f\uE000-\uF8FF]+/g, ' ')
     .replace(/[\s_]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 60)
@@ -40,8 +40,7 @@ function slugSegment(value) {
 
 function safeUrl(url) {
   var value = String(url || '');
-  if (value.indexOf('..') !== -1) return false;
-  if (value.indexOf('./') === 0) return true;
+  if (value.indexOf('./') === 0) return !/(^|\/)\.\.(\/|$)/.test(value);
   return /^https?:\/\//i.test(value);
 }
 
@@ -76,12 +75,13 @@ function isConversationFileUrl(url) {
 function collectMarkdownRefs(markdown) {
   var refs = [];
   var seen = {};
-  var pattern = /(!?)\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g;
+  var pattern = /(!?)\[((?:\\.|[^\]\\])*)\]\((?:<(https?:\/\/[^<>]+)>|(https?:\/\/[^)\s]+))\)/g;
   var match;
   while ((match = pattern.exec(String(markdown || ''))) !== null) {
-    if (seen[match[3]]) continue;
-    seen[match[3]] = true;
-    refs.push({ image: match[1] === '!', label: match[2], url: match[3] });
+    var url = match[3] || match[4];
+    if (seen[url]) continue;
+    seen[url] = true;
+    refs.push({ image: match[1] === '!', label: match[2].replace(/\\([\[\]\\])/g, '$1'), url: url, raw: match[0] });
   }
   return refs;
 }
@@ -100,14 +100,14 @@ function citedButNotDownloaded(markdown) {
  */
 function bindRetrievedFiles(markdown, retrieved) {
   var md = String(markdown || '');
-  var byUrl = {};
+  var byUrl = Object.create(null);
   var files = retrieved || [];
   for (var i = 0; i < files.length; i++) {
     if (files[i] && files[i].url && files[i].bytes) byUrl[files[i].url] = files[i];
   }
   var saved = [];
   var missing = [];
-  var used = {};
+  var used = Object.create(null);
   var refs = collectMarkdownRefs(md);
   for (var r = 0; r < refs.length; r++) {
     var ref = refs[r];
@@ -118,19 +118,20 @@ function bindRetrievedFiles(markdown, retrieved) {
     var got = byUrl[ref.url];
     var name = sanitizeFileName((got && got.name) || ref.label || fileNameFromUrl(ref.url));
     if (got) {
-      if (!used[name]) {
-        used[name] = true;
-        saved.push({ name: name, bytes: got.bytes });
-      }
-      md = md.split(ref.url).join('./' + name);
+      var original = name;
+      var dot = original.lastIndexOf('.');
+      var stem = dot > 0 ? original.slice(0, dot) : original;
+      var extension = dot > 0 ? original.slice(dot) : '';
+      var suffix = 2;
+      while (used[name.toLowerCase()]) name = stem + '-' + suffix++ + extension;
+      used[name.toLowerCase()] = true;
+      saved.push({ name: name, bytes: got.bytes });
+      var labelEnd = ref.raw.lastIndexOf('](') + 2;
+      md = md.split(ref.raw).join(ref.raw.slice(0, labelEnd) + '<./' + name + '>)');
     } else {
       missing.push(name);
       var note = 'Could not retrieve: ' + name;
-      if (ref.image) {
-        md = md.split('![' + ref.label + '](' + ref.url + ')').join(note);
-      } else {
-        md = md.split('[' + ref.label + '](' + ref.url + ')').join(note);
-      }
+      md = md.split(ref.raw).join(note);
     }
   }
   var cited = citedButNotDownloaded(md);
@@ -152,17 +153,22 @@ function renderInline(src) {
       }
     }
     if (text.slice(i, i + 2) === '![') {
-      var image = /^!\[([^\]]*)\]\(([^)\s]+)\)/.exec(text.slice(i));
-      if (image && safeUrl(image[2])) {
-        out += '<img alt="' + escapeHtml(image[1]) + '" src="' + escapeHtml(image[2]) + '">';
+      var image = /^!\[((?:\\.|[^\]\\])*)\]\((?:<([^<>]+)>|([^)\s]+))\)/.exec(text.slice(i));
+      var imageUrl = image && (image[2] || image[3]);
+      if (image && safeUrl(imageUrl)) {
+        var imageLabel = image[1].replace(/\\([\[\]\\])/g, '$1');
+        out += imageUrl.indexOf('./') === 0
+          ? '<img alt="' + escapeHtml(imageLabel) + '" src="' + escapeHtml(imageUrl) + '">'
+          : '<a href="' + escapeHtml(imageUrl) + '">Open image: ' + escapeHtml(imageLabel || 'image') + '</a>';
         i += image[0].length;
         continue;
       }
     }
     if (text.charAt(i) === '[') {
-      var link = /^\[([^\]]*)\]\(([^)\s]+)\)/.exec(text.slice(i));
-      if (link && safeUrl(link[2])) {
-        out += '<a href="' + escapeHtml(link[2]) + '">' + escapeHtml(link[1]) + '</a>';
+      var link = /^\[((?:\\.|[^\]\\])*)\]\((?:<([^<>]+)>|([^)\s]+))\)/.exec(text.slice(i));
+      var linkUrl = link && (link[2] || link[3]);
+      if (link && safeUrl(linkUrl)) {
+        out += '<a href="' + escapeHtml(linkUrl) + '">' + escapeHtml(link[1].replace(/\\([\[\]\\])/g, '$1')) + '</a>';
         i += link[0].length;
         continue;
       }
@@ -437,7 +443,9 @@ function chatSegment(session) {
 }
 
 function projectSegment(session) {
-  return slugSegment(session.projectSlug) || slugSegment(session.projectTitle) || slugSegment(session.projectId) || null;
+  var name = slugSegment(session.projectSlug) || slugSegment(session.projectTitle);
+  var id = slugSegment(session.projectId);
+  return id ? (name ? name + '~' : '') + id : name;
 }
 
 /**
@@ -553,9 +561,13 @@ function titleFromChatDir(dir) {
 
 /** Links for chat pages already downloaded. This run's own pages replace
  *  any link with the same directory, so a title from this run wins. */
-function earlierChatLinksFromPaths(paths) {
+function earlierChatLinksFromPaths(paths, completePaths) {
   var links = [];
   var seen = Object.create(null);
+  var completeDirs = Array.isArray(completePaths) ? new Set(completePaths.map(function(path) {
+    var dir = htmlCompleteDirFromDownloadPath(path);
+    return dir && dir.toLowerCase();
+  })) : null;
   var list = paths || [];
   for (var i = 0; i < list.length; i++) {
     var dir = htmlChatDirFromDownloadPath(list[i]);
@@ -569,7 +581,7 @@ function earlierChatLinksFromPaths(paths) {
       title: titleFromChatDir(dir),
       href: dir + '/index.html',
       dir: dir,
-      partial: false,
+      partial: completeDirs ? !completeDirs.has(key) : false,
       projectSlug: project,
       projectTitle: project,
       earlier: true,
@@ -641,7 +653,7 @@ function layoutIndexFiles(links) {
   return files;
 }
 
-function mergeChatLinks(current, earlierPaths) {
+function mergeChatLinks(current, earlierPaths, completePaths) {
   var merged = [];
   var seen = Object.create(null);
   var list = current || [];
@@ -649,7 +661,7 @@ function mergeChatLinks(current, earlierPaths) {
     merged.push(list[i]);
     if (list[i] && list[i].dir) seen[String(list[i].dir).toLowerCase()] = true;
   }
-  var earlier = earlierChatLinksFromPaths(earlierPaths);
+  var earlier = earlierChatLinksFromPaths(earlierPaths, completePaths);
   for (var e = 0; e < earlier.length; e++) {
     if (seen[String(earlier[e].dir).toLowerCase()]) continue;
     merged.push(earlier[e]);
@@ -657,7 +669,7 @@ function mergeChatLinks(current, earlierPaths) {
   return merged;
 }
 
-function layoutStaticSite(sessions, earlierPaths) {
+function layoutStaticSite(sessions, earlierPaths, completePaths) {
   var list = sessions || [];
   var files = [];
   var links = [];
@@ -666,7 +678,7 @@ function layoutStaticSite(sessions, earlierPaths) {
     files = files.concat(chat.files);
     links.push(chat.link);
   }
-  var indexes = layoutIndexFiles(mergeChatLinks(links, earlierPaths));
+  var indexes = layoutIndexFiles(mergeChatLinks(links, earlierPaths, completePaths));
   return { files: indexes.concat(files) };
 }
 

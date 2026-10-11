@@ -33,11 +33,11 @@ test('content.js survives being injected twice into one document', () => {
   });
 
   vm.runInContext(source, context, { filename: path.join(__dirname, '..', 'content.js') });
-  // Positive control: the first injection must actually define the binding the
-  // second one would collide with, or this test passes over an empty file.
+  // Positive control: the first injection must expose the API used by popup
+  // callbacks, or this test passes over an empty bundle.
   assert.equal(
     context.ATTACHMENT_CHIP_SELECTORS === undefined, false,
-    'the first injection must define the top-level bindings',
+    'the first injection must expose the content API',
   );
 
   assert.doesNotThrow(

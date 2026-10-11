@@ -25,7 +25,7 @@ attachment backup or universal ChatGPT-layout coverage.
 1. Compare the version in the [store listing](https://chromewebstore.google.com/detail/conversation-to-markdown/jhnhkmnignbhmcjbhoihdbjhjfljpili), the publisher dashboard (including pending submissions), and `manifest.json`. Use a version greater than the preceding store package.
 2. Keep `manifest.json`, `package.json`, `CHANGELOG.md`, and `FEATURES.md` consistent. One release gets one version bump; local verification builds are not evidence of a store release.
 3. Review the [feature checklist](../../FEATURES.md) against the live site. Test a long conversation, uploaded files, generated files, clipboard mode, and the batch modes being advertised. Check actual file bytes and links, not only download acceptance or unit tests.
-4. Run `npm test` and `npm run check`. Stage any new files before testing because the public-surface gate reads tracked files. Review every skipped test.
+4. Run `mise run setup`, then `npm test` and `npm run check`. Stage any new files before testing because the public-surface gate reads tracked files. Review every skipped test.
 5. Commit the reviewed changes and record the exact release revision. Merge through the repository's normal pull-request process, then tag that revision.
 
 ## Build the upload package
@@ -33,6 +33,7 @@ attachment backup or universal ChatGPT-layout coverage.
 From a clean checkout of the intended committed revision:
 
 ```sh
+mise run setup
 npm test
 npm run check
 bash package-extension.sh HEAD

@@ -8,8 +8,14 @@
 function classifyBatchFailure(message) {
   var text = String(message || '').toLowerCase();
   if (typeof navigator !== 'undefined' && navigator && navigator.onLine === false) return 'offline';
-  if (/failed to fetch|network ?error|net::|err_internet|err_network|err_name_not_resolved|err_connection/.test(text)) return 'offline';
-  if (/\b(?:502|503|504)\b|bad gateway|service unavailable|gateway timeout|too many requests|\b429\b|rate limit|slow down|try again later/.test(text)) return 'unreachable';
+  if (/failed to fetch|network ?error|net::|err_internet|err_network|err_name_not_resolved|err_connection/.test(text))
+    return 'offline';
+  if (
+    /\b(?:502|503|504)\b|bad gateway|service unavailable|gateway timeout|too many requests|\b429\b|rate limit|slow down|try again later/.test(
+      text
+    )
+  )
+    return 'unreachable';
   if (/did not load|timed out|timeout/.test(text)) return 'transient';
   return 'conversation';
 }
@@ -20,7 +26,9 @@ function backoffDelayMs(attempt) {
 }
 
 function sleep(ms) {
-  return new Promise(function(resolve) { setTimeout(resolve, ms); });
+  return new Promise(function (resolve) {
+    setTimeout(resolve, ms);
+  });
 }
 
 /** How many ChatGPT calls a batch may start in one minute.
@@ -46,11 +54,15 @@ function createCallQuota(limit, windowMs, now, wait, onWait) {
   var times = [];
   var cap = typeof limit === 'number' ? limit : OPENAI_CALLS_PER_MINUTE;
   var span = typeof windowMs === 'number' ? windowMs : OPENAI_CALL_WINDOW_MS;
-  var clock = now || function() { return Date.now(); };
+  var clock =
+    now ||
+    function () {
+      return Date.now();
+    };
   var sleepFn = wait || sleep;
   return {
     limit: cap,
-    take: async function(count) {
+    take: async function (count) {
       var need = count > 0 ? Math.floor(count) : 1;
       var frozen = 0;
       for (;;) {
@@ -95,3 +107,16 @@ async function waitWhilePaused(controls) {
   }
   return !(controls && controls.isCancelled && controls.isCancelled());
 }
+
+export {
+  backoffDelayMs,
+  classifyBatchFailure,
+  createCallQuota,
+  OPENAI_CALL_WINDOW_MS,
+  OPENAI_CALLS_PER_MINUTE,
+  OPENAI_FILE_LOOKUP_CALLS,
+  OPENAI_METADATA_CALLS,
+  OPENAI_PAGE_LOAD_CALLS,
+  sleep,
+  waitWhilePaused,
+};

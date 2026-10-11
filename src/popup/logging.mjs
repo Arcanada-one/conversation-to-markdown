@@ -1,3 +1,9 @@
+import { downloadStaticSite } from './controls.mjs';
+import { bytesToDownloadUrl, downloadOne, textToUtf8Bytes, waitForDownloadComplete } from './downloads.mjs';
+import { btnShowFolder, showStatus, status } from './options.mjs';
+import { formatExportTimestamp } from './paths.mjs';
+import { state } from './state.mjs';
+import { handlePanelHide, storageArea } from './storage.mjs';
 
 /** Where the last failure is kept so it outlives the popup. */
 var LAST_ERROR_KEY = 'c2mLastError';
@@ -33,8 +39,13 @@ function reportFailure(phase, err) {
   // Best effort by design: a failure to record a failure must not replace it.
   try {
     var area = storageArea();
-    if (area) area.set({ [LAST_ERROR_KEY]: detail }, function() { void chrome.runtime.lastError; });
-  } catch (_e) { /* the report is a courtesy; the error above is the message */ }
+    if (area)
+      area.set({ [LAST_ERROR_KEY]: detail }, function () {
+        void chrome.runtime.lastError;
+      });
+  } catch (_e) {
+    /* the report is a courtesy; the error above is the message */
+  }
 }
 
 /** The status line for a save-to-disk export: what landed, what did not, and why.
@@ -56,7 +67,10 @@ function buildSaveStatus(parts) {
   if (!saved.mdOk) {
     return {
       type: 'error',
-      text: 'Not saved: ' + (saved.mdError || 'the browser refused the write') + '\n' +
+      text:
+        'Not saved: ' +
+        (saved.mdError || 'the browser refused the write') +
+        '\n' +
         (refs.length > 0 ? saved.dlOk + '/' + refs.length + ' files were fetched. ' : '') +
         'Nothing was written for this conversation — run it again.',
     };
@@ -64,40 +78,44 @@ function buildSaveStatus(parts) {
 
   var incomplete = !!parts.partialSuffix || saved.dlOk < refs.length;
   var head = (incomplete ? '⚠ Saved incompletely' : '✓ Saved') + ' ' + counts + '\n' + saved.mdName;
-  if (refs.length === 0) return {
-    type: incomplete ? 'warning' : 'success',
-    text: head + (incomplete ? '\nRe-run to complete it.' : ''),
-  };
+  if (refs.length === 0)
+    return {
+      type: incomplete ? 'warning' : 'success',
+      text: head + (incomplete ? '\nRe-run to complete it.' : ''),
+    };
   if (saved.dlOk === refs.length) {
     return {
       type: incomplete ? 'warning' : 'success',
-      text: head + ' + ' + saved.dlOk + '/' + refs.length + ' files' +
-        (incomplete ? '\nRe-run to complete it.' : ''),
+      text: head + ' + ' + saved.dlOk + '/' + refs.length + ' files' + (incomplete ? '\nRe-run to complete it.' : ''),
     };
   }
   // A missing attachment leaves an expiring URL in the saved Markdown.
-  var reason = (saved.dlErrors && saved.dlErrors.length > 0) ? ' (' + saved.dlErrors[0] + ')' : '';
+  var reason = saved.dlErrors && saved.dlErrors.length > 0 ? ' (' + saved.dlErrors[0] + ')' : '';
   return {
     type: 'warning',
-    text: head + '\n' + saved.dlOk + '/' + refs.length + ' files fetched' + reason +
+    text:
+      head +
+      '\n' +
+      saved.dlOk +
+      '/' +
+      refs.length +
+      ' files fetched' +
+      reason +
       ' — missing files remain as links that expire. Re-run to repair.',
   };
 }
 
 /** The run whose log is being written, so a crash in this popup can still
  *  append the exception before the document goes away. */
-var activeRunLog = null;
-var activeRunLogOptions = null;
-var lastExportDownloadId = null;
 
 function noteExportDownload(id) {
-  if (id !== undefined && id !== null) lastExportDownloadId = id;
+  if (id !== undefined && id !== null) state.lastExportDownloadId = id;
 }
 
 function revealExportFolder() {
   if (typeof chrome === 'undefined' || !chrome.downloads) return;
-  if (lastExportDownloadId !== null && typeof chrome.downloads.show === 'function') {
-    chrome.downloads.show(lastExportDownloadId);
+  if (state.lastExportDownloadId !== null && typeof chrome.downloads.show === 'function') {
+    chrome.downloads.show(state.lastExportDownloadId);
     return;
   }
   if (typeof chrome.downloads.showDefaultFolder === 'function') chrome.downloads.showDefaultFolder();
@@ -109,7 +127,9 @@ function markExportFolderVisible() {
 }
 
 if (btnShowFolder && btnShowFolder !== status && typeof btnShowFolder.addEventListener === 'function') {
-  btnShowFolder.addEventListener('click', function() { revealExportFolder(); });
+  btnShowFolder.addEventListener('click', function () {
+    revealExportFolder();
+  });
 }
 
 /** Drop URLs, tokens, and oversized text. The log sits beside the export and
@@ -126,14 +146,16 @@ function sanitizeLogText(value) {
 function createRunLog(kind, options) {
   var manifest = null;
   try {
-    manifest = typeof chrome !== 'undefined' && chrome.runtime &&
-      typeof chrome.runtime.getManifest === 'function' ? chrome.runtime.getManifest() : null;
+    manifest =
+      typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.getManifest === 'function'
+        ? chrome.runtime.getManifest()
+        : null;
   } catch (_e) {
     manifest = null;
   }
   var opts = options || {};
   return {
-    version: manifest && manifest.version || null,
+    version: (manifest && manifest.version) || null,
     runId: opts.runId || formatExportTimestamp(),
     kind: kind,
     startedAt: new Date().toISOString(),
@@ -162,15 +184,19 @@ function pushLogEvent(log, event) {
 }
 
 function runLogJson(log) {
-  return JSON.stringify({
-    version: log.version,
-    runId: log.runId,
-    kind: log.kind,
-    startedAt: log.startedAt,
-    updatedAt: new Date().toISOString(),
-    options: log.options,
-    events: log.events,
-  }, null, 2);
+  return JSON.stringify(
+    {
+      version: log.version,
+      runId: log.runId,
+      kind: log.kind,
+      startedAt: log.startedAt,
+      updatedAt: new Date().toISOString(),
+      options: log.options,
+      events: log.events,
+    },
+    null,
+    2
+  );
 }
 
 /** Rewrite the log file with everything recorded so far. Chrome cannot append,
@@ -192,8 +218,11 @@ async function flushRunLog(log, options) {
       error = (err && err.message) || String(err);
     }
   }
-  var canDownload = opts.downloadLog !== false &&
-    typeof chrome !== 'undefined' && chrome.downloads && typeof chrome.downloads.download === 'function';
+  var canDownload =
+    opts.downloadLog !== false &&
+    typeof chrome !== 'undefined' &&
+    chrome.downloads &&
+    typeof chrome.downloads.download === 'function';
   if (canDownload) {
     var handle = bytesToDownloadUrl(textToUtf8Bytes(body), 'application/json');
     try {
@@ -224,12 +253,12 @@ async function flushRunLog(log, options) {
 }
 
 function searchDownloadPaths(filenameRegex, accept) {
-  return new Promise(function(resolve) {
+  return new Promise(function (resolve) {
     if (typeof chrome === 'undefined' || !chrome.downloads || !chrome.downloads.search) {
       resolve(null);
       return;
     }
-    chrome.downloads.search({ filenameRegex: filenameRegex }, function(items) {
+    chrome.downloads.search({ filenameRegex: filenameRegex }, function (items) {
       var paths = [];
       if (items) {
         for (var i = 0; i < items.length; i++) {
@@ -247,39 +276,52 @@ function searchDownloadPaths(filenameRegex, accept) {
 
 function searchHtmlCompletePaths() {
   if (typeof htmlCompleteDirFromDownloadPath !== 'function') return Promise.resolve(null);
-  return new Promise(function(resolve) {
+  return new Promise(function (resolve) {
     if (typeof chrome === 'undefined' || !chrome.downloads || !chrome.downloads.search) {
       resolve(null);
       return;
     }
-    chrome.downloads.search({ filenameRegex: 'chatgpt-export/html/.+/(index\\.html|export-complete\\.txt)$' }, function(items) {
-      if (chrome.runtime && chrome.runtime.lastError) { resolve(null); return; }
-      var dirs = Object.create(null);
-      for (var i = 0; i < (items || []).length; i++) {
-        var item = items[i];
-        if (!item || !item.filename) continue;
-        var pageDir = htmlChatDirFromDownloadPath(item.filename);
-        var markerDir = htmlCompleteDirFromDownloadPath(item.filename);
-        var dir = pageDir || markerDir;
-        if (!dir) continue;
-        var row = dirs[dir] || (dirs[dir] = {});
-        var field = pageDir ? 'page' : 'marker';
-        if (!row[field] || (typeof item.id === 'number' && item.id > row[field].id)) row[field] = item;
-      }
-      var complete = [];
-      for (var dir in dirs) {
-        var row = dirs[dir];
-        // The marker is written after the page. A later page write without a
-        // later marker is partial, and a marker without a page proves nothing.
-        if (row.page && row.marker && row.page.exists === true && row.marker.exists === true &&
-            row.page.state === 'complete' && row.marker.state === 'complete' &&
-            typeof row.page.id === 'number' && typeof row.marker.id === 'number' &&
-            row.marker.id > row.page.id) {
-          complete.push(row.marker.filename);
+    chrome.downloads.search(
+      { filenameRegex: 'chatgpt-export/html/.+/(index\\.html|export-complete\\.txt)$' },
+      function (items) {
+        if (chrome.runtime && chrome.runtime.lastError) {
+          resolve(null);
+          return;
         }
+        var dirs = Object.create(null);
+        for (var i = 0; i < (items || []).length; i++) {
+          var item = items[i];
+          if (!item || !item.filename) continue;
+          var pageDir = htmlChatDirFromDownloadPath(item.filename);
+          var markerDir = htmlCompleteDirFromDownloadPath(item.filename);
+          var dir = pageDir || markerDir;
+          if (!dir) continue;
+          var row = dirs[dir] || (dirs[dir] = {});
+          var field = pageDir ? 'page' : 'marker';
+          if (!row[field] || (typeof item.id === 'number' && item.id > row[field].id)) row[field] = item;
+        }
+        var complete = [];
+        for (var dir in dirs) {
+          var row = dirs[dir];
+          // The marker is written after the page. A later page write without a
+          // later marker is partial, and a marker without a page proves nothing.
+          if (
+            row.page &&
+            row.marker &&
+            row.page.exists === true &&
+            row.marker.exists === true &&
+            row.page.state === 'complete' &&
+            row.marker.state === 'complete' &&
+            typeof row.page.id === 'number' &&
+            typeof row.marker.id === 'number' &&
+            row.marker.id > row.page.id
+          ) {
+            complete.push(row.marker.filename);
+          }
+        }
+        resolve(complete);
       }
-      resolve(complete);
-    });
+    );
   });
 }
 
@@ -330,29 +372,50 @@ async function publishHtmlSessions(sessions) {
 }
 
 if (typeof window !== 'undefined' && window.addEventListener) {
-  window.addEventListener('error', function(event) {
-    if (!activeRunLog) return;
+  window.addEventListener('error', function (event) {
+    if (!state.activeRunLog) return;
     var err = event && event.error;
-    pushLogEvent(activeRunLog, {
+    pushLogEvent(state.activeRunLog, {
       level: 'error',
       phase: 'window',
       outcome: 'exception',
       message: (err && err.message) || (event && event.message) || 'error',
       stack: err && err.stack,
     });
-    flushRunLog(activeRunLog, activeRunLogOptions);
+    flushRunLog(state.activeRunLog, state.activeRunLogOptions);
   });
-  window.addEventListener('unhandledrejection', function(event) {
-    if (!activeRunLog) return;
+  window.addEventListener('unhandledrejection', function (event) {
+    if (!state.activeRunLog) return;
     var reason = event && event.reason;
-    pushLogEvent(activeRunLog, {
+    pushLogEvent(state.activeRunLog, {
       level: 'error',
       phase: 'unhandledrejection',
       outcome: 'exception',
       message: (reason && reason.message) || String(reason || 'unhandled rejection'),
       stack: reason && reason.stack,
     });
-    flushRunLog(activeRunLog, activeRunLogOptions);
+    flushRunLog(state.activeRunLog, state.activeRunLogOptions);
   });
   window.addEventListener('pagehide', handlePanelHide);
 }
+
+export {
+  buildSaveStatus,
+  createRunLog,
+  exportSavedLines,
+  flushRunLog,
+  htmlChatLanded,
+  htmlDirForConversation,
+  LAST_ERROR_KEY,
+  markExportFolderVisible,
+  noteExportDownload,
+  publishHtmlSessions,
+  pushLogEvent,
+  reportFailure,
+  revealExportFolder,
+  runLogJson,
+  sanitizeLogText,
+  searchDownloadPaths,
+  searchHtmlCompletePaths,
+  searchHtmlPagePaths,
+};

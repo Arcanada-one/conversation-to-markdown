@@ -1,3 +1,5 @@
+import { slugifyTitle } from './export.mjs';
+
 /** Remove the accessibility suffix ChatGPT appends to a project row's label.
  *
  *  The suffix is a TRANSLATED UI string, so it cannot be matched by its words.
@@ -35,9 +37,7 @@ function stripSidebarLabelSuffix(label, visibleTitle) {
 function titleFromSidebarLink(link) {
   if (!link) return null;
   const inner = link.querySelector ? link.querySelector('.truncate') : null;
-  const visible = inner
-    ? (inner.textContent || '').trim()
-    : (link.textContent || '').trim();
+  const visible = inner ? (inner.textContent || '').trim() : (link.textContent || '').trim();
   const label = (link.getAttribute('aria-label') || '').trim();
   if (visible) return stripSidebarLabelSuffix(label || visible, visible);
   return label ? stripSidebarLabelSuffix(label, '') : null;
@@ -51,8 +51,7 @@ function extractConversationTitle(doc) {
   const root = doc || (typeof document !== 'undefined' ? document : null);
   if (!root) return null;
 
-  const idMatch = (typeof location !== 'undefined' ? location.pathname : '')
-    .match(/\/c\/([A-Za-z0-9-]+)/);
+  const idMatch = (typeof location !== 'undefined' ? location.pathname : '').match(/\/c\/([A-Za-z0-9-]+)/);
 
   const candidates = [];
   if (idMatch) {
@@ -110,9 +109,7 @@ function knownProjectName(doc) {
   const routeProject = path.match(/\/g\/(g-p-[A-Za-z0-9]+)\//);
   const link = root.querySelector('a[href$="/c/' + idMatch[1] + '"]');
   const href = link ? link.getAttribute('href') || '' : '';
-  const projectId = (routeProject && routeProject[1])
-    || (href.match(/\/g\/(g-p-[A-Za-z0-9]+)\//) || [])[1]
-    || null;
+  const projectId = (routeProject && routeProject[1]) || (href.match(/\/g\/(g-p-[A-Za-z0-9]+)\//) || [])[1] || null;
   if (!projectId) return null;
 
   // A project has NO anchor of its own: measured on production, the sidebar
@@ -129,9 +126,7 @@ function knownProjectName(doc) {
     if (header) {
       const name = (header.textContent || '').trim();
       // A header that is itself a conversation row is not a project name.
-      const ownsRows = cur.querySelectorAll
-        ? cur.querySelectorAll('a[href*="/c/"]').length
-        : 0;
+      const ownsRows = cur.querySelectorAll ? cur.querySelectorAll('a[href*="/c/"]').length : 0;
       if (name && ownsRows > 0) return name;
     }
     cur = cur.parentElement;
@@ -156,7 +151,9 @@ function projectTitleForConversationLink(link) {
       row = null;
     }
     if (!row) continue;
-    var label = String(row.textContent || '').replace(/\s+/g, ' ').trim();
+    var label = String(row.textContent || '')
+      .replace(/\s+/g, ' ')
+      .trim();
     if (!label) continue;
     return label.slice(0, 80);
   }
@@ -258,9 +255,7 @@ function findCollapsedProjectRows(doc) {
     if (openLinks) continue;
     let control = null;
     try {
-      control = row.getAttribute && row.getAttribute('role') === 'button'
-        ? row
-        : row.querySelector('[role="button"]');
+      control = row.getAttribute && row.getAttribute('role') === 'button' ? row : row.querySelector('[role="button"]');
     } catch (_e) {
       control = null;
     }
@@ -309,9 +304,7 @@ function isPaginationControl(button) {
     if (!li || !ul || !ul.children) return false;
     const kids = Array.from(ul.children);
     if (kids.indexOf(li) !== kids.length - 1) return false;
-    const siblingConvLinks = ul.querySelectorAll
-      ? ul.querySelectorAll('a[href*="/c/"]').length
-      : 0;
+    const siblingConvLinks = ul.querySelectorAll ? ul.querySelectorAll('a[href*="/c/"]').length : 0;
     if (!siblingConvLinks) return false;
     // The row itself must not be a conversation.
     if (li.querySelector && li.querySelector('a[href*="/c/"]')) return false;
@@ -326,9 +319,7 @@ function findShowMoreControl(doc) {
   if (!root || !root.querySelectorAll) return null;
   let buttons;
   try {
-    buttons = root.querySelectorAll(
-      'nav button[data-sidebar-item], nav button, nav [role="button"]'
-    );
+    buttons = root.querySelectorAll('nav button[data-sidebar-item], nav button, nav [role="button"]');
   } catch (_e) {
     return null;
   }
@@ -348,14 +339,12 @@ function findSidebarScroller(doc) {
   while (current) {
     let overflowY = '';
     try {
-      overflowY = (typeof getComputedStyle === 'function'
-        ? (getComputedStyle(current).overflowY || '')
-        : '');
+      overflowY = typeof getComputedStyle === 'function' ? getComputedStyle(current).overflowY || '' : '';
     } catch (_e) {
       overflowY = '';
     }
-    const scrollable = /(auto|scroll|overlay)/.test(overflowY) ||
-      (current.scrollHeight || 0) > (current.clientHeight || 0) + 1;
+    const scrollable =
+      /(auto|scroll|overlay)/.test(overflowY) || (current.scrollHeight || 0) > (current.clientHeight || 0) + 1;
     if (scrollable && (current.scrollHeight || 0) > (current.clientHeight || 0) + 1) {
       return current;
     }
@@ -363,3 +352,18 @@ function findSidebarScroller(doc) {
   }
   return null;
 }
+
+export {
+  escapeForRegExp,
+  extractConversationTitle,
+  findCollapsedProjectRows,
+  findShowMoreControl,
+  findSidebarScroller,
+  isPaginationControl,
+  knownProjectName,
+  listSidebarConversations,
+  projectRowContainer,
+  projectTitleForConversationLink,
+  stripSidebarLabelSuffix,
+  titleFromSidebarLink,
+};

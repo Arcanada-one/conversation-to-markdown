@@ -1,9 +1,12 @@
+import { extractAttachments, extractImages, nodeToMarkdown } from './markdown.mjs';
+import { conversationScrollTop } from './scroll.mjs';
+
 function orderCapturedTurns(turns) {
   const ordered = turns instanceof Map ? Array.from(turns.values()) : Array.from(turns);
-  const hasCompleteNumericOrder = ordered.every(function(turn) {
+  const hasCompleteNumericOrder = ordered.every(function (turn) {
     return turn.order !== null && turn.order !== undefined;
   });
-  return ordered.sort(function(a, b) {
+  return ordered.sort(function (a, b) {
     if (hasCompleteNumericOrder && a.order !== b.order) return a.order - b.order;
     return a.discoveryIndex - b.discoveryIndex;
   });
@@ -31,14 +34,14 @@ function buildConversationMarkdown(turns) {
 function modernMessageRole(section) {
   if (!section.getAttribute || section.getAttribute('data-chatgpt-search-unit-key') === null) return null;
   if (section.querySelector('[data-user-message-bubble]')) return 'user';
-  if (section.querySelector('[data-conversation-role]') &&
-      section.querySelector('[data-chatgpt-selection-message-id]')) return 'assistant';
+  if (section.querySelector('[data-conversation-role]') && section.querySelector('[data-chatgpt-selection-message-id]'))
+    return 'assistant';
   return null;
 }
 
 function modernMessageSections(root) {
   if (!root || !root.querySelectorAll) return [];
-  return Array.from(root.querySelectorAll('[data-chatgpt-search-unit-key]')).filter(function(unit) {
+  return Array.from(root.querySelectorAll('[data-chatgpt-search-unit-key]')).filter(function (unit) {
     // Scope to measured conversation turns, excluding search panels and previews.
     return unit.closest && unit.closest('[data-turn-key]');
   });
@@ -53,7 +56,7 @@ function readModernPagination(container) {
   const root = container.querySelector && container.querySelector('[data-thread-find-target="conversation"]');
   if (!root || root.getAttribute('data-chatgpt-conversation-selection-target') !== 'true') return null;
   const children = Array.from(root.children || []);
-  const separatorIndex = children.findIndex(function(el) {
+  const separatorIndex = children.findIndex(function (el) {
     return el.tagName === 'SPAN' && el.getAttribute('hidden') !== null;
   });
   if (separatorIndex < 0) return null;
@@ -61,13 +64,18 @@ function readModernPagination(container) {
   const list = virtualizer && virtualizer.children && virtualizer.children[0];
   const slot = list && list.children && list.children[0];
   if (!virtualizer || !virtualizer.style || !virtualizer.style.height || !slot) return null;
-  const pending = children.slice(0, separatorIndex).some(function(el) {
+  const pending = children.slice(0, separatorIndex).some(function (el) {
     return el.getAttribute('role') === 'status' || !!el.querySelector('[role="status"]');
   });
   const first = modernMessageSections(root)[0];
   const firstInSlot = modernMessageSections(slot)[0];
-  const atFirstSlot = !!first && first === firstInSlot && list.style && slot.style &&
-    list.style.marginTop === '0px' && slot.style.marginTop === '0px';
+  const atFirstSlot =
+    !!first &&
+    first === firstInSlot &&
+    list.style &&
+    slot.style &&
+    list.style.marginTop === '0px' &&
+    slot.style.marginTop === '0px';
   return {
     pending: pending,
     // The status is a history-availability indicator, including while idle.
@@ -87,16 +95,24 @@ function extractModernMessage(section, discoveryIndex) {
     const bubble = section.querySelector('[data-user-message-bubble]');
     // The outer bubble also contains the translated "Show more" control.
     markdown = Array.from(bubble.querySelectorAll('.whitespace-pre-wrap'))
-      .map(function(node) { return node.textContent.trim(); }).filter(Boolean).join('\n\n');
+      .map(function (node) {
+        return node.textContent.trim();
+      })
+      .filter(Boolean)
+      .join('\n\n');
     const attachments = extractAttachments(section).concat(extractImages(section));
     if (attachments.length) markdown += (markdown ? '\n\n' : '') + attachments.join('\n\n');
   } else {
     const message = section.querySelector('[data-chatgpt-selection-message-id]');
     markdown = Array.from(message.querySelectorAll('[data-markdown-text-style]'))
-      .filter(function(node) {
+      .filter(function (node) {
         return !node.parentElement || !node.parentElement.closest('[data-markdown-text-style]');
       })
-      .map(function(node) { return nodeToMarkdown(node).trim(); }).filter(Boolean).join('\n\n');
+      .map(function (node) {
+        return nodeToMarkdown(node).trim();
+      })
+      .filter(Boolean)
+      .join('\n\n');
     // Do not duplicate inline images/links already converted by nodeToMarkdown.
     for (const extra of extractAttachments(section).concat(extractImages(section))) {
       if (!markdown.includes(extra)) markdown += (markdown ? '\n\n' : '') + extra;
@@ -148,9 +164,8 @@ function extractTurn(section, discoveryIndex) {
 
   if (role === 'user') {
     const message = section.querySelector('[data-message-author-role="user"]');
-    const bubble = message && (
-      message.querySelector('.whitespace-pre-wrap') || message.querySelector('[dir="auto"]') || message
-    );
+    const bubble =
+      message && (message.querySelector('.whitespace-pre-wrap') || message.querySelector('[dir="auto"]') || message);
     const text = bubble ? bubble.textContent.trim() : '';
     // Capture user-uploaded images that textContent would miss
     const userImages = extractImages(section);
@@ -168,9 +183,10 @@ function extractTurn(section, discoveryIndex) {
     const fragments = [];
     const messages = section.querySelectorAll('[data-message-author-role="assistant"]');
     for (const message of messages) {
-      const markdownRoot = message.querySelector('.markdown') ||
-        message.querySelector('[class*="prose"]') || message;
-      const markdown = nodeToMarkdown(markdownRoot).trim().replace(/\n{3,}/g, '\n\n');
+      const markdownRoot = message.querySelector('.markdown') || message.querySelector('[class*="prose"]') || message;
+      const markdown = nodeToMarkdown(markdownRoot)
+        .trim()
+        .replace(/\n{3,}/g, '\n\n');
       if (markdown) fragments.push(markdown);
     }
     // Some assistant turns carry no [data-message-author-role] wrapper at all —
@@ -187,7 +203,9 @@ function extractTurn(section, discoveryIndex) {
       for (const root of orphanRoots) {
         // Skip nested matches: .markdown inside an already-scanned .prose.
         if (root.parentElement && root.parentElement.closest('.markdown, [class*="prose"]')) continue;
-        const markdown = nodeToMarkdown(root).trim().replace(/\n{3,}/g, '\n\n');
+        const markdown = nodeToMarkdown(root)
+          .trim()
+          .replace(/\n{3,}/g, '\n\n');
         if (markdown) fragments.push(markdown);
       }
     }
@@ -208,3 +226,18 @@ function createTurn(turnId, section, discoveryIndex, role, markdown) {
     markdown: markdown,
   };
 }
+
+export {
+  buildConversationMarkdown,
+  createTurn,
+  extractModernMessage,
+  extractTurn,
+  getSectionRole,
+  getSectionTurnId,
+  isExplicitlyUnsupportedTurn,
+  modernMessageRole,
+  modernMessageSections,
+  orderCapturedTurns,
+  parseTurnOrder,
+  readModernPagination,
+};

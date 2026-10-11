@@ -312,6 +312,15 @@ test('the action button names an HTML-only export', async () => {
   assert.equal(harness.button.textContent, 'Save HTML site');
 });
 
+test('the popup injects the packaged content script', async () => {
+  const harness = createPopupHarness(() => [{ result: { ok: true, md: '# chat', lines: 1, words: 2 } }]);
+  await harness.click();
+  const files = harness.injected().flatMap((call) => call.files || []);
+  assert.ok(files.length > 0, 'the click must reach script injection');
+  assert.deepEqual(files, ['content.js']);
+  assert.doesNotMatch(fs.readFileSync(path.join(__dirname, '..', 'popup.js'), 'utf8'), /['"]content\.mjs['"]/, 'no injection path may name an unpackaged module');
+});
+
 test('ticking the batch forces file saving on, instead of warning about it', () => {
   // There used to be two caveats here, one of which warned that a batch without
   // file saving archives signed, short-lived LINKS rather than files — an export

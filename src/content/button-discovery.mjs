@@ -1,3 +1,5 @@
+import { findScrollContainer } from './scroll.mjs';
+
 /* ------------------------------------------------------------------------- *
  * Files offered only as a BUTTON WITH A HANDLER.
  *
@@ -44,7 +46,8 @@
  *  produced ONE file where the previous one produced four. The label does not
  *  decide the action — the format does. ChatGPT previews what it can render
  *  (.md, .txt, images, video, PDF) and only downloads what it cannot. */
-var UNPREVIEWABLE_FORMATS = /(^|[^a-z0-9])(zip|diff|patch|tar|gz|tgz|bz2|xz|7z|rar|whl|jar|exe|dmg|pkg|bin|iso|sqlite|db|parquet|pickle|pkl)([^a-z0-9]|$)/i;
+var UNPREVIEWABLE_FORMATS =
+  /(^|[^a-z0-9])(zip|diff|patch|tar|gz|tgz|bz2|xz|7z|rar|whl|jar|exe|dmg|pkg|bin|iso|sqlite|db|parquet|pickle|pkl)([^a-z0-9]|$)/i;
 
 /** Fold a name or label to a comparable form: lowercase, and every run of
  *  separators collapsed to one space.
@@ -61,15 +64,17 @@ var UNPREVIEWABLE_FORMATS = /(^|[^a-z0-9])(zip|diff|patch|tar|gz|tgz|bz2|xz|7z|r
  *  the same bytes twice and re-opening the exact viewer-over-panel regression
  *  that the exclusion exists to prevent. */
 function foldForNameMatching(value) {
-  return String(value || '').toLowerCase().replace(/[\s_\-.]+/g, ' ').trim();
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[\s_\-.]+/g, ' ')
+    .trim();
 }
 
 /** Folded, extension-stripped stems of the names already resolved elsewhere. */
 function panelStemsForMatching(panelNames) {
   const stems = [];
   for (const name of Array.from(panelNames || [])) {
-    const stem = foldForNameMatching(
-      String(name || '').replace(/\.[A-Za-z0-9]{1,8}$/, ''));
+    const stem = foldForNameMatching(String(name || '').replace(/\.[A-Za-z0-9]{1,8}$/, ''));
     if (stem) stems.push(stem);
   }
   return stems;
@@ -115,8 +120,10 @@ function downloadButtonsInPage(doc, panelNames) {
   const out = [];
   for (const node of Array.from(nodes)) {
     if (!node) continue;
-    const modernName = node.getAttribute && node.getAttribute('data-file-reference') === 'true'
-      ? node.getAttribute('data-markdown-copy-text') : null;
+    const modernName =
+      node.getAttribute && node.getAttribute('data-file-reference') === 'true'
+        ? node.getAttribute('data-markdown-copy-text')
+        : null;
     if (modernName) {
       if (!labelMatchesAnyStem(modernName, known)) {
         out.push({ button: node, label: modernName, archive: UNPREVIEWABLE_FORMATS.test(modernName) });
@@ -159,7 +166,9 @@ function downloadButtonsInPage(doc, panelNames) {
   //
   // Ordering still matters: archives first, so the files that can ONLY be had
   // by clicking are fetched before any viewer has a chance to interfere.
-  out.sort(function(a, b) { return (b.archive ? 1 : 0) - (a.archive ? 1 : 0); });
+  out.sort(function (a, b) {
+    return (b.archive ? 1 : 0) - (a.archive ? 1 : 0);
+  });
   return out;
 }
 
@@ -193,11 +202,14 @@ function downloadButtonsInPage(doc, panelNames) {
  *  Without the fallback the Escape route is unreachable off-browser, which makes
  *  it untestable — and an untestable guard is one nobody can prove works. */
 function escapeKeydownEvent(win) {
-  const Ctor = (win && win.KeyboardEvent) ||
-    (typeof KeyboardEvent !== 'undefined' ? KeyboardEvent : null);
+  const Ctor = (win && win.KeyboardEvent) || (typeof KeyboardEvent !== 'undefined' ? KeyboardEvent : null);
   const init = { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true };
   if (Ctor) {
-    try { return new Ctor('keydown', init); } catch (_e) { /* fall through */ }
+    try {
+      return new Ctor('keydown', init);
+    } catch (_e) {
+      /* fall through */
+    }
   }
   return Object.assign({ type: 'keydown' }, init);
 }
@@ -216,18 +228,27 @@ function dismissViewerOverlay(doc, win, options) {
         target.dispatchEvent(escapeKeydownEvent(win));
         return true;
       }
-    } catch (_e) { /* dispatch refused */ }
+    } catch (_e) {
+      /* dispatch refused */
+    }
     return false;
   }
   try {
     const candidates = root.querySelectorAll(
-      '[role="dialog"] button[aria-label], [data-testid*="close"], button[aria-label]');
+      '[role="dialog"] button[aria-label], [data-testid*="close"], button[aria-label]'
+    );
     for (const node of Array.from(candidates || [])) {
       const label = (node.getAttribute && node.getAttribute('aria-label')) || '';
       if (!/^(close|закрыть|schließen|fermer|cerrar)$/i.test(label.trim())) continue;
-      if (typeof node.click === 'function') { node.click(); closed = true; break; }
+      if (typeof node.click === 'function') {
+        node.click();
+        closed = true;
+        break;
+      }
     }
-  } catch (_e) { /* selector unsupported in a shim */ }
+  } catch (_e) {
+    /* selector unsupported in a shim */
+  }
 
   if (!closed) {
     try {
@@ -236,7 +257,9 @@ function dismissViewerOverlay(doc, win, options) {
         target.dispatchEvent(escapeKeydownEvent(win));
         closed = true;
       }
-    } catch (_e) { /* dispatch refused */ }
+    } catch (_e) {
+      /* dispatch refused */
+    }
   }
   return closed;
 }
@@ -266,7 +289,9 @@ function filterButtonsAgainstPanel(buttons, panelNames) {
   }
   // Archives first: the files that can ONLY be had by clicking are fetched
   // before any viewer has a chance to interfere. Same rule as the selector.
-  out.sort(function(a, b) { return (b.archive ? 1 : 0) - (a.archive ? 1 : 0); });
+  out.sort(function (a, b) {
+    return (b.archive ? 1 : 0) - (a.archive ? 1 : 0);
+  });
   return out;
 }
 
@@ -274,16 +299,22 @@ async function findButtonsByScrolling(doc, win, options) {
   const opts = options || {};
   const root = doc || (typeof document !== 'undefined' ? document : null);
   if (!root || !root.querySelectorAll) return [];
-  const sleep = opts.sleep || function(ms) {
-    return new Promise(function(resolve) { setTimeout(resolve, ms); });
-  };
+  const sleep =
+    opts.sleep ||
+    function (ms) {
+      return new Promise(function (resolve) {
+        setTimeout(resolve, ms);
+      });
+    };
 
   let first = null;
   try {
     first = root.querySelector ? root.querySelector('[data-turn-id]') : null;
-  } catch (_e) { /* shim without querySelector */ }
-  const scroller = opts.scroller ||
-    (typeof findScrollContainer === 'function' && first ? findScrollContainer(first) : null);
+  } catch (_e) {
+    /* shim without querySelector */
+  }
+  const scroller =
+    opts.scroller || (typeof findScrollContainer === 'function' && first ? findScrollContainer(first) : null);
   if (!scroller) return downloadButtonsInPage(root, opts.panelNames);
 
   const settleMs = opts.buttonScrollSettleMs === undefined ? 500 : opts.buttonScrollSettleMs;
@@ -301,7 +332,7 @@ async function findButtonsByScrolling(doc, win, options) {
     scroller.scrollTop = 0;
     await sleep(settleMs);
     harvest();
-    const maxTop = function() {
+    const maxTop = function () {
       return Math.max(0, (scroller.scrollHeight || 0) - (scroller.clientHeight || 0));
     };
     const step = Math.max(200, Math.floor((scroller.clientHeight || 800) * 0.7));
@@ -316,7 +347,23 @@ async function findButtonsByScrolling(doc, win, options) {
     // A button captured while scrolled away is still clickable: the click path
     // calls scrollIntoView on it first. Restoring the position keeps the page
     // where the user left it.
-    try { scroller.scrollTop = originalTop; } catch (_e) { /* detached */ }
+    try {
+      scroller.scrollTop = originalTop;
+    } catch (_e) {
+      /* detached */
+    }
   }
   return Array.from(byLabel.values());
 }
+
+export {
+  dismissViewerOverlay,
+  downloadButtonsInPage,
+  escapeKeydownEvent,
+  filterButtonsAgainstPanel,
+  findButtonsByScrolling,
+  foldForNameMatching,
+  labelMatchesAnyStem,
+  panelStemsForMatching,
+  UNPREVIEWABLE_FORMATS,
+};

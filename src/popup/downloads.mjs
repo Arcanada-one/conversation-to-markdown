@@ -1,14 +1,25 @@
+import { noteExportDownload } from './logging.mjs';
+import { btn } from './options.mjs';
+import {
+  artifactFilename,
+  batchMdFilename,
+  buildMdFilename,
+  conversationFolderPath,
+  exportPath,
+  formatExportTimestamp,
+  parseArtifactRefs,
+} from './paths.mjs';
+import { state } from './state.mjs';
+
 function searchCompletedDownloadPaths(projectSlug) {
-  return new Promise(function(resolve) {
+  return new Promise(function (resolve) {
     if (typeof chrome === 'undefined' || !chrome.downloads || !chrome.downloads.search) {
       resolve(new Set());
       return;
     }
     var escaped = (projectSlug || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    var pattern = projectSlug
-      ? 'chatgpt-export/' + escaped + '/.+/.*\\.md$'
-      : 'chatgpt-export/.+/.*\\.md$';
-    chrome.downloads.search({ filenameRegex: pattern }, function(items) {
+    var pattern = projectSlug ? 'chatgpt-export/' + escaped + '/.+/.*\\.md$' : 'chatgpt-export/.+/.*\\.md$';
+    chrome.downloads.search({ filenameRegex: pattern }, function (items) {
       var paths = new Set();
       if (items) {
         for (var i = 0; i < items.length; i++) {
@@ -71,10 +82,14 @@ function bytesToDownloadUrl(bytes, mimeType) {
   if (typeof Blob === 'function' && typeof URL !== 'undefined' && URL.createObjectURL) {
     return {
       url: URL.createObjectURL(new Blob([bytes], { type: mimeType || 'application/octet-stream' })),
-      revoke: function(url) { try { URL.revokeObjectURL(url); } catch (_e) {} },
+      revoke: function (url) {
+        try {
+          URL.revokeObjectURL(url);
+        } catch (_e) {}
+      },
     };
   }
-  return { url: bytesToBase64DataUrl(bytes, mimeType), revoke: function() {} };
+  return { url: bytesToBase64DataUrl(bytes, mimeType), revoke: function () {} };
 }
 
 function textToUtf8Bytes(text) {
@@ -143,70 +158,87 @@ var MD_WRITE_TIMEOUT_MS = 120000;
  *  to have succeeded, and on a backup tool an unverified file must not be reported
  *  as saved. The run continues either way; a stuck download must not wedge it. */
 function waitForDownloadComplete(downloadId, timeoutMs) {
-  return new Promise(function(resolve) {
-    if (downloadId === undefined || downloadId === null ||
-        typeof chrome === 'undefined' || !chrome.downloads || !chrome.downloads.onChanged) {
+  return new Promise(function (resolve) {
+    if (
+      downloadId === undefined ||
+      downloadId === null ||
+      typeof chrome === 'undefined' ||
+      !chrome.downloads ||
+      !chrome.downloads.onChanged
+    ) {
       resolve(false);
       return;
     }
     var settled = false;
-    var finish = function(done) {
+    var finish = function (done) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      try { chrome.downloads.onChanged.removeListener(listener); } catch (_e) {}
+      try {
+        chrome.downloads.onChanged.removeListener(listener);
+      } catch (_e) {}
       resolve(done);
     };
-    var listener = function(delta) {
+    var listener = function (delta) {
       if (!delta || delta.id !== downloadId || !delta.state) return;
       if (delta.state.current === 'complete' || delta.state.current === 'interrupted') {
         finish(delta.state.current === 'complete');
       }
     };
-    var timer = setTimeout(function() { finish(false); }, timeoutMs || 120000);
+    var timer = setTimeout(function () {
+      finish(false);
+    }, timeoutMs || 120000);
     chrome.downloads.onChanged.addListener(listener);
     // A small file can finish between the download callback and this listener.
     if (typeof chrome.downloads.search === 'function') {
       try {
-        chrome.downloads.search({ id: downloadId }, function(items) {
+        chrome.downloads.search({ id: downloadId }, function (items) {
           if (chrome.runtime && chrome.runtime.lastError) return;
           var item = items && items[0];
           if (!item || item.id !== downloadId) return;
           if (item.state === 'interrupted') finish(false);
           else if (item.state === 'complete' && item.exists === true) finish(true);
         });
-      } catch (_e) { /* the event listener still observes later completion */ }
+      } catch (_e) {
+        /* the event listener still observes later completion */
+      }
     }
   });
 }
 
 /** Download one file via chrome.downloads. Returns {url, filename, ok, error}. */
 function downloadOne(url, filename, targetPath, timeoutMs, conflictAction) {
-  return new Promise(function(resolve) {
+  return new Promise(function (resolve) {
     var settled = false;
-    var timer = setTimeout(function() {
-      if (!settled) { settled = true; resolve({ url: url, filename: filename, ok: false, error: 'timeout' }); }
+    var timer = setTimeout(function () {
+      if (!settled) {
+        settled = true;
+        resolve({ url: url, filename: filename, ok: false, error: 'timeout' });
+      }
     }, timeoutMs || 12000);
-    chrome.downloads.download({
-      url: url,
-      filename: targetPath || ('chatgpt-export/' + filename),
-      saveAs: false,
-      conflictAction: conflictAction || 'overwrite',
-    }, function(downloadId) {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      var ok = !chrome.runtime.lastError && downloadId !== undefined;
-      resolve({
+    chrome.downloads.download(
+      {
         url: url,
-        filename: filename,
-        ok: ok,
-        // Returned so a caller holding a revocable blob URL can wait for the
-        // write to finish before releasing it.
-        downloadId: ok ? downloadId : null,
-        error: ok ? null : (chrome.runtime.lastError && chrome.runtime.lastError.message || 'download rejected'),
-      });
-    });
+        filename: targetPath || 'chatgpt-export/' + filename,
+        saveAs: false,
+        conflictAction: conflictAction || 'overwrite',
+      },
+      function (downloadId) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        var ok = !chrome.runtime.lastError && downloadId !== undefined;
+        resolve({
+          url: url,
+          filename: filename,
+          ok: ok,
+          // Returned so a caller holding a revocable blob URL can wait for the
+          // write to finish before releasing it.
+          downloadId: ok ? downloadId : null,
+          error: ok ? null : (chrome.runtime.lastError && chrome.runtime.lastError.message) || 'download rejected',
+        });
+      }
+    );
   });
 }
 
@@ -214,11 +246,13 @@ function downloadOne(url, filename, targetPath, timeoutMs, conflictAction) {
  *  Counts, not a percentage: there is no fixed budget to be a percentage of. */
 function startProgressPolling(tabId) {
   stopProgressPolling();
-  progressTimer = setInterval(async function() {
+  state.progressTimer = setInterval(async function () {
     try {
       const probe = await chrome.scripting.executeScript({
         target: { tabId: tabId },
-        func: function() { return window.__c2mScan || null; },
+        func: function () {
+          return window.__c2mScan || null;
+        },
       });
       const state = probe && probe[0] && probe[0].result;
       if (state && !state.cancelled) {
@@ -232,7 +266,10 @@ function startProgressPolling(tabId) {
 }
 
 function stopProgressPolling() {
-  if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
+  if (state.progressTimer) {
+    clearInterval(state.progressTimer);
+    state.progressTimer = null;
+  }
 }
 
 /** Save one scanned conversation to disk and optionally collect zip entries. */
@@ -266,7 +303,9 @@ async function saveConversationExport(tabId, result, options) {
     dlTotal = refs.length;
     var extracted = [];
     if (refs.length > 0) {
-      var urls = refs.map(function(r) { return r.url; });
+      var urls = refs.map(function (r) {
+        return r.url;
+      });
       // Guarded because this runs BEFORE the .md write, and its failure used to
       // take the conversation with it: a navigated tab, a content script that
       // went away, or an oversized payload threw straight past the write, so a
@@ -276,10 +315,12 @@ async function saveConversationExport(tabId, result, options) {
       try {
         var extractResult = await chrome.scripting.executeScript({
           target: { tabId: tabId },
-          func: async function(urls) {
+          func: async function (urls) {
             if (typeof fetchImageDataUrls === 'function') return await fetchImageDataUrls(urls);
             if (typeof extractImageDataUrls === 'function') return await extractImageDataUrls(urls);
-            return urls.map(function() { return null; });
+            return urls.map(function () {
+              return null;
+            });
           },
           args: [urls],
         });
@@ -313,12 +354,16 @@ async function saveConversationExport(tabId, result, options) {
         }
         if (r.ok) {
           dlOk++;
-          var localUrl = './' + r.filename.replace(/[ #%?()[\]]/g, function(char) {
-            return '%' + char.charCodeAt(0).toString(16).toUpperCase();
-          });
+          var localUrl =
+            './' +
+            r.filename.replace(/[ #%?()[\]]/g, function (char) {
+              return '%' + char.charCodeAt(0).toString(16).toUpperCase();
+            });
           mdFinal = mdFinal.split(ex.url).join(localUrl);
           var dataPart = ex.dataUrl.split(',')[1] || '';
-          var bin = Uint8Array.from(atob(dataPart), function(c) { return c.charCodeAt(0); });
+          var bin = Uint8Array.from(atob(dataPart), function (c) {
+            return c.charCodeAt(0);
+          });
           savedFiles.push({ url: ex.url, name: fname, bytes: bin });
           if (zipEntries) addZipEntry(zipEntries, projectSlug, convSlug, fname, bin);
         } else {
@@ -344,12 +389,7 @@ async function saveConversationExport(tabId, result, options) {
   // and past 1,500 in English, which is why every English test stayed green.
   // bytesToDownloadUrl already existed for the zip; the .md is the larger payload.
   var mdHandle = bytesToDownloadUrl(textToUtf8Bytes(mdFinal), 'text/markdown;charset=utf-8');
-  var mdWrite = await downloadOne(
-    mdHandle.url,
-    mdName,
-    folderPath + '/' + mdName,
-    MD_WRITE_TIMEOUT_MS
-  );
+  var mdWrite = await downloadOne(mdHandle.url, mdName, folderPath + '/' + mdName, MD_WRITE_TIMEOUT_MS);
   // Chrome accepted the download; the bytes are still being written. Revoking the
   // blob URL now truncates the file — the same trap the zip path documents.
   //
@@ -361,8 +401,7 @@ async function saveConversationExport(tabId, result, options) {
   // user their trust in a good export, which is a real cost in the other
   // direction. The zip resolves this the opposite way on purpose — an archive is
   // a convenience, and an unverified one is better left unclaimed.
-  var canObserveCompletion = typeof chrome !== 'undefined' &&
-    chrome.downloads && chrome.downloads.onChanged;
+  var canObserveCompletion = typeof chrome !== 'undefined' && chrome.downloads && chrome.downloads.onChanged;
   if (mdWrite.ok && canObserveCompletion) {
     var mdWritten = await waitForDownloadComplete(mdWrite.downloadId, MD_WRITE_TIMEOUT_MS);
     if (!mdWritten) {
@@ -386,3 +425,19 @@ async function saveConversationExport(tabId, result, options) {
     savedFiles: savedFiles,
   };
 }
+
+export {
+  addZipEntry,
+  bytesToBase64DataUrl,
+  bytesToDownloadUrl,
+  downloadOne,
+  MD_WRITE_TIMEOUT_MS,
+  saveConversationExport,
+  searchCompletedDownloadPaths,
+  startProgressPolling,
+  stopProgressPolling,
+  textToUtf8Bytes,
+  waitForDownloadComplete,
+  ZIP_BYTE_BUDGET,
+  ZIP_WRITE_TIMEOUT_MS,
+};

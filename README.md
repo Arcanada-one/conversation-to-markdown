@@ -156,10 +156,10 @@ local-storage, and signed-link handling.
 
 ## Development and publishing
 
-Tests use Node.js (CI uses Node 24); there are no package dependencies to install.
-Runtime source lives under `src/content/` and `src/popup/`. Run `npm run build`
-after editing it; the generated entry scripts are committed so an unpacked
-extension needs no build step.
+Tests use Node.js 24. Run `mise run setup` to install the pinned development
+tools and enable the pre-commit test hook. Runtime modules live under
+`src/content/` and `src/popup/`. Bun bundles them into the committed entry
+scripts, so an unpacked extension needs no build step or package dependencies.
 
 ```sh
 npm run build

@@ -1,3 +1,18 @@
+import {
+  fetchConversationArtifacts,
+  listArtifactPanelFiles,
+  resolveArtifactPanelFiles,
+  waitForArtifactPanel,
+} from './artifacts.mjs';
+import {
+  dismissViewerOverlay,
+  downloadButtonsInPage,
+  filterButtonsAgainstPanel,
+  findButtonsByScrolling,
+} from './button-discovery.mjs';
+import { markdownLink, nodeToMarkdown } from './markdown.mjs';
+import { sandboxFilesFromMarkdown } from './scan.mjs';
+
 async function collectButtonDownloads(options) {
   const opts = options || {};
   const doc = opts.doc || (typeof document !== 'undefined' ? document : null);
@@ -43,9 +58,13 @@ async function collectButtonDownloads(options) {
   }
   if (!buttons.length) return [];
 
-  const sleep = opts.sleep || function(ms) {
-    return new Promise(function(resolve) { setTimeout(resolve, ms); });
-  };
+  const sleep =
+    opts.sleep ||
+    function (ms) {
+      return new Promise(function (resolve) {
+        setTimeout(resolve, ms);
+      });
+    };
   // How long one handler gets to produce a URL. It is a network round-trip to
   // sign the link, so this is not instant; a button that never resolves must
   // not stall the export either.
@@ -64,8 +83,8 @@ async function collectButtonDownloads(options) {
 
   try {
     if (anchorProto && typeof originalAnchorClick === 'function') {
-      anchorProto.click = function() {
-        const href = this.getAttribute ? (this.getAttribute('href') || '') : '';
+      anchorProto.click = function () {
+        const href = this.getAttribute ? this.getAttribute('href') || '' : '';
         // Only swallow the click when it is a download; an ordinary in-page
         // anchor clicked by unrelated code must still work.
         if (href && (this.hasAttribute('download') || /^(https?:|blob:)/.test(href))) {
@@ -75,12 +94,15 @@ async function collectButtonDownloads(options) {
         return originalAnchorClick.apply(this, arguments);
       };
     }
-    win.open = function(url) {
-      if (url) { record(String(url), null); return null; }
+    win.open = function (url) {
+      if (url) {
+        record(String(url), null);
+        return null;
+      }
       return originalOpen ? originalOpen.apply(win, arguments) : null;
     };
     if (win.URL && typeof originalCreateObjectURL === 'function') {
-      win.URL.createObjectURL = function(obj) {
+      win.URL.createObjectURL = function (obj) {
         const url = originalCreateObjectURL.apply(win.URL, arguments);
         // Keep the blob itself: a blob: URL minted in the page is not fetchable
         // from the popup's context, so the bytes have to travel instead.
@@ -139,7 +161,7 @@ async function collectButtonDownloads(options) {
   const seen = new Set();
   const files = [];
   for (const item of captured) {
-    const key = item.url || (item.label + ':blob');
+    const key = item.url || item.label + ':blob';
     if (seen.has(key)) continue;
     seen.add(key);
     files.push({
@@ -157,7 +179,9 @@ async function collectButtonDownloads(options) {
  *  `fn=` is what the signing endpoint puts there; the last path segment is the
  *  fallback, and the label is used only when the URL offers nothing usable. */
 function downloadNameFromUrl(url, label) {
-  const fallback = String(label || 'download').trim().replace(/[\\/:*?"<>|]+/g, '-');
+  const fallback = String(label || 'download')
+    .trim()
+    .replace(/[\\/:*?"<>|]+/g, '-');
   if (!url) return fallback;
   let parsed;
   try {
@@ -182,9 +206,10 @@ async function appendPanelArtifacts(markdown, options) {
   // single-frame read at 11s found nothing, so a user who exports immediately
   // after opening a conversation would silently lose every generated file. Wait
   // for it, bounded — and treat "still absent" as absent, not as an error.
-  const conversationId = opts.conversationId ||
-    ((typeof location !== 'undefined' ? location.pathname : '')
-      .match(/\/c\/([A-Za-z0-9-]+)/) || [])[1] || null;
+  const conversationId =
+    opts.conversationId ||
+    ((typeof location !== 'undefined' ? location.pathname : '').match(/\/c\/([A-Za-z0-9-]+)/) || [])[1] ||
+    null;
   if (!conversationId) return markdown;
 
   // Rows harvested during the scan, while each turn was mounted. They are the
@@ -192,9 +217,8 @@ async function appendPanelArtifacts(markdown, options) {
   // the onMounted collector in getConversationMarkdown.
   const scannedFiles = Array.isArray(opts.scannedPanelFiles) ? opts.scannedPanelFiles : [];
 
-  const artifacts = opts.artifacts !== undefined
-    ? opts.artifacts
-    : await fetchConversationArtifacts(conversationId, opts);
+  const artifacts =
+    opts.artifacts !== undefined ? opts.artifacts : await fetchConversationArtifacts(conversationId, opts);
 
   if (typeof opts.onInventory === 'function') opts.onInventory(artifacts);
 
@@ -223,31 +247,43 @@ async function appendPanelArtifacts(markdown, options) {
   // with no panel row, no attachment and no link — measured: the .zip and the
   // .diff of the conversation this was built for appear NOWHERE else.
   const apiFiles = (artifacts || [])
-    .filter(function(a) { return a && a.sandboxPath; })
-    .map(function(a) {
-      return { name: a.name, sandboxPath: a.sandboxPath, fromApi: true,
-        priority: a.priority === undefined ? 1 : a.priority, messageId: a.messageId };
+    .filter(function (a) {
+      return a && a.sandboxPath;
+    })
+    .map(function (a) {
+      return {
+        name: a.name,
+        sandboxPath: a.sandboxPath,
+        fromApi: true,
+        priority: a.priority === undefined ? 1 : a.priority,
+        messageId: a.messageId,
+      };
     });
 
-  const uploadedFiles = (artifacts || []).filter(function(a) {
-    return a && a.kind === 'attachment' && a.name;
-  }).map(function(a) { return Object.assign({}, a, { priority: 0 }); });
+  const uploadedFiles = (artifacts || [])
+    .filter(function (a) {
+      return a && a.kind === 'attachment' && a.name;
+    })
+    .map(function (a) {
+      return Object.assign({}, a, { priority: 0 });
+    });
 
   let files = opts.files;
   if (!files) {
     // A sandbox link in the body is proof a generated file exists — better
     // proof than the API, which reports neither uploads nor interpreter output
     // for such a conversation. Wait for the panel when either source says so.
-    const mayHaveFiles = artifacts === null || artifacts.length > 0 ||
-      bodyFiles.length > 0 || scannedFiles.length > 0;
+    const mayHaveFiles = artifacts === null || artifacts.length > 0 || bodyFiles.length > 0 || scannedFiles.length > 0;
     // A completed scan plus an explicit API link already supplies the file's
     // real path. Do not spend half the lookup budget waiting for a viewer panel
     // that archives do not render. Other layouts retain the late-panel wait.
-    const offeredAfterScan = Array.isArray(opts.scannedPanelFiles) &&
-      (uploadedFiles.length > 0 || apiFiles.some(function(file) { return file.priority === 0; }));
-    files = mayHaveFiles && !offeredAfterScan
-      ? await waitForArtifactPanel(doc, opts)
-      : listArtifactPanelFiles(doc);
+    const offeredAfterScan =
+      Array.isArray(opts.scannedPanelFiles) &&
+      (uploadedFiles.length > 0 ||
+        apiFiles.some(function (file) {
+          return file.priority === 0;
+        }));
+    files = mayHaveFiles && !offeredAfterScan ? await waitForArtifactPanel(doc, opts) : listArtifactPanelFiles(doc);
   }
 
   // Merge, preferring the body's real path over the panel's reconstructed one.
@@ -264,7 +300,7 @@ async function appendPanelArtifacts(markdown, options) {
     const visible = bySandboxPath.has(file.sandboxPath);
     bySandboxPath.set(file.sandboxPath, visible ? Object.assign({}, file, { priority: 0 }) : file);
   }
-  files = uploadedFiles.concat(Array.from(bySandboxPath.values())).sort(function(a, b) {
+  files = uploadedFiles.concat(Array.from(bySandboxPath.values())).sort(function (a, b) {
     return (a.priority || 0) - (b.priority || 0);
   });
 
@@ -276,27 +312,32 @@ async function appendPanelArtifacts(markdown, options) {
   // resolved is never clicked. That is the guard against the measured
   // regression: clicking a .md the panel had already listed opened the Library
   // viewer over the panel and cut the next export from four files to one.
-  const panelNames = files.map(function(f) { return f.name; });
+  const panelNames = files.map(function (f) {
+    return f.name;
+  });
   // Buttons gathered on the scan's single walk, filtered HERE rather than
   // there: the exclusion needs the panel's names, and the panel is only fully
   // known once the merge above has run.
   const scannedButtons = Array.isArray(opts.scannedButtons)
     ? filterButtonsAgainstPanel(opts.scannedButtons, panelNames)
     : null;
-  const buttonFiles = opts.clickDownloads === false
-    ? (opts.reportUnresolvedButtons
-      ? (scannedButtons || downloadButtonsInPage(doc, panelNames)).map(function(entry) {
-        return { name: entry.label, url: null };
-      })
-      : [])
-    : (opts.buttonFiles !== undefined
-      ? opts.buttonFiles
-      : await collectButtonDownloads(Object.assign({}, opts, {
-        panelNames: panelNames,
-        // Present but empty means the walk genuinely found none — do not fall
-        // back to a second traversal, which is what this replaces.
-        buttons: scannedButtons === null ? undefined : scannedButtons,
-      })));
+  const buttonFiles =
+    opts.clickDownloads === false
+      ? opts.reportUnresolvedButtons
+        ? (scannedButtons || downloadButtonsInPage(doc, panelNames)).map(function (entry) {
+            return { name: entry.label, url: null };
+          })
+        : []
+      : opts.buttonFiles !== undefined
+        ? opts.buttonFiles
+        : await collectButtonDownloads(
+            Object.assign({}, opts, {
+              panelNames: panelNames,
+              // Present but empty means the walk genuinely found none — do not fall
+              // back to a second traversal, which is what this replaces.
+              buttons: scannedButtons === null ? undefined : scannedButtons,
+            })
+          );
 
   // An unreadable inventory can hide uploads with no DOM download link.
   // Preserve that uncertainty even if there are no visible candidates.
@@ -316,13 +357,17 @@ async function appendPanelArtifacts(markdown, options) {
   let messageIds = opts.messageIds;
   if (!messageIds) {
     messageIds = artifacts
-      ? artifacts.map(function(a) { return a.messageId; }).filter(Boolean)
+      ? artifacts
+          .map(function (a) {
+            return a.messageId;
+          })
+          .filter(Boolean)
       : [];
     // Sandbox artefacts first: a `tool` message that produced a file is the id
     // most likely to be accepted for it, and the loop in
     // resolveArtifactPanelFiles keeps the first id that works.
-    messageIds.sort(function(a, b) {
-      const rank = function(id) {
+    messageIds.sort(function (a, b) {
+      const rank = function (id) {
         for (const art of artifacts || []) {
           if (art.messageId === id) return art.sandboxPath ? 0 : 1;
         }
@@ -333,9 +378,7 @@ async function appendPanelArtifacts(markdown, options) {
     if (!messageIds.length) {
       // Fall back to the ids the DOM carries; the panel is outside the message
       // tree but the turns themselves are still in the page.
-      const nodes = doc && doc.querySelectorAll
-        ? doc.querySelectorAll('[data-message-id]')
-        : [];
+      const nodes = doc && doc.querySelectorAll ? doc.querySelectorAll('[data-message-id]') : [];
       for (const node of Array.from(nodes)) {
         const id = node.getAttribute ? node.getAttribute('data-message-id') : null;
         if (id) messageIds.push(id);
@@ -391,13 +434,17 @@ async function appendPanelArtifacts(markdown, options) {
     if (typeof opts.onIncomplete === 'function') opts.onIncomplete();
   }
   if (inventoryUnavailable) {
-    block.push('> Could not enumerate attachments: the conversation API was unreachable. ' +
-      'Visible file links were preserved, but attachment completeness is unknown.');
+    block.push(
+      '> Could not enumerate attachments: the conversation API was unreachable. ' +
+        'Visible file links were preserved, but attachment completeness is unknown.'
+    );
   }
   if (unresolved.length) {
-    block.push('> Could not retrieve a download link for: ' +
-      unresolved.join(', ') +
-      (artifacts === null ? ' (the conversation API was unreachable)' : ''));
+    block.push(
+      '> Could not retrieve a download link for: ' +
+        unresolved.join(', ') +
+        (artifacts === null ? ' (the conversation API was unreachable)' : '')
+    );
   }
   const body = block.join('\n\n');
   return markdown ? markdown + '\n\n---\n\n' + body : body;
@@ -425,3 +472,5 @@ function extractConversationLegacy(root) {
 
   return parts.length ? parts.join('\n\n---\n\n') : null;
 }
+
+export { appendPanelArtifacts, collectButtonDownloads, downloadNameFromUrl, extractConversationLegacy };

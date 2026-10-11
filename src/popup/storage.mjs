@@ -1,3 +1,6 @@
+import { btnPause } from './options.mjs';
+import { state } from './state.mjs';
+
 /* ---------------------------------------------------------------------------
  * The export index.
  *
@@ -30,8 +33,7 @@ var INDEX_KEY = 'c2mExportIndex';
  *  for what already landed; this record is how a run continues days later. */
 var BATCH_JOB_KEY = 'c2mBatchJob';
 var BATCH_JOB_PREFIX = BATCH_JOB_KEY + ':';
-var activeBatchJob = null;
-var batchJobStored = false;
+
 /** Deliberately far below the 10MB quota. The index is a convenience; the files
  *  on disk remain the source of truth, so it may be trimmed but must never grow
  *  until Chrome refuses writes for the whole extension. */
@@ -58,7 +60,7 @@ function conversationJobRecord(conv) {
 }
 
 function writeBatchJob(job) {
-  return new Promise(function(resolve) {
+  return new Promise(function (resolve) {
     var area = storageArea();
     if (!area || typeof area.set !== 'function') {
       resolve({ ok: false, error: 'no storage' });
@@ -70,11 +72,14 @@ function writeBatchJob(job) {
       payload[BATCH_JOB_PREFIX + job.jobId] = job;
     }
     try {
-      area.set(payload, function() {
+      area.set(payload, function () {
         var err = chrome.runtime && chrome.runtime.lastError;
-        if (err) { resolve({ ok: false, error: err.message }); return; }
+        if (err) {
+          resolve({ ok: false, error: err.message });
+          return;
+        }
         if (job && job.jobId && job.status === 'done' && typeof area.remove === 'function') {
-          area.remove(BATCH_JOB_PREFIX + job.jobId, function() {
+          area.remove(BATCH_JOB_PREFIX + job.jobId, function () {
             var removalError = chrome.runtime && chrome.runtime.lastError;
             resolve(removalError ? { ok: false, error: removalError.message } : { ok: true });
           });
@@ -89,12 +94,18 @@ function writeBatchJob(job) {
 }
 
 function readBatchJob(projectId) {
-  return new Promise(function(resolve) {
+  return new Promise(function (resolve) {
     var area = storageArea();
-    if (!area || typeof area.get !== 'function') { resolve(null); return; }
+    if (!area || typeof area.get !== 'function') {
+      resolve(null);
+      return;
+    }
     try {
-      area.get(null, function(data) {
-        if (chrome.runtime && chrome.runtime.lastError) { resolve(null); return; }
+      area.get(null, function (data) {
+        if (chrome.runtime && chrome.runtime.lastError) {
+          resolve(null);
+          return;
+        }
         var jobs = [];
         for (var key of Object.keys(data || {})) {
           if (key.indexOf(BATCH_JOB_PREFIX) !== 0) continue;
@@ -103,20 +114,27 @@ function readBatchJob(projectId) {
           if (projectId !== undefined && (candidate.projectId || null) !== projectId) continue;
           jobs.push(candidate);
         }
-        jobs.sort(function(a, b) { return String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')); });
-        if (jobs.length) { resolve(jobs[0]); return; }
+        jobs.sort(function (a, b) {
+          return String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''));
+        });
+        if (jobs.length) {
+          resolve(jobs[0]);
+          return;
+        }
         // Older releases stored only one job under the unscoped key. The
         // second read also supports small Chrome shims that lack get(null).
-        area.get(BATCH_JOB_KEY, function(legacyData) {
+        area.get(BATCH_JOB_KEY, function (legacyData) {
           var legacy = legacyData && legacyData[BATCH_JOB_KEY];
           var legacyScope = legacy && legacy.projectId !== undefined ? legacy.projectId : null;
           if (legacy && legacy.projectId === undefined && Array.isArray(legacy.conversations)) {
             for (var row of legacy.conversations) {
-              if (row.projectId) { legacyScope = row.projectId; break; }
+              if (row.projectId) {
+                legacyScope = row.projectId;
+                break;
+              }
             }
           }
-          if (legacy && Array.isArray(legacy.conversations) &&
-              (projectId === undefined || legacyScope === projectId)) {
+          if (legacy && Array.isArray(legacy.conversations) && (projectId === undefined || legacyScope === projectId)) {
             resolve(legacy);
           } else {
             resolve(null);
@@ -166,7 +184,7 @@ async function readSidebarConversations(tabId) {
   await chrome.scripting.executeScript({ target: { tabId: tabId }, files: ['content.js'] });
   var listResult = await chrome.scripting.executeScript({
     target: { tabId: tabId },
-    func: async function() {
+    func: async function () {
       // Scroll the virtualized sidebar so every row mounts. The one-frame
       // reader is the fallback only: it can return a subset, and a subset
       // exported as "the whole Project" is invisible to the user.
@@ -188,10 +206,10 @@ async function readSidebarConversations(tabId) {
 }
 
 async function rememberBatchJob(job) {
-  activeBatchJob = job;
+  state.activeBatchJob = job;
   var stored = await writeBatchJob(job);
-  batchJobStored = stored.ok;
-  if (batchRunActive && batchJobStored && btnPause) btnPause.classList.add('visible');
+  state.batchJobStored = stored.ok;
+  if (state.batchRunActive && state.batchJobStored && btnPause) btnPause.classList.add('visible');
   return stored;
 }
 
@@ -200,23 +218,29 @@ async function rememberBatchJob(job) {
  *  and the next open has to guess. A finished job stays finished: closing the
  *  panel after success must not offer a resume of work that already ended. */
 function handlePanelHide() {
-  if (!batchJobStored || !activeBatchJob || activeBatchJob.status === 'done') return;
-  batchPaused = true;
-  activeBatchJob.status = 'paused';
-  activeBatchJob.updatedAt = new Date().toISOString();
-  writeBatchJob(activeBatchJob);
+  if (!state.batchJobStored || !state.activeBatchJob || state.activeBatchJob.status === 'done') return;
+  state.batchPaused = true;
+  state.activeBatchJob.status = 'paused';
+  state.activeBatchJob.updatedAt = new Date().toISOString();
+  writeBatchJob(state.activeBatchJob);
 }
 
 /** Read the whole index. An unreadable or corrupt store reads as empty, which
  *  costs a re-export and never a silent skip. */
 function readExportIndex() {
-  return new Promise(function(resolve) {
+  return new Promise(function (resolve) {
     var area = storageArea();
-    if (!area) { resolve({}); return; }
+    if (!area) {
+      resolve({});
+      return;
+    }
     try {
-      area.get([INDEX_KEY], function(items) {
+      area.get([INDEX_KEY], function (items) {
         var value = items && items[INDEX_KEY];
-        if (!value || typeof value !== 'object') { resolve({}); return; }
+        if (!value || typeof value !== 'object') {
+          resolve({});
+          return;
+        }
         resolve(value);
       });
     } catch (_e) {
@@ -232,10 +256,13 @@ function readExportIndex() {
  *  scalars" is a rule that erodes the moment someone adds a convenient field.
  */
 function recordExportedConversation(conversationId, record) {
-  return new Promise(function(resolve) {
+  return new Promise(function (resolve) {
     var area = storageArea();
-    if (!area || !conversationId) { resolve(false); return; }
-    readExportIndex().then(function(index) {
+    if (!area || !conversationId) {
+      resolve(false);
+      return;
+    }
+    readExportIndex().then(function (index) {
       var next = Object.assign({}, index);
       var row = {
         updateTime: typeof record.updateTime === 'number' ? record.updateTime : null,
@@ -255,10 +282,13 @@ function recordExportedConversation(conversationId, record) {
       } catch (_e) {
         size = 0;
       }
-      if (size > INDEX_BYTE_BUDGET) { resolve(false); return; }
+      if (size > INDEX_BYTE_BUDGET) {
+        resolve(false);
+        return;
+      }
 
       try {
-        area.set(payload, function() {
+        area.set(payload, function () {
           // The quota is reported HERE, not thrown. Reading it is the difference
           // between an index that stops recording loudly and one that stops
           // recording silently.
@@ -290,15 +320,18 @@ function classifyAgainstIndex(index, conversationId, live) {
     return { verdict: 'unknown', stored: row };
   }
 
-  var sameNode = row.currentNode != null && live.currentNode != null
-    ? String(row.currentNode) === String(live.currentNode)
-    : row.currentNode == null && live.currentNode == null;
-  var sameTime = row.updateTime != null && live.updateTime != null
-    ? Number(row.updateTime) === Number(live.updateTime)
-    : row.updateTime == null && live.updateTime == null;
-  var sameCount = row.messageCount != null && live.messageCount != null
-    ? Number(row.messageCount) === Number(live.messageCount)
-    : true;
+  var sameNode =
+    row.currentNode != null && live.currentNode != null
+      ? String(row.currentNode) === String(live.currentNode)
+      : row.currentNode == null && live.currentNode == null;
+  var sameTime =
+    row.updateTime != null && live.updateTime != null
+      ? Number(row.updateTime) === Number(live.updateTime)
+      : row.updateTime == null && live.updateTime == null;
+  var sameCount =
+    row.messageCount != null && live.messageCount != null
+      ? Number(row.messageCount) === Number(live.messageCount)
+      : true;
 
   if (sameNode && sameTime && sameCount) return { verdict: 'unchanged', stored: row };
   return { verdict: 'grown', stored: row };
@@ -306,3 +339,21 @@ function classifyAgainstIndex(index, conversationId, live) {
 
 /** Resume a batch by reading prior download paths — the fallback when no index
  *  is available, and still a cross-check on the files actually present. */
+
+export {
+  BATCH_JOB_KEY,
+  BATCH_JOB_PREFIX,
+  classifyAgainstIndex,
+  conversationJobRecord,
+  handlePanelHide,
+  INDEX_BYTE_BUDGET,
+  INDEX_KEY,
+  mergeBackupConversations,
+  readBatchJob,
+  readExportIndex,
+  readSidebarConversations,
+  recordExportedConversation,
+  rememberBatchJob,
+  storageArea,
+  writeBatchJob,
+};

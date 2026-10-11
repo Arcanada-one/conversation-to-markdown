@@ -1,3 +1,5 @@
+import { isConversationFileUrl } from './markdown.mjs';
+
 /* ------------------------------------------------------------------------- *
  * Artefacts that render NO chip at all.
  *
@@ -78,11 +80,15 @@ async function fetchConversationMetadata(conversationId, options) {
     if (!response || !response.ok) return null;
     const body = await response.json();
     if (!body || typeof body !== 'object') return null;
-    const updateTime = typeof body.update_time === 'number' && Number.isFinite(body.update_time)
-      ? body.update_time : null;
+    const updateTime =
+      typeof body.update_time === 'number' && Number.isFinite(body.update_time) ? body.update_time : null;
     const currentNode = body.current_node ? String(body.current_node) : null;
-    if (updateTime === null && !currentNode &&
-        (!body.mapping || typeof body.mapping !== 'object' || !Object.keys(body.mapping).length)) return null;
+    if (
+      updateTime === null &&
+      !currentNode &&
+      (!body.mapping || typeof body.mapping !== 'object' || !Object.keys(body.mapping).length)
+    )
+      return null;
     // Count MESSAGES, not mapping nodes. The measured thread reported 1147 nodes
     // and 1146 messages: branch points and system nodes carry no message body.
     // A count compared against a differently-derived one is not a comparison.
@@ -170,9 +176,7 @@ async function fetchConversationArtifacts(conversationId, options) {
   const opts = options || {};
   const doFetch = opts.fetchImpl || (typeof fetch === 'function' ? fetch : null);
   if (!doFetch || !conversationId) return null;
-  const token = opts.token !== undefined
-    ? opts.token
-    : await fetchSessionToken(doFetch);
+  const token = opts.token !== undefined ? opts.token : await fetchSessionToken(doFetch);
   if (!token) return null;
 
   let payload;
@@ -187,8 +191,10 @@ async function fetchConversationArtifacts(conversationId, options) {
     // Observed on the live site, 2026-10-09. Retain the legacy full inventory
     // whenever it is available, since the new endpoint may return only one page.
     if (!payload || (!payload.mapping && !Array.isArray(payload.messages))) {
-      const modern = await doFetch('/backend-api/conversations/' + conversationId +
-        '?num_turns=10&include_has_versions=true', init);
+      const modern = await doFetch(
+        '/backend-api/conversations/' + conversationId + '?num_turns=10&include_has_versions=true',
+        init
+      );
       if (!modern || !modern.ok) return null;
       payload = await modern.json();
     }
@@ -196,19 +202,21 @@ async function fetchConversationArtifacts(conversationId, options) {
     return null;
   }
   if (!payload || (!payload.mapping && !Array.isArray(payload.messages))) return null;
-  if (!payload.mapping && payload.page_info &&
-      (payload.page_info.has_previous_page || payload.page_info.has_next_page)) return null;
+  if (!payload.mapping && payload.page_info && (payload.page_info.has_previous_page || payload.page_info.has_next_page))
+    return null;
 
   const artifacts = [];
   const seen = new Set();
   const messages = payload.mapping
-    ? Object.values(payload.mapping).map(function(node) { return node && node.message; })
+    ? Object.values(payload.mapping).map(function (node) {
+        return node && node.message;
+      })
     : payload.messages;
   for (const message of messages) {
     if (!message) continue;
     const messageId = message.id || null;
     const metadata = message.metadata || {};
-    const role = ((message.author || {}).role) || '';
+    const role = (message.author || {}).role || '';
 
     // Files the answer NAMES rather than attaches. See
     // sandboxPathsFromApiMessage: this is the only source that carried the
@@ -219,21 +227,24 @@ async function fetchConversationArtifacts(conversationId, options) {
     // that input as output produced a false missing-attachment warning.
     // Keep actual tool RESULTS and user-facing answers as independent sources;
     // metadata attachments below are deliberately outside this filter.
-    const isAssistantInstruction = role === 'assistant' && (
-      (message.recipient && message.recipient !== 'all') ||
-      ((message.content || {}).content_type === 'code') ||
-      message.channel === 'analysis');
+    const isAssistantInstruction =
+      role === 'assistant' &&
+      ((message.recipient && message.recipient !== 'all') ||
+        (message.content || {}).content_type === 'code' ||
+        message.channel === 'analysis');
     if (role !== 'user' && !isAssistantInstruction) {
       for (const found of sandboxPathsFromApiMessage(message)) {
         const key = 'sbx:' + found.sandboxPath;
         const parts = (message.content || {}).parts || [];
         const chunks = (Array.isArray(parts) ? parts : []).concat((message.content || {}).text || '');
-        const offered = chunks.some(function(part) {
+        const offered = chunks.some(function (part) {
           return typeof part === 'string' && part.indexOf('sandbox:' + found.sandboxPath) !== -1;
         });
-        const priority = offered ? 0 : (role === 'assistant' ? 1 : 2);
+        const priority = offered ? 0 : role === 'assistant' ? 1 : 2;
         if (seen.has(key)) {
-          const existing = artifacts.find(function(a) { return a.sandboxPath === found.sandboxPath; });
+          const existing = artifacts.find(function (a) {
+            return a.sandboxPath === found.sandboxPath;
+          });
           if (existing && priority < existing.priority) {
             existing.priority = priority;
             existing.messageId = messageId;
@@ -296,13 +307,15 @@ async function resolveSandboxDownloadUrl(conversationId, messageId, sandboxPath,
   const opts = options || {};
   const doFetch = opts.fetchImpl || (typeof fetch === 'function' ? fetch : null);
   if (!doFetch || !conversationId || !messageId || !sandboxPath) return null;
-  const token = opts.token !== undefined
-    ? opts.token
-    : await fetchSessionToken(doFetch);
+  const token = opts.token !== undefined ? opts.token : await fetchSessionToken(doFetch);
   if (!token) return null;
-  const url = '/backend-api/conversation/' + conversationId +
-    '/interpreter/download?message_id=' + encodeURIComponent(messageId) +
-    '&sandbox_path=' + encodeURIComponent(sandboxPath);
+  const url =
+    '/backend-api/conversation/' +
+    conversationId +
+    '/interpreter/download?message_id=' +
+    encodeURIComponent(messageId) +
+    '&sandbox_path=' +
+    encodeURIComponent(sandboxPath);
   return requestArtifactDownloadUrl(url, doFetch, token, opts);
 }
 
@@ -315,13 +328,17 @@ async function resolveUploadedDownloadUrl(conversationId, fileId, options) {
   if (!doFetch || !conversationId || !fileId) return null;
   const token = opts.token !== undefined ? opts.token : await fetchSessionToken(doFetch);
   if (!token) return null;
-  const url = '/backend-api/files/download/' + encodeURIComponent(fileId) +
-    '?conversation_id=' + encodeURIComponent(conversationId) + '&download_intent=true';
+  const url =
+    '/backend-api/files/download/' +
+    encodeURIComponent(fileId) +
+    '?conversation_id=' +
+    encodeURIComponent(conversationId) +
+    '&download_intent=true';
   return requestArtifactDownloadUrl(url, doFetch, token, opts);
 }
 
 async function requestArtifactDownloadUrl(url, doFetch, token, opts) {
-  const fail = function(kind, host) {
+  const fail = function (kind, host) {
     if (typeof opts.onFailure === 'function') opts.onFailure(kind, host);
     return null;
   };
@@ -338,16 +355,18 @@ async function requestArtifactDownloadUrl(url, doFetch, token, opts) {
     if (typeof resolved !== 'string' || !resolved) return fail('missing-url');
     if (!isConversationFileUrl(resolved)) {
       let host = '';
-      try { host = new URL(resolved).hostname; } catch (_e) { /* invalid URL */ }
+      try {
+        host = new URL(resolved).hostname;
+      } catch (_e) {
+        /* invalid URL */
+      }
       return fail('rejected-url', host);
     }
     return {
       url: resolved,
       fileName: (body && body.file_name) || null,
       mimeType: (body && body.mime_type) || null,
-      size: (body && typeof body.file_size_bytes === 'number')
-        ? body.file_size_bytes
-        : null,
+      size: body && typeof body.file_size_bytes === 'number' ? body.file_size_bytes : null,
     };
   } catch (_e) {
     return fail(step === 'json' ? 'unreadable-json' : 'request-error');
@@ -369,9 +388,7 @@ async function resolveArtifactPanelFiles(conversationId, options) {
   const files = opts.files || listArtifactPanelFiles(opts.doc);
   if (!files.length) return [];
   const doFetch = opts.fetchImpl || (typeof fetch === 'function' ? fetch : null);
-  const token = opts.token !== undefined
-    ? opts.token
-    : await fetchSessionToken(doFetch);
+  const token = opts.token !== undefined ? opts.token : await fetchSessionToken(doFetch);
   if (!token) return files.map((f) => ({ file: f, resolved: null }));
 
   const messageIds = Array.from(new Set(opts.messageIds || []));
@@ -382,17 +399,27 @@ async function resolveArtifactPanelFiles(conversationId, options) {
     // An API path carries its own message context. Retrying every unrelated
     // message id for the same path starves subsequent files without changing
     // which file the endpoint selects. Panel-only paths retain the legacy search.
-    const candidates = file.messageId ? [file.messageId] :
-      Array.from(new Set([workingId].concat(messageIds).filter(Boolean)));
+    const candidates = file.messageId
+      ? [file.messageId]
+      : Array.from(new Set([workingId].concat(messageIds).filter(Boolean)));
     if (file.kind === 'attachment') {
-      resolved = await resolveUploadedDownloadUrl(conversationId, file.fileId,
-        { fetchImpl: doFetch, token: token, onFailure: opts.onFailure });
+      resolved = await resolveUploadedDownloadUrl(conversationId, file.fileId, {
+        fetchImpl: doFetch,
+        token: token,
+        onFailure: opts.onFailure,
+      });
     }
     for (const candidate of file.kind === 'attachment' ? [] : candidates) {
-      const attempt = await resolveSandboxDownloadUrl(
-        conversationId, candidate, file.sandboxPath,
-        { fetchImpl: doFetch, token: token, onFailure: opts.onFailure });
-      if (attempt) { workingId = candidate; resolved = attempt; break; }
+      const attempt = await resolveSandboxDownloadUrl(conversationId, candidate, file.sandboxPath, {
+        fetchImpl: doFetch,
+        token: token,
+        onFailure: opts.onFailure,
+      });
+      if (attempt) {
+        workingId = candidate;
+        resolved = attempt;
+        break;
+      }
     }
     const entry = { file: file, resolved: resolved };
     out.push(entry);
@@ -442,10 +469,18 @@ async function waitForArtifactPanel(doc, options) {
   // complete. Two, because one unchanged frame is exactly what a half-rendered
   // panel looks like between two renders.
   const stablePolls = opts.panelStablePolls === undefined ? 2 : opts.panelStablePolls;
-  const sleep = opts.sleep || function(ms) {
-    return new Promise(function(resolve) { setTimeout(resolve, ms); });
-  };
-  const now = opts.now || function() { return Date.now(); };
+  const sleep =
+    opts.sleep ||
+    function (ms) {
+      return new Promise(function (resolve) {
+        setTimeout(resolve, ms);
+      });
+    };
+  const now =
+    opts.now ||
+    function () {
+      return Date.now();
+    };
 
   const deadline = now() + budgetMs;
   let files = listArtifactPanelFiles(root);
@@ -491,7 +526,7 @@ function listArtifactPanelFiles(doc) {
   const files = [];
   const seen = new Set();
   for (const button of buttons) {
-    const label = button.getAttribute ? (button.getAttribute('aria-label') || '') : '';
+    const label = button.getAttribute ? button.getAttribute('aria-label') || '' : '';
     // A file name, not the sibling download button whose label is translated
     // ("Download file" / "Скачать файл"). An extension is the discriminator.
     if (!/\.[A-Za-z0-9]{1,8}$/.test(label) || seen.has(label)) continue;
@@ -500,3 +535,16 @@ function listArtifactPanelFiles(doc) {
   }
   return files;
 }
+
+export {
+  fetchConversationArtifacts,
+  fetchConversationMetadata,
+  fetchSessionToken,
+  listArtifactPanelFiles,
+  requestArtifactDownloadUrl,
+  resolveArtifactPanelFiles,
+  resolveSandboxDownloadUrl,
+  resolveUploadedDownloadUrl,
+  sandboxPathsFromApiMessage,
+  waitForArtifactPanel,
+};

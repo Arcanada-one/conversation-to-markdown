@@ -12,29 +12,10 @@
  * remember to bump is worse than no number: it reads as authoritative and is
  * silently wrong. A test now keeps this header free of one.
  *
- * DOUBLE INJECTION IS EXPECTED, and this file must survive it.
- *
- * The manifest declares this script on every chatgpt.com page, AND popup.js
- * re-injects it with `chrome.scripting.executeScript` after a batch navigation
- * replaces the document. In a batch that navigation is real and the re-inject is
- * required. For a single export on an already-loaded tab it is not: the script
- * is already there, the second copy runs against the same window, and a
- * top-level `const` throws
- *
- *   Uncaught SyntaxError: Identifier 'ATTACHMENT_CHIP_SELECTORS' has already
- *   been declared
- *
- * — thrown at PARSE time, so nothing in the second copy runs at all. The first
- * copy's listener still answers, which is why the export still produced a file
- * and the only symptom was an error page most users never open.
- *
- * Hence `var`, not `const`, for every top-level binding in this file: a repeated
- * `var` is a no-op where a repeated `const` is a fatal parse error. Wrapping the
- * file in a guard block was tried first and is WRONG — it moves the declarations
- * into a block scope, and popup.js calls these functions by name through
- * `executeScript`, which can only see globals. A test asserts both halves: that
- * a second injection does not throw, and that the first one really did define
- * the binding the second would collide with.
+ * DOUBLE INJECTION IS EXPECTED. The manifest and popup can both inject the
+ * shipped script into one document. Bun wraps module declarations in an IIFE
+ * to prevent redeclaration errors; index.mjs exposes the callable API on
+ * globalThis for chrome.scripting.executeScript callbacks.
  */
 if (typeof globalThis !== 'undefined') globalThis.__c2mContentScriptLoaded = true;
 
@@ -66,8 +47,11 @@ function resolveImageUrl(rawUrl) {
     const baseUrl = typeof location !== 'undefined' ? location.href : 'https://chatgpt.com/';
     const resolved = new URL(rawUrl, baseUrl);
     if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') return null;
-    if (resolved.hostname !== 'files.oaiusercontent.com' &&
-        resolved.hostname !== 'chatgpt.com' && resolved.hostname !== 'chat.openai.com') {
+    if (
+      resolved.hostname !== 'files.oaiusercontent.com' &&
+      resolved.hostname !== 'chatgpt.com' &&
+      resolved.hostname !== 'chat.openai.com'
+    ) {
       stripUrlQuery(resolved);
     }
     return resolved.href;
@@ -147,8 +131,12 @@ function nodeToMarkdown(node, depth) {
   if (node.nodeType !== Node.ELEMENT_NODE) return '';
 
   const tag = node.tagName.toLowerCase();
-  const children = function() {
-    return Array.from(node.childNodes).map(function(n) { return nodeToMarkdown(n, depth); }).join('');
+  const children = function () {
+    return Array.from(node.childNodes)
+      .map(function (n) {
+        return nodeToMarkdown(n, depth);
+      })
+      .join('');
   };
 
   if (node.getAttribute && node.getAttribute('data-file-reference') === 'true') {
@@ -208,44 +196,58 @@ function nodeToMarkdown(node, depth) {
     }
     case 'pre': {
       const codeEl = node.querySelector('code');
-      const lang = codeEl
-        ? ((codeEl.className.match(/language-(\S+)/) || [])[1] || '')
-        : '';
+      const lang = codeEl ? (codeEl.className.match(/language-(\S+)/) || [])[1] || '' : '';
       const text = codeEl ? codeEl.textContent : node.textContent;
       return '```' + lang + '\n' + text + '\n```\n\n';
     }
-    case 'h1': return '# ' + children() + '\n\n';
-    case 'h2': return '## ' + children() + '\n\n';
-    case 'h3': return '### ' + children() + '\n\n';
-    case 'h4': return '#### ' + children() + '\n\n';
-    case 'h5': return '##### ' + children() + '\n\n';
-    case 'h6': return '###### ' + children() + '\n\n';
+    case 'h1':
+      return '# ' + children() + '\n\n';
+    case 'h2':
+      return '## ' + children() + '\n\n';
+    case 'h3':
+      return '### ' + children() + '\n\n';
+    case 'h4':
+      return '#### ' + children() + '\n\n';
+    case 'h5':
+      return '##### ' + children() + '\n\n';
+    case 'h6':
+      return '###### ' + children() + '\n\n';
     case 'ul': {
       var items = Array.from(node.children)
-        .map(function(li) { return '- ' + nodeToMarkdown(li, depth + 1).trim(); })
+        .map(function (li) {
+          return '- ' + nodeToMarkdown(li, depth + 1).trim();
+        })
         .join('\n');
       return items + '\n\n';
     }
     case 'ol': {
       var items = Array.from(node.children)
-        .map(function(li, i) { return (i + 1) + '. ' + nodeToMarkdown(li, depth + 1).trim(); })
+        .map(function (li, i) {
+          return i + 1 + '. ' + nodeToMarkdown(li, depth + 1).trim();
+        })
         .join('\n');
       return items + '\n\n';
     }
     case 'li':
       return children();
     case 'blockquote':
-      return children()
-        .split('\n')
-        .map(function(l) { return '> ' + l; })
-        .join('\n') + '\n\n';
+      return (
+        children()
+          .split('\n')
+          .map(function (l) {
+            return '> ' + l;
+          })
+          .join('\n') + '\n\n'
+      );
     case 'a': {
       const href = node.getAttribute('href') || '';
       const text = children().trim();
       if (!href) return text;
       if (href.startsWith('sandbox:')) {
         const label = text || href.replace(/^sandbox:/, '');
-        return '> **Code Interpreter file:** `' + href + '`' + (label && label !== href ? ' (' + label + ')' : '') + '\n\n';
+        return (
+          '> **Code Interpreter file:** `' + href + '`' + (label && label !== href ? ' (' + label + ')' : '') + '\n\n'
+        );
       }
       const absHref = resolveHttpUrl(href);
       if (!absHref) return text;
@@ -268,16 +270,37 @@ function nodeToMarkdown(node, depth) {
     case 'table': {
       const rows = Array.from(node.querySelectorAll('tr'));
       if (!rows.length) return '';
-      const parseRow = function(row) {
+      const parseRow = function (row) {
         return Array.from(row.querySelectorAll('th, td'))
-          .map(function(cell) { return cell.textContent.trim(); })
+          .map(function (cell) {
+            return cell.textContent.trim();
+          })
           .join(' | ');
       };
       const header = parseRow(rows[0]);
-      const sep = header.split(' | ').map(function() { return '---'; }).join(' | ');
+      const sep = header
+        .split(' | ')
+        .map(function () {
+          return '---';
+        })
+        .join(' | ');
       const body = rows.slice(1).map(parseRow).join('\n');
-      return '| ' + header + ' |\n| ' + sep + ' |\n' +
-        (body ? body.split('\n').map(function(r) { return '| ' + r + ' |'; }).join('\n') + '\n' : '') + '\n';
+      return (
+        '| ' +
+        header +
+        ' |\n| ' +
+        sep +
+        ' |\n' +
+        (body
+          ? body
+              .split('\n')
+              .map(function (r) {
+                return '| ' + r + ' |';
+              })
+              .join('\n') + '\n'
+          : '') +
+        '\n'
+      );
     }
     case 'canvas':
       return artifactPlaceholder('canvas');
@@ -292,7 +315,7 @@ function nodeToMarkdown(node, depth) {
       if (node.getAttribute('data-testid') === 'chatgpt-library-file-citation') {
         const label = node.getAttribute('aria-label') || '';
         const name = /([^\s/\\]+\.(?:md|txt|pdf|docx?|xlsx?|csv|json|zip|png|jpe?g))$/i.exec(label);
-        if (name) return ' `'+ name[1].replace(/`/g, '') + '` (referenced file; not downloaded)';
+        if (name) return ' `' + name[1].replace(/`/g, '') + '` (referenced file; not downloaded)';
       }
       return '';
     }
@@ -318,8 +341,7 @@ function extractImages(section) {
 
     // Skip images already inside a markdown/prose container —
     // nodeToMarkdown will emit them with their surrounding context.
-    if (typeof img.closest === 'function' &&
-        (img.closest('.markdown') || img.closest('[class*="prose"]'))) continue;
+    if (typeof img.closest === 'function' && (img.closest('.markdown') || img.closest('[class*="prose"]'))) continue;
 
     // All image URLs: preserve query params — estuary needs p+ts,
     // CDN needs SAS tokens. fetchImageDataUrls replaces them with
@@ -366,8 +388,7 @@ function isConversationFileUrl(url) {
   if (parsed.protocol !== 'https:') return false;
   if (parsed.hostname === 'files.oaiusercontent.com') return true;
   if (parsed.hostname === 'chatgpt.com' || parsed.hostname === 'chat.openai.com') {
-    return parsed.pathname.indexOf('/files/') !== -1 ||
-      parsed.pathname.indexOf('/estuary/') !== -1;
+    return parsed.pathname.indexOf('/files/') !== -1 || parsed.pathname.indexOf('/estuary/') !== -1;
   }
   return false;
 }
@@ -404,13 +425,11 @@ function extractAttachmentsDetailed(section) {
   // therefore re-checked against the real parsed host before it is treated as an
   // attachment — the popup fetches these URLs, so a substring match is not a
   // sufficient reason to trust one.
-  const usedFallbackHrefMatch = matchedBy !== null &&
-    matchedBy !== ATTACHMENT_CHIP_SELECTORS[0] &&
-    matchedBy.indexOf('href') !== -1;
+  const usedFallbackHrefMatch =
+    matchedBy !== null && matchedBy !== ATTACHMENT_CHIP_SELECTORS[0] && matchedBy.indexOf('href') !== -1;
 
   for (const chip of chips) {
-    if (typeof chip.closest === 'function' &&
-        (chip.closest('.markdown') || chip.closest('[class*="prose"]'))) {
+    if (typeof chip.closest === 'function' && (chip.closest('.markdown') || chip.closest('[class*="prose"]'))) {
       continue;
     }
     const href = hrefFromAttachmentChip(chip);
@@ -436,3 +455,24 @@ function extractAttachmentsDetailed(section) {
 function extractAttachments(section) {
   return extractAttachmentsDetailed(section).links;
 }
+
+export {
+  ATTACHMENT_CHIP_SELECTORS,
+  artifactPlaceholder,
+  extractAttachments,
+  extractAttachmentsDetailed,
+  extractImages,
+  hrefFromAttachmentChip,
+  isAttachmentChip,
+  isConversationFileUrl,
+  isKatexMathml,
+  isKatexRoot,
+  labelFromAttachmentChip,
+  markdownDestination,
+  markdownLabel,
+  markdownLink,
+  nodeToMarkdown,
+  resolveHttpUrl,
+  resolveImageUrl,
+  stripUrlQuery,
+};

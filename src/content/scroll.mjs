@@ -1,9 +1,10 @@
+import { extractTurn } from './turns.mjs';
+
 function findScrollContainer(startElement) {
   let current = startElement ? startElement.parentElement : null;
   while (current) {
     const style = getComputedStyle(current);
-    if (/(auto|scroll|overlay)/.test(style.overflowY) &&
-        current.scrollHeight > current.clientHeight + 1) {
+    if (/(auto|scroll|overlay)/.test(style.overflowY) && current.scrollHeight > current.clientHeight + 1) {
       return current;
     }
     current = current.parentElement;
@@ -18,9 +19,12 @@ function findScrollContainer(startElement) {
 // an 802px viewport, native bottom 0 and native start about -6149px.
 function reverseConversationScroll(target) {
   const view = target.ownerDocument && target.ownerDocument.defaultView;
-  const style = view && view.getComputedStyle
-    ? view.getComputedStyle(target)
-    : (typeof getComputedStyle === 'function' ? getComputedStyle(target) : null);
+  const style =
+    view && view.getComputedStyle
+      ? view.getComputedStyle(target)
+      : typeof getComputedStyle === 'function'
+        ? getComputedStyle(target)
+        : null;
   return !!style && style.flexDirection === 'column-reverse';
 }
 
@@ -29,9 +33,7 @@ function conversationScrollMax(target) {
 }
 
 function conversationScrollTop(target) {
-  return reverseConversationScroll(target)
-    ? target.scrollTop + conversationScrollMax(target)
-    : target.scrollTop;
+  return reverseConversationScroll(target) ? target.scrollTop + conversationScrollMax(target) : target.scrollTop;
 }
 
 function nativeConversationScrollTop(target, top) {
@@ -42,7 +44,7 @@ function nativeConversationScrollTop(target, top) {
 
 function waitForScrollPosition(target, requestedTop, behavior, timeoutMs) {
   if (typeof requestAnimationFrame !== 'function') return Promise.resolve();
-  return new Promise(function(resolve, reject) {
+  return new Promise(function (resolve, reject) {
     const startedAt = Date.now();
     let stableFrames = 0;
     let previousTop = target.scrollTop;
@@ -83,7 +85,9 @@ async function scrollToConversationPosition(target, top, behavior) {
     // Smooth scroll didn't settle — force instant jump to target so we
     // don't start scanning from mid-conversation. Then wait for the DOM.
     target.scrollTo({ top: nativeConversationScrollTop(target, top), behavior: 'auto' });
-    await new Promise(function(r) { return setTimeout(r, 1500); });
+    await new Promise(function (r) {
+      return setTimeout(r, 1500);
+    });
   }
 }
 
@@ -141,54 +145,72 @@ async function scrollToConversationPosition(target, top, behavior) {
  */
 async function scrollToConversationStart(container, options) {
   const opts = options || {};
-  const sleep = opts.sleep || function(ms) {
-    return new Promise(function(r) { return setTimeout(r, ms); });
-  };
+  const sleep =
+    opts.sleep ||
+    function (ms) {
+      return new Promise(function (r) {
+        return setTimeout(r, ms);
+      });
+    };
   const scrollTo = opts.scrollTo || scrollToConversationPosition;
-  const readFirstTurn = opts.readFirstTurn || function(target) {
-    return target.querySelector ? target.querySelector('[data-turn-id]') : null;
-  };
-  const readFirstTurnId = opts.readFirstTurnId || function(target) {
-    const first = readFirstTurn(target);
-    return first && first.getAttribute ? first.getAttribute('data-turn-id') : null;
-  };
+  const readFirstTurn =
+    opts.readFirstTurn ||
+    function (target) {
+      return target.querySelector ? target.querySelector('[data-turn-id]') : null;
+    };
+  const readFirstTurnId =
+    opts.readFirstTurnId ||
+    function (target) {
+      const first = readFirstTurn(target);
+      return first && first.getAttribute ? first.getAttribute('data-turn-id') : null;
+    };
   // Live measurement: paging stalled at 71 and 91 containers while the
   // sentinel stayed visible. Leaving the viewport and returning loaded ten
   // more each time. At the actual beginning (221 containers), the sentinel
   // disappeared. Mounted sections and their relative test indices are NOT a
   // history count: empty height-preserving containers represent unmounted turns.
-  const readPagination = opts.readPagination || function(target) {
-    if (!target.querySelector || !target.querySelectorAll) return null;
-    const candidate = target.querySelector('[data-testid="conversation-pagination-sentinel"]');
-    const sentinel = candidate && candidate.getAttribute &&
-      candidate.getAttribute('data-testid') === 'conversation-pagination-sentinel' ? candidate : null;
-    const root = target.querySelector('[data-turn-id-container="client-created-root"]');
-    const paginatedRoot = target.querySelector('div[data-turn-id-container^="paginated-root:"]');
-    // A freshly navigated page used client-created-root; the same conversation
-    // after export used an EMPTY paginated-root sibling. Neither root has to
-    // contain the first turn. The first real holder below it must do so.
-    const knownLayout = (root && root.getAttribute &&
-      root.getAttribute('data-turn-id-container') === 'client-created-root') ||
-      (paginatedRoot && paginatedRoot.tagName === 'DIV' &&
-       paginatedRoot.getAttribute('data-turn-id-container').indexOf('paginated-root:') === 0 &&
-       !paginatedRoot.querySelector('[data-turn-id]'));
-    if (!sentinel && !knownLayout) return null;
-    const holders = Array.from(target.querySelectorAll('div[data-turn-id-container]')).filter(function(el) {
-      const id = el.getAttribute('data-turn-id-container');
-      return id && id !== 'client-created-root' && id.indexOf('paginated-root') !== 0;
-    });
-    const first = readFirstTurn(target);
-    const held = holders[0] && holders[0].querySelector('[data-turn-id]');
-    const atFirstHolder = !!first && !!held && (held === first ||
-      (!!held.getAttribute('data-turn-id') &&
-       held.getAttribute('data-turn-id') === first.getAttribute('data-turn-id')));
-    return {
-      pending: !!sentinel,
-      loading: !!(sentinel && sentinel.querySelector('svg')),
-      count: holders.length,
-      complete: !sentinel && !!knownLayout && atFirstHolder && conversationScrollTop(target) <= 1,
+  const readPagination =
+    opts.readPagination ||
+    function (target) {
+      if (!target.querySelector || !target.querySelectorAll) return null;
+      const candidate = target.querySelector('[data-testid="conversation-pagination-sentinel"]');
+      const sentinel =
+        candidate &&
+        candidate.getAttribute &&
+        candidate.getAttribute('data-testid') === 'conversation-pagination-sentinel'
+          ? candidate
+          : null;
+      const root = target.querySelector('[data-turn-id-container="client-created-root"]');
+      const paginatedRoot = target.querySelector('div[data-turn-id-container^="paginated-root:"]');
+      // A freshly navigated page used client-created-root; the same conversation
+      // after export used an EMPTY paginated-root sibling. Neither root has to
+      // contain the first turn. The first real holder below it must do so.
+      const knownLayout =
+        (root && root.getAttribute && root.getAttribute('data-turn-id-container') === 'client-created-root') ||
+        (paginatedRoot &&
+          paginatedRoot.tagName === 'DIV' &&
+          paginatedRoot.getAttribute('data-turn-id-container').indexOf('paginated-root:') === 0 &&
+          !paginatedRoot.querySelector('[data-turn-id]'));
+      if (!sentinel && !knownLayout) return null;
+      const holders = Array.from(target.querySelectorAll('div[data-turn-id-container]')).filter(function (el) {
+        const id = el.getAttribute('data-turn-id-container');
+        return id && id !== 'client-created-root' && id.indexOf('paginated-root') !== 0;
+      });
+      const first = readFirstTurn(target);
+      const held = holders[0] && holders[0].querySelector('[data-turn-id]');
+      const atFirstHolder =
+        !!first &&
+        !!held &&
+        (held === first ||
+          (!!held.getAttribute('data-turn-id') &&
+            held.getAttribute('data-turn-id') === first.getAttribute('data-turn-id')));
+      return {
+        pending: !!sentinel,
+        loading: !!(sentinel && sentinel.querySelector('svg')),
+        count: holders.length,
+        complete: !sentinel && !!knownLayout && atFirstHolder && conversationScrollTop(target) <= 1,
+      };
     };
-  };
   // The page's own marker for "nothing exists above this". Measured on a live
   // conversation: exactly one such container among 150, its suffix being the
   // conversation id. Note it is present in the DOM even while scrolled to the
@@ -208,7 +230,7 @@ async function scrollToConversationStart(container, options) {
   // fallback it was written to replace. Worse, the same change had stopped that
   // fallback from flagging a partial export, so a 82%-truncated conversation
   // came out with no notice at all. Walk up instead.
-  const markerFromAncestors = function(node) {
+  const markerFromAncestors = function (node) {
     let el = node;
     for (let depth = 0; el && depth < 12; depth += 1) {
       const value = el.getAttribute ? el.getAttribute('data-turn-id-container') : null;
@@ -217,43 +239,46 @@ async function scrollToConversationStart(container, options) {
     }
     return null;
   };
-  const readsAtStart = opts.readsAtStart || function(target) {
-    const first = readFirstTurn(target);
-    if (!first) return false;
-    if (markerFromAncestors(first)) return true;
-    // The marker may also be a SIBLING container rather than an ancestor: the
-    // measured page carried it on a separate div placed before the first turn.
-    // Accept it only when the first mounted turn is genuinely the one it marks,
-    // which is what `closest`-style walking above cannot see.
-    if (!target.querySelector) return false;
-    const marked = target.querySelector('[data-turn-id-container^="paginated-root"]');
-    if (!marked) return false;
-    const inside = marked.querySelector ? marked.querySelector('[data-turn-id]') : null;
-    if (!inside) return false;
-    // Same NODE is the strongest answer and needs no attribute at all; falling
-    // back to the id covers a re-rendered turn. Comparing ids alone would call
-    // two attribute-less nodes equal on their shared `null`.
-    if (inside === first) return true;
-    const a = inside.getAttribute ? inside.getAttribute('data-turn-id') : null;
-    const b = first.getAttribute ? first.getAttribute('data-turn-id') : null;
-    return !!a && a === b;
-  };
+  const readsAtStart =
+    opts.readsAtStart ||
+    function (target) {
+      const first = readFirstTurn(target);
+      if (!first) return false;
+      if (markerFromAncestors(first)) return true;
+      // The marker may also be a SIBLING container rather than an ancestor: the
+      // measured page carried it on a separate div placed before the first turn.
+      // Accept it only when the first mounted turn is genuinely the one it marks,
+      // which is what `closest`-style walking above cannot see.
+      if (!target.querySelector) return false;
+      const marked = target.querySelector('[data-turn-id-container^="paginated-root"]');
+      if (!marked) return false;
+      const inside = marked.querySelector ? marked.querySelector('[data-turn-id]') : null;
+      if (!inside) return false;
+      // Same NODE is the strongest answer and needs no attribute at all; falling
+      // back to the id covers a re-rendered turn. Comparing ids alone would call
+      // two attribute-less nodes equal on their shared `null`.
+      if (inside === first) return true;
+      const a = inside.getAttribute ? inside.getAttribute('data-turn-id') : null;
+      const b = first.getAttribute ? first.getAttribute('data-turn-id') : null;
+      return !!a && a === b;
+    };
   // Whether this page uses the marker mechanism AT ALL. A turn that carries the
   // attribute with some other value is a page where the marker is meaningful and
   // simply has not been reached; a turn with no such attribute is a layout that
   // does not publish one, and no amount of climbing will change that.
-  const publishesMarker = opts.publishesMarker || function(target) {
-    // Asked of the DOCUMENT, not of the first turn: the marker container exists
-    // in the page whether or not the climb has reached it, and that is exactly
-    // the question here — "does this layout have the mechanism at all".
-    if (target.querySelector &&
-        target.querySelector('[data-turn-id-container^="paginated-root"]')) {
-      return true;
-    }
-    const first = readFirstTurn(target);
-    if (!first || !first.getAttribute) return false;
-    return typeof first.getAttribute('data-turn-id-container') === 'string';
-  };
+  const publishesMarker =
+    opts.publishesMarker ||
+    function (target) {
+      // Asked of the DOCUMENT, not of the first turn: the marker container exists
+      // in the page whether or not the climb has reached it, and that is exactly
+      // the question here — "does this layout have the mechanism at all".
+      if (target.querySelector && target.querySelector('[data-turn-id-container^="paginated-root"]')) {
+        return true;
+      }
+      const first = readFirstTurn(target);
+      if (!first || !first.getAttribute) return false;
+      return typeof first.getAttribute('data-turn-id-container') === 'string';
+    };
   const settleMs = opts.settleMs === undefined ? 400 : opts.settleMs;
   const stableRounds = opts.stableRounds === undefined ? 3 : opts.stableRounds;
   // A FIXED ceiling is a length limit on the conversation wearing a disguise.
@@ -289,13 +314,21 @@ async function scrollToConversationStart(container, options) {
   // pathological, and stopping it yields a FLAGGED partial export rather than
   // a tab that never answers.
   const maxClimbMs = opts.maxClimbMs === undefined ? 600000 : opts.maxClimbMs;
-  const clock = opts.now || (typeof Date !== 'undefined' ? Date.now : function() { return 0; });
+  const clock =
+    opts.now ||
+    (typeof Date !== 'undefined'
+      ? Date.now
+      : function () {
+          return 0;
+        });
   const startedAt = clock();
 
-  const countTurns = opts.countTurns || function(target) {
-    const all = target.querySelectorAll ? target.querySelectorAll('[data-turn-id]') : [];
-    return all.length || 0;
-  };
+  const countTurns =
+    opts.countTurns ||
+    function (target) {
+      const all = target.querySelectorAll ? target.querySelectorAll('[data-turn-id]') : [];
+      return all.length || 0;
+    };
 
   let steady = 0;
   let previousFirstId = null;
@@ -321,7 +354,10 @@ async function scrollToConversationStart(container, options) {
       break;
     }
     // A live pagination sentinel takes precedence over legacy root markers.
-    if (!(pagination && pagination.pending) && readsAtStart(container)) { confirmed = true; break; }
+    if (!(pagination && pagination.pending) && readsAtStart(container)) {
+      confirmed = true;
+      break;
+    }
 
     const firstId = readFirstTurnId(container);
     const mounted = pagination ? pagination.count : countTurns(container);
@@ -358,10 +394,8 @@ async function scrollToConversationStart(container, options) {
     // same top position. Do not disturb an in-flight request. Two viewport
     // heights clear the sentinel; the next round re-enters it. This movement
     // never resets the no-progress or elapsed-time budgets.
-    if (pagination && pagination.pending && !pagination.loading &&
-        sinceProgress >= 2 && atTop) {
-      await scrollTo(container, Math.min(container.clientHeight * 2,
-        conversationScrollMax(container)), 'auto');
+    if (pagination && pagination.pending && !pagination.loading && sinceProgress >= 2 && atTop) {
+      await scrollTo(container, Math.min(container.clientHeight * 2, conversationScrollMax(container)), 'auto');
       await sleep(settleMs);
     }
   }
@@ -391,15 +425,15 @@ async function scrollToConversationStart(container, options) {
 
 function waitForRenderQuiet(target) {
   if (typeof MutationObserver === 'undefined') return Promise.resolve();
-  return new Promise(function(resolve) {
+  return new Promise(function (resolve) {
     let quietTimer;
-    const finish = function() {
+    const finish = function () {
       clearTimeout(quietTimer);
       clearTimeout(maxTimer);
       observer.disconnect();
       resolve();
     };
-    const schedule = function() {
+    const schedule = function () {
       clearTimeout(quietTimer);
       quietTimer = setTimeout(finish, 120);
     };
@@ -413,9 +447,11 @@ function waitForRenderQuiet(target) {
 function createScanSettings(options) {
   const supplied = options || {};
   return {
-    readSections: supplied.readSections || function(target) {
-      return target.querySelectorAll('[data-turn-id]');
-    },
+    readSections:
+      supplied.readSections ||
+      function (target) {
+        return target.querySelectorAll('[data-turn-id]');
+      },
     extractTurn: supplied.extractTurn || extractTurn,
     // Called at every scroll position the scan holds, after the turns there
     // have mounted. Used to read per-turn artefact rows while their turn
@@ -424,10 +460,16 @@ function createScanSettings(options) {
     settle: supplied.settle || waitForRenderQuiet,
     scrollTo: supplied.scrollTo || scrollToConversationPosition,
     // Injectable so a fixture can drive the arrival-detection directly.
-    scrollToStart: supplied.scrollToStart || function(target) {
-      return scrollToConversationStart(target, { scrollTo: supplied.scrollTo });
-    },
-    now: supplied.now || function() { return Date.now(); },
+    scrollToStart:
+      supplied.scrollToStart ||
+      function (target) {
+        return scrollToConversationStart(target, { scrollTo: supplied.scrollTo });
+      },
+    now:
+      supplied.now ||
+      function () {
+        return Date.now();
+      },
     stablePasses: supplied.stablePasses || 3,
     // How many times a turn may mount empty before it stops blocking the scan.
     emptyTurnRetries: supplied.emptyTurnRetries || 3,
@@ -440,7 +482,11 @@ function createScanSettings(options) {
     holdReleaseSteps: supplied.holdReleaseSteps || 20,
     // Optional operator cancellation. Returning true aborts at the next step
     // boundary; the scan is never cut off by anything else.
-    isCancelled: supplied.isCancelled || function() { return false; },
+    isCancelled:
+      supplied.isCancelled ||
+      function () {
+        return false;
+      },
     scanMeta: supplied.scanMeta || null,
     // Optional progress reporting, so a long scan is visibly alive.
     onProgress: supplied.onProgress || null,
@@ -449,3 +495,16 @@ function createScanSettings(options) {
     maxSteps: supplied.maxSteps || 0,
   };
 }
+
+export {
+  conversationScrollMax,
+  conversationScrollTop,
+  createScanSettings,
+  findScrollContainer,
+  nativeConversationScrollTop,
+  reverseConversationScroll,
+  scrollToConversationPosition,
+  scrollToConversationStart,
+  waitForRenderQuiet,
+  waitForScrollPosition,
+};

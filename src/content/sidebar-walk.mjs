@@ -1,3 +1,10 @@
+import {
+  findCollapsedProjectRows,
+  findShowMoreControl,
+  findSidebarScroller,
+  listSidebarConversations,
+} from './sidebar-rows.mjs';
+
 /**
  * Enumerate EVERY conversation in the sidebar, scrolling to force virtualized
  * rows to mount, and report whether the end of the list was reached.
@@ -23,23 +30,23 @@ async function collectSidebarConversations(options) {
   const scrollStepRatio = supplied.scrollStepRatio || 0.5;
   // A bound on "Show more" expansions, so a control that reappears without ever
   // revealing anything cannot spin the walk forever.
-  const maxShowMoreClicks = supplied.maxShowMoreClicks === undefined
-    ? 60
-    : supplied.maxShowMoreClicks;
+  const maxShowMoreClicks = supplied.maxShowMoreClicks === undefined ? 60 : supplied.maxShowMoreClicks;
   // Revealing a page is a network round-trip; it needs longer than a scroll.
   const showMoreSettleMs = supplied.showMoreSettleMs || 1200;
   // Projects start collapsed; opening one is a click plus a fetch.
   const expandProjects = supplied.expandProjects !== false;
-  const maxProjectExpansions = supplied.maxProjectExpansions === undefined
-    ? 40
-    : supplied.maxProjectExpansions;
+  const maxProjectExpansions = supplied.maxProjectExpansions === undefined ? 40 : supplied.maxProjectExpansions;
   const projectSettleMs = supplied.projectSettleMs || 1400;
   // A final re-read pass: rows keep mounting behind the downward walk.
   const finalSweep = supplied.finalSweep !== false;
   const maxSweepPasses = supplied.maxSweepPasses === undefined ? 6 : supplied.maxSweepPasses;
-  const sleep = supplied.sleep || function(ms) {
-    return new Promise(function(resolve) { setTimeout(resolve, ms); });
-  };
+  const sleep =
+    supplied.sleep ||
+    function (ms) {
+      return new Promise(function (resolve) {
+        setTimeout(resolve, ms);
+      });
+    };
 
   const byId = new Map();
   // Height of the band of rows actually MOUNTED in the last read, measured from
@@ -109,7 +116,9 @@ async function collectSidebarConversations(options) {
    *  obligation the collected rows cannot discharge — see `tailIsProven`. */
   function coverageIsContiguous() {
     if (!coveredSpans.length) return false;
-    const spans = coveredSpans.slice().sort(function(a, b) { return a[0] - b[0]; });
+    const spans = coveredSpans.slice().sort(function (a, b) {
+      return a[0] - b[0];
+    });
     // A hairline, never a mounted band: the band is exactly the distance a
     // stepped-over row could hide in.
     const slack = 2;
@@ -202,7 +211,6 @@ async function collectSidebarConversations(options) {
       : { proven: true, reason: 'successor-is-not-a-conversation' };
   }
 
-
   const scroller = supplied.scroller || findSidebarScroller(doc);
 
   function absorb() {
@@ -213,12 +221,10 @@ async function collectSidebarConversations(options) {
       byId.set(conv.id, conv);
       added += 1;
     }
-    const at = scroller ? (scroller.scrollTop || 0) : 0;
+    const at = scroller ? scroller.scrollTop || 0 : 0;
     const spanCountBefore = coveredSpans.length;
     mountedBand = recordCoverage(at);
-    const newSpan = coveredSpans.length > spanCountBefore
-      ? coveredSpans[coveredSpans.length - 1]
-      : null;
+    const newSpan = coveredSpans.length > spanCountBefore ? coveredSpans[coveredSpans.length - 1] : null;
     if (scroller) {
       const maxTop = Math.max(0, (scroller.scrollHeight || 0) - (scroller.clientHeight || 0));
       if (at <= 1) {
@@ -297,9 +303,8 @@ async function collectSidebarConversations(options) {
     // unseen), and always keep overlap so a partially-visible row at the seam is
     // read by the next round too. When the rows cannot be measured, fall back to
     // the viewport — the pre-measurement behaviour, not a wider guess.
-    const reach = mountedBand > 0
-      ? Math.min(mountedBand, scroller.clientHeight || mountedBand)
-      : (scroller.clientHeight || 0);
+    const reach =
+      mountedBand > 0 ? Math.min(mountedBand, scroller.clientHeight || mountedBand) : scroller.clientHeight || 0;
     const step = Math.max(1, Math.floor(reach * scrollStepRatio));
     const nextTop = Math.min(maxTop, before + step);
     try {
@@ -391,8 +396,7 @@ async function collectSidebarConversations(options) {
       // hole, both ends actually visited, and the tail proven by DOM structure.
       const tail = tailIsProven();
       tailReason = tail.reason;
-      complete = (coverageVerified ? coverageIsContiguous() : true) &&
-        visitedTop && visitedBottom && tail.proven;
+      complete = (coverageVerified ? coverageIsContiguous() : true) && visitedTop && visitedBottom && tail.proven;
       break;
     }
   }
@@ -432,8 +436,7 @@ async function collectSidebarConversations(options) {
       coverageVerified = true;
       const sweptTail = tailIsProven();
       tailReason = sweptTail.reason;
-      complete = coverageIsContiguous() && showMoreExhausted &&
-        visitedTop && visitedBottom && sweptTail.proven;
+      complete = coverageIsContiguous() && showMoreExhausted && visitedTop && visitedBottom && sweptTail.proven;
     }
   }
 
@@ -457,8 +460,7 @@ async function collectSidebarConversations(options) {
     reason = 'show-more-pending';
   } else if (!projectsExhausted) {
     reason = 'project-expansion-pending';
-  } else if (tailReason === 'successor-exists-not-mounted' ||
-             tailReason === 'tail-unprovable') {
+  } else if (tailReason === 'successor-exists-not-mounted' || tailReason === 'tail-unprovable') {
     // A row exists past everything captured, or the list carries no structure to
     // prove otherwise. Either way the tail is unread, not merely unmeasured.
     reason = tailReason;
@@ -480,3 +482,5 @@ async function collectSidebarConversations(options) {
     tailReason: tailReason,
   };
 }
+
+export { collectSidebarConversations };

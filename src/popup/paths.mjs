@@ -20,9 +20,15 @@ function parseImageRefs(md) {
   for (const ref of markdownHttpRefs(md)) {
     if (!ref.image || seen.has(ref.url)) continue;
     let parsed;
-    try { parsed = new URL(ref.url); } catch (_e) { continue; }
-    if (parsed.protocol === 'https:' &&
-        ['chatgpt.com', 'chat.openai.com', 'files.oaiusercontent.com'].includes(parsed.hostname)) {
+    try {
+      parsed = new URL(ref.url);
+    } catch (_e) {
+      continue;
+    }
+    if (
+      parsed.protocol === 'https:' &&
+      ['chatgpt.com', 'chat.openai.com', 'files.oaiusercontent.com'].includes(parsed.hostname)
+    ) {
       seen.add(ref.url);
       refs.push({ url: ref.url, label: ref.label, kind: 'image' });
     }
@@ -65,9 +71,7 @@ function isDownloadableFileUrl(url) {
  *  A titled conversation gets its own folder so images sit next to the .md;
  *  an untitled one falls back to the flat legacy layout. */
 function exportPath(slug, filename) {
-  return slug
-    ? 'chatgpt-export/' + slug + '/' + filename
-    : 'chatgpt-export/' + filename;
+  return slug ? 'chatgpt-export/' + slug + '/' + filename : 'chatgpt-export/' + filename;
 }
 
 /** Derive a filename from an image URL or alt text.
@@ -170,17 +174,30 @@ function foldExceptId(key) {
   return String(key).slice(0, at).toLowerCase() + String(key).slice(at);
 }
 
-var EXPORT_STAMP_NONCE = typeof crypto !== 'undefined' && crypto.randomUUID
-  ? crypto.randomUUID() : Math.random().toString(36).slice(2).padEnd(8, '0');
+var EXPORT_STAMP_NONCE =
+  typeof crypto !== 'undefined' && crypto.randomUUID
+    ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2).padEnd(8, '0');
 var exportStampSequence = 0;
 
 /** Format a unique run stamp; older YYYYMMDD-HHMM stamps remain readable. */
 function formatExportTimestamp(date) {
   var d = date || new Date();
-  var pad = function(n) { return String(n).padStart(2, '0'); };
-  return String(d.getFullYear()) + pad(d.getMonth() + 1) + pad(d.getDate()) +
-    '-' + pad(d.getHours()) + pad(d.getMinutes()) + '-' +
-    EXPORT_STAMP_NONCE + '-' + (++exportStampSequence).toString(36);
+  var pad = function (n) {
+    return String(n).padStart(2, '0');
+  };
+  return (
+    String(d.getFullYear()) +
+    pad(d.getMonth() + 1) +
+    pad(d.getDate()) +
+    '-' +
+    pad(d.getHours()) +
+    pad(d.getMinutes()) +
+    '-' +
+    EXPORT_STAMP_NONCE +
+    '-' +
+    (++exportStampSequence).toString(36)
+  );
 }
 
 /** Build the .md filename; timestamp suffix implements re-export without uniquify suffixes. */
@@ -242,15 +259,12 @@ function mdDownloadPath(convSlug, projectSlug, useTimestamp, stamp, convId) {
   return conversationFolderPath(convSlug, projectSlug) + '/' + mdName;
 }
 
-
-
 /** Filename stem with the `.md` extension removed. */
 function mdStem(downloadPath) {
   var normalized = String(downloadPath || '').replace(/\\/g, '/');
   var file = normalized.split('/').filter(Boolean).pop() || '';
   return file.replace(/\.md$/i, '');
 }
-
 
 /** The conversation folder a download path sits in, relative to the export root.
  *  Folds to lower case because macOS and Windows treat `Budget/` and `budget/` as
@@ -260,7 +274,7 @@ function conversationFolderFromPath(downloadPath) {
   var anchor = normalized.indexOf('chatgpt-export/');
   if (anchor > 0) normalized = normalized.slice(anchor);
   var segments = normalized.split('/').filter(Boolean);
-  segments.pop();                                   // drop the filename
+  segments.pop(); // drop the filename
   return segments.join('/');
 }
 
@@ -326,7 +340,6 @@ function stampsInPaths(paths) {
   return Array.from(stamps);
 }
 
-
 /** Skip conversations whose markdown already landed in a prior partial run.
  *
  *  Identity is the conversation ID, never the title. Titles are derived into
@@ -339,7 +352,9 @@ function stampsInPaths(paths) {
 function filterPendingConversations(conversations, completedPaths, projectSlug) {
   var paths = [];
   if (completedPaths && typeof completedPaths.forEach === 'function') {
-    completedPaths.forEach(function(item) { paths.push(item); });
+    completedPaths.forEach(function (item) {
+      paths.push(item);
+    });
   }
 
   // GENERATE, DON'T PARSE. Five rounds of defects here all had one cause: reading a
@@ -394,7 +409,7 @@ function filterPendingConversations(conversations, completedPaths, projectSlug) 
     }
   }
 
-  return conversations.filter(function(conv) {
+  return conversations.filter(function (conv) {
     var names = candidateExportNames(conv, projectSlug, stamps);
     var every = names.owned.concat(names.legacy);
     for (var a = 0; a < every.length; a++) {
@@ -405,3 +420,32 @@ function filterPendingConversations(conversations, completedPaths, projectSlug) 
     return true;
   });
 }
+
+export {
+  artifactFilename,
+  batchMdFilename,
+  batchRootPath,
+  buildMdFilename,
+  candidateExportNames,
+  conversationFolderFromPath,
+  conversationFolderPath,
+  EXPORT_STAMP_NONCE,
+  exportPath,
+  exportStampSequence,
+  filterPendingConversations,
+  foldExceptId,
+  formatBatchProgress,
+  formatExportTimestamp,
+  ID_MARKER,
+  imageFilename,
+  isDownloadableFileUrl,
+  markdownHttpRefs,
+  mdDownloadPath,
+  mdStem,
+  parseArtifactRefs,
+  parseFileRefs,
+  parseImageRefs,
+  sanitizeFilenamePart,
+  splitFilenameExtension,
+  stampsInPaths,
+};

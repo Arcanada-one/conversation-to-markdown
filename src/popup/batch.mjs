@@ -1,9 +1,54 @@
+import { downloadStaticSite, projectIdFromLocation } from './controls.mjs';
+import {
+  bytesToDownloadUrl,
+  downloadOne,
+  saveConversationExport,
+  searchCompletedDownloadPaths,
+  startProgressPolling,
+  stopProgressPolling,
+  waitForDownloadComplete,
+  ZIP_WRITE_TIMEOUT_MS,
+} from './downloads.mjs';
+import {
+  createRunLog,
+  flushRunLog,
+  htmlChatLanded,
+  noteExportDownload,
+  pushLogEvent,
+  searchHtmlCompletePaths,
+  searchHtmlPagePaths,
+} from './logging.mjs';
+import { showStatus } from './options.mjs';
+import { batchRootPath, filterPendingConversations, formatExportTimestamp, mdDownloadPath } from './paths.mjs';
+import {
+  backoffDelayMs,
+  classifyBatchFailure,
+  createCallQuota,
+  OPENAI_CALL_WINDOW_MS,
+  OPENAI_CALLS_PER_MINUTE,
+  OPENAI_FILE_LOOKUP_CALLS,
+  OPENAI_METADATA_CALLS,
+  OPENAI_PAGE_LOAD_CALLS,
+  sleep,
+  waitWhilePaused,
+} from './quota.mjs';
+import { state } from './state.mjs';
+import {
+  classifyAgainstIndex,
+  conversationJobRecord,
+  mergeBackupConversations,
+  readExportIndex,
+  readSidebarConversations,
+  recordExportedConversation,
+  rememberBatchJob,
+  writeBatchJob,
+} from './storage.mjs';
+
 /** Walk the sidebar conversation list in the active tab, export each in turn. */
 async function runBatchExport(tab, options) {
   var downloadImages = options.downloadImages;
   var useTimestamp = options.useTimestamp;
-  var projectId = options.projectId === undefined
-    ? projectIdFromLocation(tab && tab.url) : options.projectId;
+  var projectId = options.projectId === undefined ? projectIdFromLocation(tab && tab.url) : options.projectId;
   var scopeKnown = options.projectId !== undefined || !!(tab && tab.url);
   var projectSlug = options.projectSlug;
   var batchStamp = options.batchStamp || formatExportTimestamp();
@@ -30,7 +75,7 @@ async function runBatchExport(tab, options) {
       for (var savedRow of options.conversations) {
         if (savedRow.projectId) projects[String(savedRow.projectId)] = true;
       }
-      found = walk.conversations.filter(function(row) {
+      found = walk.conversations.filter(function (row) {
         return row.projectId && projects[String(row.projectId)];
       });
     } catch (_e) {
@@ -47,16 +92,18 @@ async function runBatchExport(tab, options) {
       listReason = 'sync';
     }
   } else if (Array.isArray(options.conversations)) {
-    conversations = options.conversations.map(conversationJobRecord).filter(function(row) {
+    conversations = options.conversations.map(conversationJobRecord).filter(function (row) {
       return row.id || row.href;
     });
     listComplete = options.listComplete !== false;
     listReason = 'saved-job';
   } else {
     var listed = await readSidebarConversations(tab.id);
-    conversations = scopeKnown ? listed.conversations.filter(function(row) {
-      return (row.projectId || null) === (projectId || null);
-    }) : listed.conversations;
+    conversations = scopeKnown
+      ? listed.conversations.filter(function (row) {
+          return (row.projectId || null) === (projectId || null);
+        })
+      : listed.conversations;
     listComplete = listed.complete;
     listReason = listed.reason;
   }
@@ -98,8 +145,8 @@ async function runBatchExport(tab, options) {
     downloadImages: downloadImages,
     downloadHtml: wantHtmlRun,
   });
-  activeRunLog = runLog;
-  activeRunLogOptions = { htmlSiteDir: options.htmlSiteDir || null, downloadLog: true };
+  state.activeRunLog = runLog;
+  state.activeRunLogOptions = { htmlSiteDir: options.htmlSiteDir || null, downloadLog: true };
   pushLogEvent(runLog, {
     phase: 'run',
     outcome: 'started',
@@ -107,27 +154,34 @@ async function runBatchExport(tab, options) {
   });
   var logOk = true;
   var logError = null;
-  var startedLog = await flushRunLog(runLog, activeRunLogOptions);
-  if (!startedLog.ok) { logOk = false; logError = startedLog.error; }
+  var startedLog = await flushRunLog(runLog, state.activeRunLogOptions);
+  if (!startedLog.ok) {
+    logOk = false;
+    logError = startedLog.error;
+  }
   var maxAttempts = options.maxAttempts || 3;
   var maxHoldRounds = options.maxHoldRounds || 20;
   var controls = {
-    isPaused: options.isPaused || function() { return batchPaused; },
-    isCancelled: options.isCancelled || function() { return batchCancelled; },
+    isPaused:
+      options.isPaused ||
+      function () {
+        return state.batchPaused;
+      },
+    isCancelled:
+      options.isCancelled ||
+      function () {
+        return state.batchCancelled;
+      },
   };
-  var callQuota = options.callQuota || createCallQuota(
-    OPENAI_CALLS_PER_MINUTE,
-    OPENAI_CALL_WINDOW_MS,
-    null,
-    null,
-    function(delayMs) {
+  var callQuota =
+    options.callQuota ||
+    createCallQuota(OPENAI_CALLS_PER_MINUTE, OPENAI_CALL_WINDOW_MS, null, null, function (delayMs) {
       pushLogEvent(runLog, {
         phase: 'quota',
         outcome: 'waiting',
         counts: { delayMs: delayMs },
       });
-    }
-  );
+    });
   var jobStored = await rememberBatchJob({
     version: 1,
     jobId: options.jobId || batchStamp || runLog.runId,
@@ -145,7 +199,10 @@ async function runBatchExport(tab, options) {
     if (jobStored.error !== 'no storage') {
       errors.push('saved export could not be stored (' + jobStored.error + ')');
     }
-    showStatus('warning', 'Backup is running, but cannot be resumed after closing this panel (' + jobStored.error + ').');
+    showStatus(
+      'warning',
+      'Backup is running, but cannot be resumed after closing this panel (' + jobStored.error + ').'
+    );
   }
 
   /** Fetch one conversation. Returns {ok, result} or {ok:false, error}. */
@@ -167,13 +224,12 @@ async function runBatchExport(tab, options) {
     if (typeof chrome === 'undefined' || !chrome.tabs || !chrome.tabs.get) {
       return Promise.resolve(true);
     }
-    return new Promise(function(resolve) {
+    return new Promise(function (resolve) {
       var startedAt = Date.now();
       function poll() {
-        chrome.tabs.get(tabId, function(t) {
+        chrome.tabs.get(tabId, function (t) {
           if (chrome.runtime.lastError || !t) return resolve(false);
-          var onConversation = !conversationId ||
-            String(t.url || '').indexOf('/c/' + conversationId) !== -1;
+          var onConversation = !conversationId || String(t.url || '').indexOf('/c/' + conversationId) !== -1;
           if (t.status === 'complete' && onConversation) return resolve(true);
           if (Date.now() - startedAt >= budget) return resolve(false);
           setTimeout(poll, 300);
@@ -195,10 +251,12 @@ async function runBatchExport(tab, options) {
   async function readConversationMetadata(tabId, conv) {
     try {
       await callQuota.take(OPENAI_PAGE_LOAD_CALLS);
-      var navigated = await (async function() {
+      var navigated = await (async function () {
         await chrome.scripting.executeScript({
           target: { tabId: tabId },
-          func: function(href) { window.location.href = href; },
+          func: function (href) {
+            window.location.href = href;
+          },
           args: [conv.href],
         });
         return await waitForTabNavigation(tabId, conv.id, 30000);
@@ -208,7 +266,7 @@ async function runBatchExport(tab, options) {
       await callQuota.take(OPENAI_METADATA_CALLS);
       var out = await chrome.scripting.executeScript({
         target: { tabId: tabId },
-        func: async function(conversationId) {
+        func: async function (conversationId) {
           if (typeof fetchConversationMetadata !== 'function') return null;
           return await fetchConversationMetadata(conversationId, {});
         },
@@ -224,7 +282,9 @@ async function runBatchExport(tab, options) {
     await callQuota.take(OPENAI_PAGE_LOAD_CALLS);
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: function(href) { window.location.href = href; },
+      func: function (href) {
+        window.location.href = href;
+      },
       args: [conv.href],
     });
 
@@ -239,7 +299,7 @@ async function runBatchExport(tab, options) {
 
     var readyResult = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: async function(conversationId) {
+      func: async function (conversationId) {
         if (typeof waitForConversationReady === 'function') {
           return await waitForConversationReady({ conversationId: conversationId, timeoutMs: 30000 });
         }
@@ -257,14 +317,16 @@ async function runBatchExport(tab, options) {
       files: ['content.js'],
     });
 
-    scanningTabId = tab.id;
+    state.scanningTabId = tab.id;
     startProgressPolling(tab.id);
     var results;
     try {
       if (downloadImages) await callQuota.take(OPENAI_FILE_LOOKUP_CALLS);
       results = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
-        func: async function(wantFiles) { return getConversationMarkdown({ downloadFiles: wantFiles }); },
+        func: async function (wantFiles) {
+          return getConversationMarkdown({ downloadFiles: wantFiles });
+        },
         args: [!!downloadImages],
       });
     } finally {
@@ -288,14 +350,14 @@ async function runBatchExport(tab, options) {
     // so a long run can be held without losing the conversations already done.
     // The saved job is written when the pause starts, so closing the panel
     // during the hold still leaves something to resume.
-    if (controls.isPaused() && activeBatchJob && activeBatchJob.status !== 'paused') {
-      activeBatchJob.status = 'paused';
-      activeBatchJob.updatedAt = new Date().toISOString();
-      await writeBatchJob(activeBatchJob);
-    } else if (!controls.isPaused() && activeBatchJob && activeBatchJob.status === 'paused') {
-      activeBatchJob.status = 'running';
-      activeBatchJob.updatedAt = new Date().toISOString();
-      await writeBatchJob(activeBatchJob);
+    if (controls.isPaused() && state.activeBatchJob && state.activeBatchJob.status !== 'paused') {
+      state.activeBatchJob.status = 'paused';
+      state.activeBatchJob.updatedAt = new Date().toISOString();
+      await writeBatchJob(state.activeBatchJob);
+    } else if (!controls.isPaused() && state.activeBatchJob && state.activeBatchJob.status === 'paused') {
+      state.activeBatchJob.status = 'running';
+      state.activeBatchJob.updatedAt = new Date().toISOString();
+      await writeBatchJob(state.activeBatchJob);
     }
     if (!(await waitWhilePaused(controls))) break;
     var conv = pending[index];
@@ -359,7 +421,7 @@ async function runBatchExport(tab, options) {
 
       lastError = outcome.error;
       var kind = classifyBatchFailure(lastError);
-      if (kind === 'conversation') break;          // a real per-conversation problem: do not retry
+      if (kind === 'conversation') break; // a real per-conversation problem: do not retry
       if (controls.isCancelled()) break;
 
       if (kind === 'offline' || kind === 'unreachable') {
@@ -372,7 +434,7 @@ async function runBatchExport(tab, options) {
         }
         held += 1;
         if (onProgress) onProgress(index, pending.length, progressTitle + ' — waiting for the network (' + held + ')');
-        attempt -= 1;                               // a hold is not an attempt against this conversation
+        attempt -= 1; // a hold is not an attempt against this conversation
         await sleep(backoffDelayMs(Math.min(held, 4)));
         if (!(await waitWhilePaused(controls))) break;
         continue;
@@ -381,7 +443,8 @@ async function runBatchExport(tab, options) {
       // transient: retry with backoff inside this conversation's budget
       if (attempt < maxAttempts) {
         retried += 1;
-        if (onProgress) onProgress(index, pending.length, progressTitle + ' — retry ' + attempt + '/' + (maxAttempts - 1));
+        if (onProgress)
+          onProgress(index, pending.length, progressTitle + ' — retry ' + attempt + '/' + (maxAttempts - 1));
         await sleep(backoffDelayMs(attempt));
         if (!(await waitWhilePaused(controls))) break;
       }
@@ -399,8 +462,11 @@ async function runBatchExport(tab, options) {
         message: lastError || 'failed',
         stack: outcome && outcome.stack,
       });
-      var failedLog = await flushRunLog(runLog, activeRunLogOptions);
-      if (!failedLog.ok) { logOk = false; logError = failedLog.error; }
+      var failedLog = await flushRunLog(runLog, state.activeRunLogOptions);
+      if (!failedLog.ok) {
+        logOk = false;
+        logError = failedLog.error;
+      }
       continue;
     }
     var result = outcome.result;
@@ -495,7 +561,9 @@ async function runBatchExport(tab, options) {
         chatWriteError = 'HTML layout is unavailable';
       }
       if (!chatWriteOk) {
-        errors.push((conv.title || conv.id) + ': HTML page not saved (' + (chatWriteError || 'the write did not complete') + ')');
+        errors.push(
+          (conv.title || conv.id) + ': HTML page not saved (' + (chatWriteError || 'the write did not complete') + ')'
+        );
         htmlOk = false;
         pushLogEvent(runLog, {
           level: 'error',
@@ -542,8 +610,11 @@ async function runBatchExport(tab, options) {
         title: conv.title,
         message: writeError || 'download rejected',
       });
-      var rejectedLog = await flushRunLog(runLog, activeRunLogOptions);
-      if (!rejectedLog.ok) { logOk = false; logError = rejectedLog.error; }
+      var rejectedLog = await flushRunLog(runLog, state.activeRunLogOptions);
+      if (!rejectedLog.ok) {
+        logOk = false;
+        logError = rejectedLog.error;
+      }
       continue;
     }
     if (markdownAttempted && !writeOk) {
@@ -553,8 +624,13 @@ async function runBatchExport(tab, options) {
     exported += 1;
     var exportSlug = result.slug || conv.slug || conv.id;
     var attachmentPartial = !!(saved && (saved.dlErrors.length || saved.dlOk < saved.dlTotal));
-    var conversationPartial = !!(result.partial || htmlPartial || attachmentPartial ||
-      (markdownAttempted && !writeOk) || (wantHtml && (!htmlRecorded || !htmlIndexOk)));
+    var conversationPartial = !!(
+      result.partial ||
+      htmlPartial ||
+      attachmentPartial ||
+      (markdownAttempted && !writeOk) ||
+      (wantHtml && (!htmlRecorded || !htmlIndexOk))
+    );
     if (conversationPartial) {
       // A stall-truncated export must NOT be banked as done. Banking it made the
       // next run skip the conversation as "already exported", so the one action
@@ -565,9 +641,11 @@ async function runBatchExport(tab, options) {
       // again as a missing attachment.
       partial += 1;
       if (result.partial || htmlPartial || attachmentPartial) {
-        errors.push(result.partial
-          ? (conv.title || conv.id) + ': saved incompletely (scan did not reach the end) — re-run to finish it'
-          : (conv.title || conv.id) + ': saved incompletely (a file was not retrieved) — re-run to finish it');
+        errors.push(
+          result.partial
+            ? (conv.title || conv.id) + ': saved incompletely (scan did not reach the end) — re-run to finish it'
+            : (conv.title || conv.id) + ': saved incompletely (a file was not retrieved) — re-run to finish it'
+        );
       }
     } else {
       if (markdownAttempted && writeOk) {
@@ -597,16 +675,22 @@ async function runBatchExport(tab, options) {
         files: (saved && saved.savedFiles && saved.savedFiles.length) || 0,
       },
     });
-    var savedLog = await flushRunLog(runLog, activeRunLogOptions);
-    if (!savedLog.ok) { logOk = false; logError = savedLog.error; }
+    var savedLog = await flushRunLog(runLog, state.activeRunLogOptions);
+    if (!savedLog.ok) {
+      logOk = false;
+      logError = savedLog.error;
+    }
   }
 
   var zipName = null;
   if (zipEntries && zipEntries.dropped > 0) {
     // Stated as an error, not a note: an archive that silently omits files reads
     // as a complete backup. The files themselves are on disk either way.
-    errors.push('archive incomplete: ' + zipEntries.dropped
-      + ' file(s) left out to stay within the memory budget — the saved files on disk are complete');
+    errors.push(
+      'archive incomplete: ' +
+        zipEntries.dropped +
+        ' file(s) left out to stay within the memory budget — the saved files on disk are complete'
+    );
   }
   if (zipEntries && zipEntries.length > 0 && typeof buildStoreZip === 'function') {
     // The zip is a convenience on top of files that are ALREADY on disk. If it
@@ -625,7 +709,11 @@ async function runBatchExport(tab, options) {
       // budget is therefore aligned with the write budget rather than left at the
       // 12s default meant for per-conversation files.
       var zipWrite = await downloadOne(
-        handle.url, candidateName, batchRootPath(projectSlug) + '/' + candidateName, ZIP_WRITE_TIMEOUT_MS);
+        handle.url,
+        candidateName,
+        batchRootPath(projectSlug) + '/' + candidateName,
+        ZIP_WRITE_TIMEOUT_MS
+      );
       if (zipWrite.ok) {
         // Chrome accepted the download; the bytes are still being written. Wait
         // before the `finally` below revokes the blob URL backing them — and
@@ -639,10 +727,14 @@ async function runBatchExport(tab, options) {
           errors.push('archive not completed — the exported files are still on disk');
         }
       } else {
-        errors.push('archive not saved (' + (zipWrite.error || 'download rejected') + ') — the exported files are still on disk');
+        errors.push(
+          'archive not saved (' + (zipWrite.error || 'download rejected') + ') — the exported files are still on disk'
+        );
       }
     } catch (zipErr) {
-      errors.push('archive not created (' + ((zipErr && zipErr.message) || zipErr) + ') — the exported files are still on disk');
+      errors.push(
+        'archive not created (' + ((zipErr && zipErr.message) || zipErr) + ') — the exported files are still on disk'
+      );
     } finally {
       if (handle) handle.revoke(handle.url);
     }
@@ -671,18 +763,24 @@ async function runBatchExport(tab, options) {
     outcome: controls.isCancelled() ? 'cancelled' : 'finished',
     counts: { exported: exported, unchanged: indexSkipped, partial: partial },
   });
-  var finishedLog = await flushRunLog(runLog, activeRunLogOptions);
+  var finishedLog = await flushRunLog(runLog, state.activeRunLogOptions);
   if (!finishedLog.ok && logOk) {
     errors.push('execution log not saved (' + (finishedLog.error || 'the write did not complete') + ')');
     logOk = false;
   }
-  activeRunLog = null;
-  if (activeBatchJob) {
-    activeBatchJob.status = controls.isCancelled() || controls.isPaused() ||
-      partial > 0 || exported + indexSkipped < conversations.length || !htmlOk || !listComplete
-      ? 'paused' : 'done';
-    activeBatchJob.updatedAt = new Date().toISOString();
-    var finalJob = await writeBatchJob(activeBatchJob);
+  state.activeRunLog = null;
+  if (state.activeBatchJob) {
+    state.activeBatchJob.status =
+      controls.isCancelled() ||
+      controls.isPaused() ||
+      partial > 0 ||
+      exported + indexSkipped < conversations.length ||
+      !htmlOk ||
+      !listComplete
+        ? 'paused'
+        : 'done';
+    state.activeBatchJob.updatedAt = new Date().toISOString();
+    var finalJob = await writeBatchJob(state.activeBatchJob);
     if (!finalJob.ok && finalJob.error !== 'no storage') {
       errors.push('saved export could not be stored (' + finalJob.error + ')');
     }
@@ -718,3 +816,5 @@ async function runBatchExport(tab, options) {
     logPath: 'chatgpt-export/logs/' + runLog.runId + '.json',
   };
 }
+
+export { runBatchExport };

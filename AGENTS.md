@@ -177,10 +177,11 @@ and share the obvious nouns (`status`, `button`).
 
 ## Practical notes
 
-- No runtime or build dependencies; tests are `node:test` with hand-rolled
-  DOM/chrome shims. Keep it that way.
-- `npm test` runs everything; `npm run check` is a syntax gate over the three
-  shipped scripts.
+- No shipped runtime dependencies. Bun bundles the modules, Biome checks the
+  source, and tests are `node:test` with hand-rolled DOM/chrome shims.
+- `mise run setup` installs the pinned development tools and activates the
+  pre-commit test hook. `npm test` runs everything; `npm run check` verifies the
+  bundles, source checks, and shipped script syntax.
 - `content.js` runs inside the ChatGPT page. It must not persist anything —
   `chrome.storage` is banned there by test, on purpose.
 - Never commit a real conversation URL: a repository test scans for

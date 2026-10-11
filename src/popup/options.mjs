@@ -17,9 +17,10 @@ const btnShowFolder = document.getElementById('btn-show-folder');
   const el = document.getElementById('version');
   if (!el) return;
   try {
-    const manifest = typeof chrome !== 'undefined' && chrome.runtime &&
-      typeof chrome.runtime.getManifest === 'function'
-      ? chrome.runtime.getManifest() : null;
+    const manifest =
+      typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.getManifest === 'function'
+        ? chrome.runtime.getManifest()
+        : null;
     if (manifest && manifest.version) el.textContent = 'v' + manifest.version;
   } catch (_e) {
     // Leave the placeholder; a missing version must never break the popup.
@@ -81,13 +82,24 @@ if (chkImages && typeof chkImages.addEventListener === 'function') {
 refreshExportButtonLabel();
 
 // Id of the tab currently being scanned, so Stop knows where to send the flag.
-var scanningTabId = null;
-var progressTimer = null;
-var batchCancelled = false;
-var batchPaused = false;
-var batchRunActive = false;
 
 function showStatus(type, message) {
   status.className = type;
   status.textContent = message;
 }
+
+export {
+  batchWarning,
+  btn,
+  btnCancel,
+  btnPause,
+  btnShowFolder,
+  chkBatch,
+  chkHtml,
+  chkImages,
+  exportButtonLabel,
+  refreshExportButtonLabel,
+  showStatus,
+  status,
+  syncBatchOptions,
+};

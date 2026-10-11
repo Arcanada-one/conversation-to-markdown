@@ -1,6 +1,22 @@
+import { extractConversationLegacy } from './button-fetch.mjs';
+import {
+  conversationScrollMax,
+  conversationScrollTop,
+  createScanSettings,
+  reverseConversationScroll,
+} from './scroll.mjs';
+import {
+  buildConversationMarkdown,
+  extractTurn,
+  getSectionTurnId,
+  isExplicitlyUnsupportedTurn,
+  orderCapturedTurns,
+} from './turns.mjs';
+
 // Chrome a re-mounted turn shows while its real content is still coming back.
 // These are not answers, however long they run.
-var PLACEHOLDER_MARKDOWN = /^(thinking|reasoning|searching|analyzing|analysing|gathering|expanding|loading|generating|working)\b|^(думаю|размышляю|ищу|загружаю|генерирую)\b/i;
+var PLACEHOLDER_MARKDOWN =
+  /^(thinking|reasoning|searching|analyzing|analysing|gathering|expanding|loading|generating|working)\b|^(думаю|размышляю|ищу|загружаю|генерирую)\b/i;
 
 function looksLikePlaceholder(markdown) {
   return PLACEHOLDER_MARKDOWN.test(markdown.trim());
@@ -74,9 +90,10 @@ function captureMountedTurns(sections, settings, seen, state) {
       state.discoveryIndex += 1;
     }
     if (!previous || shouldReplaceCapture(previous.markdown, candidate.markdown)) {
-      seen.set(candidate.turnId, previous
-        ? Object.assign({}, candidate, { discoveryIndex: previous.discoveryIndex })
-        : candidate);
+      seen.set(
+        candidate.turnId,
+        previous ? Object.assign({}, candidate, { discoveryIndex: previous.discoveryIndex }) : candidate
+      );
     }
   }
   // Set difference, not a size subtraction: sizes can coincide while a real id
@@ -111,9 +128,8 @@ function captureMountedTurns(sections, settings, seen, state) {
  */
 function nextScrollTop(container, atBottom, mountedBand) {
   if (atBottom) return conversationScrollTop(container);
-  const reach = mountedBand > 0
-    ? Math.min(mountedBand, container.clientHeight || mountedBand)
-    : (container.clientHeight || 0);
+  const reach =
+    mountedBand > 0 ? Math.min(mountedBand, container.clientHeight || mountedBand) : container.clientHeight || 0;
   const increment = Math.max(1, Math.floor(reach * 0.75));
   return Math.min(conversationScrollTop(container) + increment, conversationScrollMax(container));
 }
@@ -137,7 +153,9 @@ function nextScrollTop(container, atBottom, mountedBand) {
  */
 function largestCoverageGap(bands, viewportHeight, documentHeight) {
   if (!bands || bands.length === 0) return { width: 0, at: 0 };
-  const sorted = bands.slice().sort(function(a, b) { return a[0] - b[0]; });
+  const sorted = bands.slice().sort(function (a, b) {
+    return a[0] - b[0];
+  });
 
   // Everything after the last position that mounted a turn is bottom padding.
   let lastProductive = -1;
@@ -159,7 +177,10 @@ function largestCoverageGap(bands, viewportHeight, documentHeight) {
     // viewport, and a sub-pixel seam is not a missing turn.
     if (start > reach + 1) {
       const width = start - reach;
-      if (width > widest) { widest = width; at = reach; }
+      if (width > widest) {
+        widest = width;
+        at = reach;
+      }
     }
     const end = sorted[i][0] + sorted[i][1];
     if (end > reach) reach = end;
@@ -181,7 +202,10 @@ function largestCoverageGap(bands, viewportHeight, documentHeight) {
   const seenTo = sorted[lastProductive][0] + sorted[lastProductive][1];
   const blind = traversedTo - seenTo;
   if (viewportHeight > 0 && blind > viewportHeight) {
-    if (blind > widest) { widest = blind; at = seenTo; }
+    if (blind > widest) {
+      widest = blind;
+      at = seenTo;
+    }
   }
 
   // The case both comparisons above are blind to: the scan STOPPED at the last
@@ -223,11 +247,13 @@ function markPartialScan(settings, reason) {
 /** Prefix markdown with a visible partial-export notice — must live in the artifact itself. */
 function prefixPartialNotice(md, reason) {
   if (reason === 'history start unverified for this page layout') {
-    return '> **Partial export** — history start is unverified for this page layout; earlier messages may be missing.\n\n' + md;
+    return (
+      '> **Partial export** — history start is unverified for this page layout; earlier messages may be missing.\n\n' +
+      md
+    );
   }
-  var detail = reason === 'cancelled'
-    ? 'scan was stopped before reaching the end'
-    : 'scan did not reach the end (' + reason + ')';
+  var detail =
+    reason === 'cancelled' ? 'scan was stopped before reaching the end' : 'scan did not reach the end (' + reason + ')';
   return '> **Partial export** — ' + detail + '.\n\n' + md;
 }
 
@@ -282,8 +308,7 @@ async function scanTurns(container, options) {
     // export missing 82% of its conversation came out unflagged. Silence about
     // a real hole is far worse than a needless warning — the user cannot even
     // know to re-run.
-    if (!start.reachedTop &&
-        !(start.quietedWithoutMarker && start.markerAbsentFromPage)) {
+    if (!start.reachedTop && !(start.quietedWithoutMarker && start.markerAbsentFromPage)) {
       markPartialScan(settings, 'never reached the start');
     }
     await settings.settle(container);
@@ -304,7 +329,11 @@ async function scanTurns(container, options) {
       // the virtualizer unmounts it. Guarded: a throwing collector must not end
       // a scan that has already captured turns.
       if (settings.onMounted) {
-        try { settings.onMounted(container); } catch (_e) { /* collector failed */ }
+        try {
+          settings.onMounted(container);
+        } catch (_e) {
+          /* collector failed */
+        }
       }
 
       const movedDown = Math.abs(logicalTop - lastProgressTop) >= 1;
@@ -345,16 +374,16 @@ async function scanTurns(container, options) {
         });
       }
 
-      stablePasses = atBottom && observation.newIds === 0 && observation.unresolved === 0 &&
-        lastHeight === container.scrollHeight
-        ? stablePasses + 1 : 0;
+      stablePasses =
+        atBottom && observation.newIds === 0 && observation.unresolved === 0 && lastHeight === container.scrollHeight
+          ? stablePasses + 1
+          : 0;
       if (stablePasses >= settings.stablePasses) {
         // `scrollHeight` is read HERE, at the end of the scan, when the
         // virtualizer has mounted everything it is going to mount. Comparing it
         // against the furthest position the scan actually visited is what
         // catches a scan that stopped at a bottom which later grew.
-        const gap = largestCoverageGap(
-          readBands, container.clientHeight || 0, container.scrollHeight || 0);
+        const gap = largestCoverageGap(readBands, container.clientHeight || 0, container.scrollHeight || 0);
         // A gap wider than the band that should have covered it means turns
         // existed in a stretch of the document the scan never mounted. Say so in
         // the artifact rather than presenting a hole as a complete conversation.
@@ -362,8 +391,8 @@ async function scanTurns(container, options) {
         return orderCapturedTurns(seen);
       }
       lastHeight = container.scrollHeight;
-      const target = observation.unresolved > 0
-        ? logicalTop : nextScrollTop(container, atBottom, observation.mountedBand);
+      const target =
+        observation.unresolved > 0 ? logicalTop : nextScrollTop(container, atBottom, observation.mountedBand);
       await settings.scrollTo(container, target, 'auto');
       await settings.settle(container);
     }
@@ -390,7 +419,9 @@ function extractConversation() {
   const sections = document.querySelectorAll('[data-turn-id]');
   if (!sections.length) return extractConversationLegacy();
   const turns = Array.from(sections)
-    .map(function(section, index) { return extractTurn(section, index); })
+    .map(function (section, index) {
+      return extractTurn(section, index);
+    })
     .filter(Boolean);
   return buildConversationMarkdown(orderCapturedTurns(turns));
 }
@@ -437,3 +468,17 @@ function sandboxFilesFromMarkdown(markdown) {
   }
   return files;
 }
+
+export {
+  captureMountedTurns,
+  extractConversation,
+  largestCoverageGap,
+  looksLikePlaceholder,
+  markPartialScan,
+  nextScrollTop,
+  PLACEHOLDER_MARKDOWN,
+  prefixPartialNotice,
+  sandboxFilesFromMarkdown,
+  scanTurns,
+  shouldReplaceCapture,
+};

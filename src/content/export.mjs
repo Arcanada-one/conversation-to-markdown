@@ -1,3 +1,67 @@
+import {
+  fetchConversationArtifacts,
+  fetchConversationMetadata,
+  fetchSessionToken,
+  listArtifactPanelFiles,
+  resolveArtifactPanelFiles,
+  resolveSandboxDownloadUrl,
+  sandboxPathsFromApiMessage,
+  waitForArtifactPanel,
+} from './artifacts.mjs';
+import {
+  dismissViewerOverlay,
+  downloadButtonsInPage,
+  escapeKeydownEvent,
+  filterButtonsAgainstPanel,
+  findButtonsByScrolling,
+  foldForNameMatching,
+  UNPREVIEWABLE_FORMATS,
+} from './button-discovery.mjs';
+import {
+  appendPanelArtifacts,
+  collectButtonDownloads,
+  downloadNameFromUrl,
+  extractConversationLegacy,
+} from './button-fetch.mjs';
+import {
+  ATTACHMENT_CHIP_SELECTORS,
+  extractAttachments,
+  extractAttachmentsDetailed,
+  extractImages,
+  markdownLink,
+  nodeToMarkdown,
+} from './markdown.mjs';
+import {
+  largestCoverageGap,
+  markPartialScan,
+  prefixPartialNotice,
+  sandboxFilesFromMarkdown,
+  scanTurns,
+} from './scan.mjs';
+import { findScrollContainer, scrollToConversationStart } from './scroll.mjs';
+import {
+  extractConversationTitle,
+  findCollapsedProjectRows,
+  findShowMoreControl,
+  findSidebarScroller,
+  knownProjectName,
+  listSidebarConversations,
+  projectRowContainer,
+  stripSidebarLabelSuffix,
+  titleFromSidebarLink,
+} from './sidebar-rows.mjs';
+import { collectSidebarConversations } from './sidebar-walk.mjs';
+import {
+  buildConversationMarkdown,
+  extractTurn,
+  getSectionTurnId,
+  modernMessageRole,
+  modernMessageSections,
+  orderCapturedTurns,
+  parseTurnOrder,
+  readModernPagination,
+} from './turns.mjs';
+
 /** ChatGPT retains inactive conversations in the app shell. Measured on
  * 2026-10-02: two main surfaces, one under active-page=false (display:none),
  * sharing fallback turn keys. Never combine their text or attachment rows.
@@ -8,7 +72,7 @@ function activeConversationRoot(doc) {
   if (!doc.querySelector('[data-app-shell-active-page]')) return doc;
   const pages = Array.from(doc.querySelectorAll('[data-app-shell-active-page]'));
   if (!pages.length) return doc;
-  const active = pages.filter(function(page) {
+  const active = pages.filter(function (page) {
     return page.getAttribute('data-app-shell-active-page') === 'true';
   });
   return active.length === 1 ? active[0] : null;
@@ -21,12 +85,11 @@ function waitForConversationReady(options) {
   const pollMs = supplied.pollMs || 300;
   const conversationId = supplied.conversationId || null;
 
-  return new Promise(function(resolve) {
+  return new Promise(function (resolve) {
     const startedAt = Date.now();
     function check() {
       if (conversationId) {
-        const pathMatch = (typeof location !== 'undefined' ? location.pathname : '')
-          .match(/\/c\/([A-Za-z0-9-]+)/);
+        const pathMatch = (typeof location !== 'undefined' ? location.pathname : '').match(/\/c\/([A-Za-z0-9-]+)/);
         if (!pathMatch || pathMatch[1] !== conversationId) {
           if (Date.now() - startedAt >= timeoutMs) {
             return resolve({ ready: false, error: 'Navigation did not reach the conversation.' });
@@ -35,10 +98,14 @@ function waitForConversationReady(options) {
         }
       }
       const root = typeof document !== 'undefined' ? activeConversationRoot(document) : null;
-      if (root &&
-          (root.querySelector('[data-turn-id]') ||
-           root.querySelector('[data-message-author-role]') ||
-           modernMessageSections(root).some(function(unit) { return !!modernMessageRole(unit); }))) {
+      if (
+        root &&
+        (root.querySelector('[data-turn-id]') ||
+          root.querySelector('[data-message-author-role]') ||
+          modernMessageSections(root).some(function (unit) {
+            return !!modernMessageRole(unit);
+          }))
+      ) {
         return resolve({ ready: true });
       }
       if (Date.now() - startedAt >= timeoutMs) {
@@ -66,11 +133,11 @@ function slugifyTitle(title, maxLength) {
     // BMP Private Use Area, both Private Use planes, unpaired surrogates, and
     // the non-characters at the end of each plane.
     .replace(/[\u0000-\u001F\u007F-\u009F\uE000-\uF8FF\uFDD0-\uFDEF\uFFF0-\uFFFF]/g, ' ')
-    .replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, function(pair) {
+    .replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, function (pair) {
       const code = pair.codePointAt(0);
-      const inPrivatePlane = code >= 0xF0000 && code <= 0x10FFFD;
-      const isNonCharacter = (code & 0xFFFE) === 0xFFFE;
-      return (inPrivatePlane || isNonCharacter) ? ' ' : pair;
+      const inPrivatePlane = code >= 0xf0000 && code <= 0x10fffd;
+      const isNonCharacter = (code & 0xfffe) === 0xfffe;
+      return inPrivatePlane || isNonCharacter ? ' ' : pair;
     })
     // A LONE surrogate only: the pair rule above already ran and returned valid
     // pairs untouched, so sweeping the whole D800-DFFF range here would split
@@ -111,8 +178,10 @@ async function getConversationMarkdown(settings) {
     const startPath = typeof location !== 'undefined' ? location.pathname : '';
     const conversationId = (startPath.match(/\/c\/([A-Za-z0-9-]+)/) || [])[1] || null;
     function assertSameConversation() {
-      if ((typeof location !== 'undefined' && location.pathname !== startPath) ||
-          activeConversationRoot(document) !== root) {
+      if (
+        (typeof location !== 'undefined' && location.pathname !== startPath) ||
+        activeConversationRoot(document) !== root
+      ) {
         throw new Error('Conversation changed during export. Return to the intended conversation and export again.');
       }
     }
@@ -142,31 +211,39 @@ async function getConversationMarkdown(settings) {
       scanMeta = {};
       if (typeof window !== 'undefined') window.__c2mScan = scanState;
       const turns = await scanTurns(container, {
-        readSections: function() {
+        readSections: function () {
           assertSameConversation();
           return modern ? modernMessageSections(root) : root.querySelectorAll('[data-turn-id]');
         },
-        scrollToStart: modern ? async function(target) {
-          const result = await scrollToConversationStart(target, {
-            readFirstTurn: function(root) { return modernMessageSections(root)[0] || null; },
-            readFirstTurnId: function(root) {
-              const first = modernMessageSections(root)[0];
-              return first ? getSectionTurnId(first) : null;
-            },
-            countTurns: function(root) { return modernMessageSections(root).length; },
-            readPagination: readModernPagination,
-          });
-          // Unknown layouts stay uncertain; the measured history boundary can
-          // now positively certify arrival instead of warning on every export.
-          if (!result.confirmedByPagination) {
-            markPartialScan({ scanMeta: scanMeta }, 'history start unverified for this page layout');
-          }
-          return result;
-        } : undefined,
+        scrollToStart: modern
+          ? async function (target) {
+              const result = await scrollToConversationStart(target, {
+                readFirstTurn: function (root) {
+                  return modernMessageSections(root)[0] || null;
+                },
+                readFirstTurnId: function (root) {
+                  const first = modernMessageSections(root)[0];
+                  return first ? getSectionTurnId(first) : null;
+                },
+                countTurns: function (root) {
+                  return modernMessageSections(root).length;
+                },
+                readPagination: readModernPagination,
+              });
+              // Unknown layouts stay uncertain; the measured history boundary can
+              // now positively certify arrival instead of warning on every export.
+              if (!result.confirmedByPagination) {
+                markPartialScan({ scanMeta: scanMeta }, 'history start unverified for this page layout');
+              }
+              return result;
+            }
+          : undefined,
         extractTurn: extractTurn,
-        isCancelled: function() { return scanState.cancelled === true; },
+        isCancelled: function () {
+          return scanState.cancelled === true;
+        },
         scanMeta: scanMeta,
-        onProgress: function(p) {
+        onProgress: function (p) {
           scanState.captured = p.captured;
           scanState.observed = p.observed;
           scanState.elapsedMs = p.elapsedMs;
@@ -186,25 +263,27 @@ async function getConversationMarkdown(settings) {
         // TZ-02..TZ-04, two different sets of four, because they were read at
         // two different scroll positions. Collected during the walk, every
         // turn's files are seen while that turn exists.
-        onMounted: wantFiles ? function() {
-          for (const file of listArtifactPanelFiles(root)) {
-            if (!panelFilesDuringScan.has(file.name)) {
-              panelFilesDuringScan.set(file.name, file);
+        onMounted: wantFiles
+          ? function () {
+              for (const file of listArtifactPanelFiles(root)) {
+                if (!panelFilesDuringScan.has(file.name)) {
+                  panelFilesDuringScan.set(file.name, file);
+                }
+              }
+              // Same walk, same reason. The separate button traversal that used to
+              // run after the scan was guarded by "found nothing here", and the
+              // guard failed the moment ANY behavior-btn happened to be on screen:
+              // measured on a live thread, the landing position showed 2 buttons
+              // (both editing suggestions — "Make the opening more concrete"), so
+              // the traversal never ran and all 5 real download buttons were missed.
+              // Collected during the walk there is no guard to get wrong.
+              for (const entry of downloadButtonsInPage(root, [])) {
+                if (!buttonsDuringScan.has(entry.label)) {
+                  buttonsDuringScan.set(entry.label, entry);
+                }
+              }
             }
-          }
-          // Same walk, same reason. The separate button traversal that used to
-          // run after the scan was guarded by "found nothing here", and the
-          // guard failed the moment ANY behavior-btn happened to be on screen:
-          // measured on a live thread, the landing position showed 2 buttons
-          // (both editing suggestions — "Make the opening more concrete"), so
-          // the traversal never ran and all 5 real download buttons were missed.
-          // Collected during the walk there is no guard to get wrong.
-          for (const entry of downloadButtonsInPage(root, [])) {
-            if (!buttonsDuringScan.has(entry.label)) {
-              buttonsDuringScan.set(entry.label, entry);
-            }
-          }
-        } : null,
+          : null,
       });
       md = buildConversationMarkdown(turns);
       if (scanMeta.partial) md = prefixPartialNotice(md, scanMeta.reason);
@@ -224,11 +303,19 @@ async function getConversationMarkdown(settings) {
       // Never click its download buttons: an escaped native download can close
       // the popup before the conversation is saved. Keep unresolved names.
       const controller = typeof AbortController === 'function' ? new AbortController() : null;
-      const phaseBudget = settings && settings.artifactTimeoutMs !== undefined
-        ? settings.artifactTimeoutMs : 30000;
+      const phaseBudget = settings && settings.artifactTimeoutMs !== undefined ? settings.artifactTimeoutMs : 30000;
       let phaseTimer;
       const resolvedSoFar = [];
-      const lookup = { stage: 'starting', requests: 0, statuses: {}, candidates: null, offered: 0, failures: {}, rejectedHosts: [], reason: 'unresolved' };
+      const lookup = {
+        stage: 'starting',
+        requests: 0,
+        statuses: {},
+        candidates: null,
+        offered: 0,
+        failures: {},
+        rejectedHosts: [],
+        reason: 'unresolved',
+      };
       try {
         md = await Promise.race([
           appendPanelArtifacts(md, {
@@ -238,34 +325,50 @@ async function getConversationMarkdown(settings) {
             scannedButtons: firstSection ? Array.from(buttonsDuringScan.values()) : undefined,
             clickDownloads: false,
             reportUnresolvedButtons: true,
-            onInventory: function(artifacts) {
+            onInventory: function (artifacts) {
               lookup.candidates = artifacts === null ? null : artifacts.length;
-              lookup.offered = (artifacts || []).filter(function(a) { return a.priority === 0; }).length;
+              lookup.offered = (artifacts || []).filter(function (a) {
+                return a.priority === 0;
+              }).length;
               lookup.stage = 'panel';
             },
-            onResolved: function(entry) { resolvedSoFar.push(entry); },
-            onFailure: function(kind, host) {
+            onResolved: function (entry) {
+              resolvedSoFar.push(entry);
+            },
+            onFailure: function (kind, host) {
               lookup.failures[kind] = (lookup.failures[kind] || 0) + 1;
               if (host && lookup.rejectedHosts.indexOf(host) === -1) lookup.rejectedHosts.push(host);
             },
-            onIncomplete: function() { attachmentsIncomplete = true; },
-            fetchImpl: typeof fetch === 'function' ? async function(url, init) {
-              // Only stage names and status counts leave this wrapper. Never
-              // include URLs, headers, response bodies or exception messages.
-              assertSameConversation();
-              if (controller && controller.signal.aborted) throw new Error('lookup cancelled');
-              lookup.stage = String(url).indexOf('/api/auth/session') !== -1 ? 'session' :
-                ((String(url).indexOf('/interpreter/download') !== -1 ||
-                  String(url).indexOf('/files/download/') !== -1) ? 'file-link' : 'conversation');
-              lookup.requests += 1;
-              const response = await fetch(url, Object.assign({}, init, controller ? { signal: controller.signal } : {}));
-              const code = response && Number.isInteger(response.status) ? response.status : 0;
-              lookup.statuses[code] = (lookup.statuses[code] || 0) + 1;
-              return response;
-            } : undefined,
+            onIncomplete: function () {
+              attachmentsIncomplete = true;
+            },
+            fetchImpl:
+              typeof fetch === 'function'
+                ? async function (url, init) {
+                    // Only stage names and status counts leave this wrapper. Never
+                    // include URLs, headers, response bodies or exception messages.
+                    assertSameConversation();
+                    if (controller && controller.signal.aborted) throw new Error('lookup cancelled');
+                    lookup.stage =
+                      String(url).indexOf('/api/auth/session') !== -1
+                        ? 'session'
+                        : String(url).indexOf('/interpreter/download') !== -1 ||
+                            String(url).indexOf('/files/download/') !== -1
+                          ? 'file-link'
+                          : 'conversation';
+                    lookup.requests += 1;
+                    const response = await fetch(
+                      url,
+                      Object.assign({}, init, controller ? { signal: controller.signal } : {})
+                    );
+                    const code = response && Number.isInteger(response.status) ? response.status : 0;
+                    lookup.statuses[code] = (lookup.statuses[code] || 0) + 1;
+                    return response;
+                  }
+                : undefined,
           }),
-          new Promise(function(_resolve, reject) {
-            phaseTimer = setTimeout(function() {
+          new Promise(function (_resolve, reject) {
+            phaseTimer = setTimeout(function () {
               lookup.reason = 'timeout';
               if (controller) controller.abort();
               reject(new Error('attachment lookup timed out'));
@@ -276,14 +379,35 @@ async function getConversationMarkdown(settings) {
         attachmentsIncomplete = true;
         if (lookup.reason !== 'timeout') lookup.reason = 'exception';
         // The text was already captured. Attachment failure must not erase it.
-        const names = Array.from(new Set(
-          Array.from(panelFilesDuringScan.values()).map(function(f) { return f.name; })
-            .concat(Array.from(buttonsDuringScan.values()).map(function(b) { return b.label; }))));
-        const available = resolvedSoFar.filter(function(entry) { return entry.resolved && entry.resolved.url; });
-        const recoveredLinks = available.map(function(entry) { return markdownLink(entry.file.name, entry.resolved.url); });
-        const recoveredNames = new Set(available.map(function(entry) { return entry.file.name; }));
-        const missingNames = names.filter(function(name) { return !recoveredNames.has(name); });
-        md += '\n\n---\n\n## Files' +
+        const names = Array.from(
+          new Set(
+            Array.from(panelFilesDuringScan.values())
+              .map(function (f) {
+                return f.name;
+              })
+              .concat(
+                Array.from(buttonsDuringScan.values()).map(function (b) {
+                  return b.label;
+                })
+              )
+          )
+        );
+        const available = resolvedSoFar.filter(function (entry) {
+          return entry.resolved && entry.resolved.url;
+        });
+        const recoveredLinks = available.map(function (entry) {
+          return markdownLink(entry.file.name, entry.resolved.url);
+        });
+        const recoveredNames = new Set(
+          available.map(function (entry) {
+            return entry.file.name;
+          })
+        );
+        const missingNames = names.filter(function (name) {
+          return !recoveredNames.has(name);
+        });
+        md +=
+          '\n\n---\n\n## Files' +
           (recoveredLinks.length ? '\n\n' + recoveredLinks.join('\n') : '') +
           '\n\n> Attachment lookup failed or timed out; ' +
           'the conversation text was preserved. Re-run to retrieve files.' +
@@ -292,13 +416,28 @@ async function getConversationMarkdown(settings) {
         clearTimeout(phaseTimer);
       }
       if (attachmentsIncomplete) {
-        md += '\n\n> Attachment diagnostics: reason=' + lookup.reason +
-          '; stage=' + lookup.stage + '; requests=' + lookup.requests +
-          '; HTTP=' + JSON.stringify(lookup.statuses) +
-          '; candidates=' + (lookup.candidates === null ? 'unknown' : lookup.candidates) +
-          '; resolved=' + resolvedSoFar.filter(function(entry) { return entry.resolved; }).length +
-          '; offered=' + lookup.offered + '; linkFailures=' + JSON.stringify(lookup.failures) +
-          '; rejectedHosts=' + JSON.stringify(lookup.rejectedHosts) + '.';
+        md +=
+          '\n\n> Attachment diagnostics: reason=' +
+          lookup.reason +
+          '; stage=' +
+          lookup.stage +
+          '; requests=' +
+          lookup.requests +
+          '; HTTP=' +
+          JSON.stringify(lookup.statuses) +
+          '; candidates=' +
+          (lookup.candidates === null ? 'unknown' : lookup.candidates) +
+          '; resolved=' +
+          resolvedSoFar.filter(function (entry) {
+            return entry.resolved;
+          }).length +
+          '; offered=' +
+          lookup.offered +
+          '; linkFailures=' +
+          JSON.stringify(lookup.failures) +
+          '; rejectedHosts=' +
+          JSON.stringify(lookup.rejectedHosts) +
+          '.';
       }
     }
     // A Library citation is an offered file, even though its preview button
@@ -307,7 +446,8 @@ async function getConversationMarkdown(settings) {
     // the conversation forever despite never saving those cited documents.
     if (wantFiles && /\(referenced file; not downloaded\)/.test(md)) {
       attachmentsIncomplete = true;
-      md += '\n\n> Library files cited in this conversation were not downloaded. ' +
+      md +=
+        '\n\n> Library files cited in this conversation were not downloaded. ' +
         'Download them from ChatGPT Library before treating this export as complete.';
     }
     assertSameConversation();
@@ -317,8 +457,8 @@ async function getConversationMarkdown(settings) {
       ok: true,
       md: md,
       partial: (!!scanMeta && scanMeta.partial === true) || attachmentsIncomplete,
-      partialReason: scanMeta && scanMeta.partial ? scanMeta.reason :
-        (attachmentsIncomplete ? 'attachments-unavailable' : null),
+      partialReason:
+        scanMeta && scanMeta.partial ? scanMeta.reason : attachmentsIncomplete ? 'attachments-unavailable' : null,
       title: title,
       slug: slugifyTitle(title),
       lines: md.split('\n').length,
@@ -337,17 +477,27 @@ async function fetchImageDataUrls(urls) {
   for (const url of urls) {
     try {
       const parsed = new URL(url);
-      if (parsed.protocol !== 'https:' || !['chatgpt.com', 'chat.openai.com', 'files.oaiusercontent.com'].includes(parsed.hostname)) {
+      if (
+        parsed.protocol !== 'https:' ||
+        !['chatgpt.com', 'chat.openai.com', 'files.oaiusercontent.com'].includes(parsed.hostname)
+      ) {
         results.push(null);
         continue;
       }
       const response = await fetch(url);
-      if (!response.ok) { results.push(null); continue; }
+      if (!response.ok) {
+        results.push(null);
+        continue;
+      }
       const blob = await response.blob();
-      const dataUrl = await new Promise(function(resolve, reject) {
+      const dataUrl = await new Promise(function (resolve, reject) {
         const reader = new FileReader();
-        reader.onload = function() { resolve(reader.result); };
-        reader.onerror = function() { reject(reader.error); };
+        reader.onload = function () {
+          resolve(reader.result);
+        };
+        reader.onerror = function () {
+          reject(reader.error);
+        };
         reader.readAsDataURL(blob);
       });
       results.push({ url: url, dataUrl: dataUrl });
@@ -363,14 +513,22 @@ function turnsOnRoot(root) {
   if (!root || !root.querySelectorAll) return [];
   var legacy = root.querySelectorAll('[data-turn-id]');
   if (legacy && legacy.length) {
-    return orderCapturedTurns(Array.from(legacy).map(function(section, index) {
-      return extractTurn(section, index);
-    }).filter(Boolean));
+    return orderCapturedTurns(
+      Array.from(legacy)
+        .map(function (section, index) {
+          return extractTurn(section, index);
+        })
+        .filter(Boolean)
+    );
   }
   var modern = modernMessageSections(root);
-  return orderCapturedTurns(modern.map(function(section, index) {
-    return extractTurn(section, index);
-  }).filter(Boolean));
+  return orderCapturedTurns(
+    modern
+      .map(function (section, index) {
+        return extractTurn(section, index);
+      })
+      .filter(Boolean)
+  );
 }
 
 function dedupeNamed(items, readName) {
@@ -395,7 +553,7 @@ function dedupeNamed(items, readName) {
  */
 function exportActiveSessionHtml(doc, options) {
   var opts = options || {};
-  var site = typeof require === 'function' ? require('./site.js') : null;
+  var site = opts.site || null;
   if (!site || typeof site.layoutStaticSite !== 'function') {
     return { ok: false, error: 'HTML exporter is unavailable.' };
   }
@@ -424,8 +582,12 @@ function exportActiveSessionHtml(doc, options) {
     projectTitle: opts.projectTitle || null,
     projectSlug: opts.projectSlug || null,
     turns: renderedTurns,
-    saved: dedupeNamed(saved, function(file) { return file.name; }),
-    missing: dedupeNamed(missing, function(name) { return name; }),
+    saved: dedupeNamed(saved, function (file) {
+      return file.name;
+    }),
+    missing: dedupeNamed(missing, function (name) {
+      return name;
+    }),
     partial: partial,
   };
   var laid = site.layoutStaticSite([session]);
@@ -445,57 +607,57 @@ function exportActiveSessionHtml(doc, options) {
   };
 }
 
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {
-    buildConversationMarkdown: buildConversationMarkdown,
-    extractAttachments: extractAttachments,
-    extractAttachmentsDetailed: extractAttachmentsDetailed,
-    ATTACHMENT_CHIP_SELECTORS: ATTACHMENT_CHIP_SELECTORS,
-    extractConversationTitle: extractConversationTitle,
-    extractImages: extractImages,
-    fetchImageDataUrls: fetchImageDataUrls,
-    listSidebarConversations: listSidebarConversations,
-    collectSidebarConversations: collectSidebarConversations,
-    findSidebarScroller: findSidebarScroller,
-    findShowMoreControl: findShowMoreControl,
-    fetchSessionToken: fetchSessionToken,
-    fetchConversationArtifacts: fetchConversationArtifacts,
-    resolveSandboxDownloadUrl: resolveSandboxDownloadUrl,
-    listArtifactPanelFiles: listArtifactPanelFiles,
-    resolveArtifactPanelFiles: resolveArtifactPanelFiles,
-    appendPanelArtifacts: appendPanelArtifacts,
-    sandboxFilesFromMarkdown: sandboxFilesFromMarkdown,
-    sandboxPathsFromApiMessage: sandboxPathsFromApiMessage,
-    foldForNameMatching: foldForNameMatching,
-    downloadButtonsInPage: downloadButtonsInPage,
-    filterButtonsAgainstPanel: filterButtonsAgainstPanel,
-    collectButtonDownloads: collectButtonDownloads,
-    findButtonsByScrolling: findButtonsByScrolling,
-    downloadNameFromUrl: downloadNameFromUrl,
-    dismissViewerOverlay: dismissViewerOverlay,
-    escapeKeydownEvent: escapeKeydownEvent,
-    UNPREVIEWABLE_FORMATS: UNPREVIEWABLE_FORMATS,
-    waitForArtifactPanel: waitForArtifactPanel,
-    scrollToConversationStart: scrollToConversationStart,
-    readModernPagination: readModernPagination,
-    findCollapsedProjectRows: findCollapsedProjectRows,
-    projectRowContainer: projectRowContainer,
-    stripSidebarLabelSuffix: stripSidebarLabelSuffix,
-    knownProjectName: knownProjectName,
-    slugifyTitle: slugifyTitle,
-    extractTurn: extractTurn,
-    fetchConversationMetadata: fetchConversationMetadata,
-    findScrollContainer: findScrollContainer,
-    getConversationMarkdown: getConversationMarkdown,
-    exportActiveSessionHtml: exportActiveSessionHtml,
-    turnsOnRoot: turnsOnRoot,
-    largestCoverageGap: largestCoverageGap,
-    nodeToMarkdown: nodeToMarkdown,
-    orderCapturedTurns: orderCapturedTurns,
-    parseTurnOrder: parseTurnOrder,
-    prefixPartialNotice: prefixPartialNotice,
-    scanTurns: scanTurns,
-    titleFromSidebarLink: titleFromSidebarLink,
-    waitForConversationReady: waitForConversationReady,
-  };
-}
+export {
+  ATTACHMENT_CHIP_SELECTORS,
+  activeConversationRoot,
+  appendPanelArtifacts,
+  buildConversationMarkdown,
+  collectButtonDownloads,
+  collectSidebarConversations,
+  dedupeNamed,
+  dismissViewerOverlay,
+  downloadButtonsInPage,
+  downloadNameFromUrl,
+  escapeKeydownEvent,
+  exportActiveSessionHtml,
+  extractAttachments,
+  extractAttachmentsDetailed,
+  extractConversationTitle,
+  extractImages,
+  extractTurn,
+  fetchConversationArtifacts,
+  fetchConversationMetadata,
+  fetchImageDataUrls,
+  fetchSessionToken,
+  filterButtonsAgainstPanel,
+  findButtonsByScrolling,
+  findCollapsedProjectRows,
+  findScrollContainer,
+  findShowMoreControl,
+  findSidebarScroller,
+  foldForNameMatching,
+  getConversationMarkdown,
+  knownProjectName,
+  largestCoverageGap,
+  listArtifactPanelFiles,
+  listSidebarConversations,
+  nodeToMarkdown,
+  orderCapturedTurns,
+  parseTurnOrder,
+  prefixPartialNotice,
+  projectRowContainer,
+  readModernPagination,
+  resolveArtifactPanelFiles,
+  resolveSandboxDownloadUrl,
+  sandboxFilesFromMarkdown,
+  sandboxPathsFromApiMessage,
+  scanTurns,
+  scrollToConversationStart,
+  slugifyTitle,
+  stripSidebarLabelSuffix,
+  titleFromSidebarLink,
+  turnsOnRoot,
+  UNPREVIEWABLE_FORMATS,
+  waitForArtifactPanel,
+  waitForConversationReady,
+};

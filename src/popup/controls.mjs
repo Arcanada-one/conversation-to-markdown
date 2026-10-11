@@ -1,3 +1,96 @@
+import { runBatchExport } from './batch.mjs';
+import {
+  addZipEntry,
+  bytesToBase64DataUrl,
+  bytesToDownloadUrl,
+  downloadOne,
+  MD_WRITE_TIMEOUT_MS,
+  saveConversationExport,
+  searchCompletedDownloadPaths,
+  startProgressPolling,
+  stopProgressPolling,
+  textToUtf8Bytes,
+  waitForDownloadComplete,
+  ZIP_BYTE_BUDGET,
+  ZIP_WRITE_TIMEOUT_MS,
+} from './downloads.mjs';
+import {
+  buildSaveStatus,
+  createRunLog,
+  exportSavedLines,
+  flushRunLog,
+  LAST_ERROR_KEY,
+  markExportFolderVisible,
+  noteExportDownload,
+  publishHtmlSessions,
+  pushLogEvent,
+  reportFailure,
+  revealExportFolder,
+  sanitizeLogText,
+} from './logging.mjs';
+import {
+  batchWarning,
+  btn,
+  btnCancel,
+  btnPause,
+  chkBatch,
+  chkHtml,
+  chkImages,
+  refreshExportButtonLabel,
+  showStatus,
+  status,
+  syncBatchOptions,
+} from './options.mjs';
+import {
+  artifactFilename,
+  batchMdFilename,
+  batchRootPath,
+  buildMdFilename,
+  candidateExportNames,
+  conversationFolderFromPath,
+  conversationFolderPath,
+  exportPath,
+  filterPendingConversations,
+  foldExceptId,
+  formatBatchProgress,
+  formatExportTimestamp,
+  ID_MARKER,
+  isDownloadableFileUrl,
+  mdDownloadPath,
+  mdStem,
+  parseArtifactRefs,
+  parseFileRefs,
+  parseImageRefs,
+  sanitizeFilenamePart,
+  splitFilenameExtension,
+  stampsInPaths,
+} from './paths.mjs';
+import {
+  backoffDelayMs,
+  classifyBatchFailure,
+  createCallQuota,
+  OPENAI_CALL_WINDOW_MS,
+  OPENAI_CALLS_PER_MINUTE,
+  OPENAI_FILE_LOOKUP_CALLS,
+  OPENAI_METADATA_CALLS,
+  OPENAI_PAGE_LOAD_CALLS,
+  waitWhilePaused,
+} from './quota.mjs';
+import { state } from './state.mjs';
+import {
+  BATCH_JOB_KEY,
+  classifyAgainstIndex,
+  conversationJobRecord,
+  INDEX_BYTE_BUDGET,
+  INDEX_KEY,
+  mergeBackupConversations,
+  readBatchJob,
+  readExportIndex,
+  recordExportedConversation,
+  rememberBatchJob,
+  writeBatchJob,
+} from './storage.mjs';
+
 /** Download one laid-out static site through chrome.downloads.
  *
  *  Acceptance is not completion. The blob URL stays alive until Chrome reports
@@ -8,8 +101,7 @@ async function downloadStaticSite(laid) {
   var files = (laid && laid.files) || [];
   var failed = [];
   var lastId = null;
-  var canObserveCompletion = typeof chrome !== 'undefined' &&
-    chrome.downloads && chrome.downloads.onChanged;
+  var canObserveCompletion = typeof chrome !== 'undefined' && chrome.downloads && chrome.downloads.onChanged;
   for (var i = 0; i < files.length; i++) {
     var entry = files[i];
     var bytes = typeof entry.body === 'string' ? textToUtf8Bytes(entry.body) : entry.body;
@@ -55,36 +147,40 @@ function projectIdFromLocation(url) {
  *  landed but ends the run, while pausing resumes exactly where it stopped. */
 if (btnPause) {
   btnPause.addEventListener('click', () => {
-    if (!batchRunActive) {
-      if (!btn.disabled && batchJobStored && activeBatchJob && activeBatchJob.status !== 'done') resumeSavedBatch();
+    if (!state.batchRunActive) {
+      if (!btn.disabled && state.batchJobStored && state.activeBatchJob && state.activeBatchJob.status !== 'done')
+        resumeSavedBatch();
       return;
     }
-    if (!batchJobStored) return;
-    batchPaused = !batchPaused;
-    btnPause.textContent = batchPaused ? 'Resume' : 'Pause';
-    if (batchPaused) {
-      if (activeBatchJob) {
-        activeBatchJob.status = 'paused';
-        activeBatchJob.updatedAt = new Date().toISOString();
-        writeBatchJob(activeBatchJob);
+    if (!state.batchJobStored) return;
+    state.batchPaused = !state.batchPaused;
+    btnPause.textContent = state.batchPaused ? 'Resume' : 'Pause';
+    if (state.batchPaused) {
+      if (state.activeBatchJob) {
+        state.activeBatchJob.status = 'paused';
+        state.activeBatchJob.updatedAt = new Date().toISOString();
+        writeBatchJob(state.activeBatchJob);
       }
-      showStatus('warning', 'Paused. You can close this panel and resume later. Conversations already saved stay saved.');
-    } else if (activeBatchJob) {
-      activeBatchJob.status = 'running';
-      activeBatchJob.updatedAt = new Date().toISOString();
-      writeBatchJob(activeBatchJob);
+      showStatus(
+        'warning',
+        'Paused. You can close this panel and resume later. Conversations already saved stay saved.'
+      );
+    } else if (state.activeBatchJob) {
+      state.activeBatchJob.status = 'running';
+      state.activeBatchJob.updatedAt = new Date().toISOString();
+      writeBatchJob(state.activeBatchJob);
     }
   });
 }
 
 async function executeBatch(tab, batchOptions) {
-  batchRunActive = true;
-  batchJobStored = false;
-  activeBatchJob = null;
-  lastExportDownloadId = null;
-  scanningTabId = tab.id;
+  state.batchRunActive = true;
+  state.batchJobStored = false;
+  state.activeBatchJob = null;
+  state.lastExportDownloadId = null;
+  state.scanningTabId = tab.id;
   if (btnPause) {
-    batchPaused = false;
+    state.batchPaused = false;
     btnPause.textContent = 'Pause';
     btnPause.classList.remove('visible');
   }
@@ -96,22 +192,26 @@ async function executeBatch(tab, batchOptions) {
     }
 
     var incomplete = batchResult.partial > 0 || batchResult.exported + batchResult.unchanged < batchResult.total;
-    var summary = batchResult.htmlOk === false
-      ? 'HTML site not saved'
-      : batchResult.listComplete && !incomplete && !batchResult.cancelled && !batchResult.errors.length
-        ? '✓ Batch export complete: ' + batchResult.exported + ' saved'
-        : '⚠ Backup needs attention: ' + batchResult.exported + ' saved';
+    var summary =
+      batchResult.htmlOk === false
+        ? 'HTML site not saved'
+        : batchResult.listComplete && !incomplete && !batchResult.cancelled && !batchResult.errors.length
+          ? '✓ Batch export complete: ' + batchResult.exported + ' saved'
+          : '⚠ Backup needs attention: ' + batchResult.exported + ' saved';
     if (batchResult.unchanged > 0) {
       summary += ', ' + batchResult.unchanged + ' unchanged';
     }
     if (batchResult.discovered > 0) {
-      summary += ', ' + batchResult.discovered
-        + (batchResult.discovered === 1 ? ' new chat on the sidebar' : ' new chats on the sidebar');
+      summary +=
+        ', ' +
+        batchResult.discovered +
+        (batchResult.discovered === 1 ? ' new chat on the sidebar' : ' new chats on the sidebar');
     }
     if (batchResult.grown > 0) {
-      summary += ', ' + batchResult.grown
-        + (batchResult.grown === 1 ? ' updated (saved as a new dated copy)'
-                                   : ' updated (saved as new dated copies)');
+      summary +=
+        ', ' +
+        batchResult.grown +
+        (batchResult.grown === 1 ? ' updated (saved as a new dated copy)' : ' updated (saved as new dated copies)');
     }
     if (batchResult.partial > 0) {
       summary += ', ' + batchResult.partial + ' incomplete (re-run to repair)';
@@ -129,16 +229,18 @@ async function executeBatch(tab, batchOptions) {
     if (batchResult.errors.length) summary += '\nErrors: ' + batchResult.errors.join('; ');
     markExportFolderVisible();
     showStatus(
-      batchResult.htmlOk === false ? 'error' :
-        (batchResult.listComplete && !incomplete && !batchResult.cancelled && !batchResult.errors.length
-          ? 'success' : 'warning'),
+      batchResult.htmlOk === false
+        ? 'error'
+        : batchResult.listComplete && !incomplete && !batchResult.cancelled && !batchResult.errors.length
+          ? 'success'
+          : 'warning',
       summary
     );
     return batchResult;
   } finally {
-    batchRunActive = false;
+    state.batchRunActive = false;
     if (btnPause) {
-      if (batchJobStored && activeBatchJob && activeBatchJob.status !== 'done') {
+      if (state.batchJobStored && state.activeBatchJob && state.activeBatchJob.status !== 'done') {
         btnPause.textContent = 'Resume saved export';
         btnPause.classList.add('visible');
       } else {
@@ -161,7 +263,7 @@ async function resumeSavedBatch() {
     return;
   }
   btn.disabled = true;
-  batchCancelled = false;
+  state.batchCancelled = false;
   btnCancel.classList.add('visible');
   btnCancel.disabled = false;
   btnCancel.textContent = 'Stop export';
@@ -179,7 +281,7 @@ async function resumeSavedBatch() {
       downloadHtml: !!job.downloadHtml,
       conversations: job.conversations,
       discover: true,
-      onProgress: function(index, total, title) {
+      onProgress: function (index, total, title) {
         btn.textContent = 'Exporting ' + formatBatchProgress(index, total, title);
       },
     });
@@ -188,35 +290,46 @@ async function resumeSavedBatch() {
   } finally {
     btn.disabled = false;
     refreshExportButtonLabel();
-    scanningTabId = null;
+    state.scanningTabId = null;
     btnCancel.classList.remove('visible');
   }
 }
 
 function showSavedBatch() {
-  chrome.tabs.query({ active: true, currentWindow: true }).then(function(tabs) {
-    var tab = tabs && tabs[0];
-    return readBatchJob(tab && tab.url ? projectIdFromLocation(tab.url) : undefined);
-  }).then(function(job) {
-    if (!job || job.status === 'done' || batchRunActive || activeBatchJob) return;
-    activeBatchJob = job;
-    batchJobStored = true;
-    if (!btnPause) return;
-    btnPause.classList.add('visible');
-    btnPause.textContent = 'Resume saved export';
-    showStatus('warning', 'A saved backup is waiting (' + job.conversations.length + ' conversations). Resume checks the open sidebar for chats added since, then saves new and updated ones.');
-  }).catch(function() {});
+  chrome.tabs
+    .query({ active: true, currentWindow: true })
+    .then(function (tabs) {
+      var tab = tabs && tabs[0];
+      return readBatchJob(tab && tab.url ? projectIdFromLocation(tab.url) : undefined);
+    })
+    .then(function (job) {
+      if (!job || job.status === 'done' || state.batchRunActive || state.activeBatchJob) return;
+      state.activeBatchJob = job;
+      state.batchJobStored = true;
+      if (!btnPause) return;
+      btnPause.classList.add('visible');
+      btnPause.textContent = 'Resume saved export';
+      showStatus(
+        'warning',
+        'A saved backup is waiting (' +
+          job.conversations.length +
+          ' conversations). Resume checks the open sidebar for chats added since, then saves new and updated ones.'
+      );
+    })
+    .catch(function () {});
 }
 
 btnCancel.addEventListener('click', async () => {
-  if (scanningTabId === null) return;
-  batchCancelled = true;
+  if (state.scanningTabId === null) return;
+  state.batchCancelled = true;
   btnCancel.disabled = true;
   btnCancel.textContent = 'Stopping…';
   try {
     await chrome.scripting.executeScript({
-      target: { tabId: scanningTabId },
-      func: function() { if (window.__c2mScan) window.__c2mScan.cancelled = true; },
+      target: { tabId: state.scanningTabId },
+      func: function () {
+        if (window.__c2mScan) window.__c2mScan.cancelled = true;
+      },
     });
   } catch (_e) {
     // Nothing to cancel — the scan already ended.
@@ -224,15 +337,15 @@ btnCancel.addEventListener('click', async () => {
 });
 
 btn.addEventListener('click', async () => {
-  lastExportDownloadId = null;
+  state.lastExportDownloadId = null;
   btn.disabled = true;
-  batchCancelled = false;
+  state.batchCancelled = false;
   const batchMode = chkBatch && chkBatch.checked;
   btn.textContent = batchMode ? 'Preparing backup…' : 'Scanning conversation…';
   btnCancel.classList.add('visible');
   btnCancel.disabled = false;
   if (btnPause) {
-    batchPaused = false;
+    state.batchPaused = false;
     btnPause.textContent = 'Pause';
     btnPause.classList.remove('visible');
   }
@@ -261,14 +374,14 @@ btn.addEventListener('click', async () => {
 
       var projectInfo = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
-        func: function() {
+        func: function () {
           var title = typeof extractConversationTitle === 'function' ? extractConversationTitle() : null;
           var slug = title && typeof slugifyTitle === 'function' ? slugifyTitle(title) : null;
           return { title: title, slug: slug || 'project-batch' };
         },
       });
       var activeProjectId = projectIdFromLocation(tab.url);
-      var projectSlug = activeProjectId ? (projectInfo?.[0]?.result?.slug || 'project-batch') : null;
+      var projectSlug = activeProjectId ? projectInfo?.[0]?.result?.slug || 'project-batch' : null;
       // One stamp for the whole run, so every file from a single batch carries the
       // same moment rather than drifting minute by minute as the run progresses.
       var batchStamp = formatExportTimestamp();
@@ -279,7 +392,7 @@ btn.addEventListener('click', async () => {
         batchStamp: batchStamp,
         buildZip: true,
         downloadHtml: !!(chkHtml && chkHtml.checked),
-        onProgress: function(index, total, title) {
+        onProgress: function (index, total, title) {
           btn.textContent = 'Exporting ' + formatBatchProgress(index, total, title);
         },
       });
@@ -291,7 +404,7 @@ btn.addEventListener('click', async () => {
       files: ['content.js'],
     });
 
-    scanningTabId = tab.id;
+    state.scanningTabId = tab.id;
     startProgressPolling(tab.id);
 
     const results = await chrome.scripting.executeScript({
@@ -324,8 +437,8 @@ btn.addEventListener('click', async () => {
       downloadImages: downloadImages,
       downloadHtml: !!(chkHtml && chkHtml.checked),
     });
-    activeRunLog = singleLog;
-    activeRunLogOptions = { downloadLog: !!(downloadImages || (chkHtml && chkHtml.checked)) };
+    state.activeRunLog = singleLog;
+    state.activeRunLogOptions = { downloadLog: !!(downloadImages || (chkHtml && chkHtml.checked)) };
     pushLogEvent(singleLog, {
       phase: 'scan',
       outcome: result.partial ? 'partial' : 'ok',
@@ -353,33 +466,40 @@ btn.addEventListener('click', async () => {
         words: result.words,
         partialSuffix: partialSuffix,
       });
-      if (chkHtml && chkHtml.checked && typeof sessionFromExport === 'function' && typeof layoutStaticSite === 'function') {
+      if (
+        chkHtml &&
+        chkHtml.checked &&
+        typeof sessionFromExport === 'function' &&
+        typeof layoutStaticSite === 'function'
+      ) {
         var projectMatch = String(tab.url || '').match(/\/g\/(g-p-[A-Za-z0-9]+)\//);
-        var htmlSession = sessionFromExport({
-          id: conversationIdFromLocation(tab.url),
-          title: result.title,
-          slug: result.slug,
-          projectId: projectMatch ? projectMatch[1] : null,
-          retrievedFiles: saved.savedFiles || [],
-        }, {
-          // Original URLs, not the rewritten Markdown: bindRetrievedFiles
-          // matches the remote address to the bytes just saved.
-          md: md,
-          title: result.title,
-          slug: result.slug,
-          partial: result.partial || (saved.dlErrors && saved.dlErrors.length > 0),
-        });
+        var htmlSession = sessionFromExport(
+          {
+            id: conversationIdFromLocation(tab.url),
+            title: result.title,
+            slug: result.slug,
+            projectId: projectMatch ? projectMatch[1] : null,
+            retrievedFiles: saved.savedFiles || [],
+          },
+          {
+            // Original URLs, not the rewritten Markdown: bindRetrievedFiles
+            // matches the remote address to the bytes just saved.
+            md: md,
+            title: result.title,
+            slug: result.slug,
+            partial: result.partial || (saved.dlErrors && saved.dlErrors.length > 0),
+          }
+        );
         var htmlWithFiles = await publishHtmlSessions([htmlSession]);
         if (!htmlWithFiles.ok) {
           saveStatus.type = 'error';
-          saveStatus.text += '\nHTML site not saved: ' +
-            (htmlWithFiles.error || 'the write did not complete');
+          saveStatus.text += '\nHTML site not saved: ' + (htmlWithFiles.error || 'the write did not complete');
         }
       }
       saveStatus.text += '\n' + exportSavedLines(singleLog, !!(chkHtml && chkHtml.checked));
       showStatus(saveStatus.type, saveStatus.text);
       markExportFolderVisible();
-      await flushRunLog(singleLog, activeRunLogOptions);
+      await flushRunLog(singleLog, state.activeRunLogOptions);
 
       // NOT copied to the clipboard. With the save option on, the file is the
       // deliverable and the clipboard is a second copy nobody asked for — and it
@@ -392,25 +512,40 @@ btn.addEventListener('click', async () => {
       return;
     }
 
-    if (chkHtml && chkHtml.checked && typeof sessionFromExport === 'function' && typeof layoutStaticSite === 'function') {
-      var htmlOnly = sessionFromExport({
-        id: conversationIdFromLocation(tab.url),
-        title: result.title,
-        slug: result.slug,
-      }, { md: md, title: result.title, slug: result.slug, partial: result.partial });
+    if (
+      chkHtml &&
+      chkHtml.checked &&
+      typeof sessionFromExport === 'function' &&
+      typeof layoutStaticSite === 'function'
+    ) {
+      var htmlOnly = sessionFromExport(
+        {
+          id: conversationIdFromLocation(tab.url),
+          title: result.title,
+          slug: result.slug,
+        },
+        { md: md, title: result.title, slug: result.slug, partial: result.partial }
+      );
       var htmlWrite = await publishHtmlSessions([htmlOnly]);
       if (!htmlWrite.ok) {
         showStatus('error', 'HTML site not saved: ' + (htmlWrite.error || 'the write did not complete'));
         btn.disabled = false;
         return;
       }
-      var htmlPartialSuffix = (result.partial || htmlOnly.partial) ? ' (partial export)' : '';
-      showStatus(htmlPartialSuffix ? 'warning' : 'success',
+      var htmlPartialSuffix = result.partial || htmlOnly.partial ? ' (partial export)' : '';
+      showStatus(
+        htmlPartialSuffix ? 'warning' : 'success',
         (htmlPartialSuffix ? '⚠ Saved incomplete HTML site' : '✓ Saved HTML site') +
-        ' ' + result.lines + ' lines · ' + result.words + ' words\n' +
-        exportSavedLines(singleLog, true) + (htmlPartialSuffix ? '\nRe-run to complete it.' : ''));
+          ' ' +
+          result.lines +
+          ' lines · ' +
+          result.words +
+          ' words\n' +
+          exportSavedLines(singleLog, true) +
+          (htmlPartialSuffix ? '\nRe-run to complete it.' : '')
+      );
       markExportFolderVisible();
-      await flushRunLog(singleLog, activeRunLogOptions);
+      await flushRunLog(singleLog, state.activeRunLogOptions);
       btn.disabled = false;
       return;
     }
@@ -419,28 +554,25 @@ btn.addEventListener('click', async () => {
     // failure and belongs in the catch.
     await navigator.clipboard.writeText(md);
 
-    showStatus(
-      'success',
-      '✓ Copied!' + partialSuffix + ' ' + result.lines + ' lines · ' + result.words + ' words'
-    );
+    showStatus('success', '✓ Copied!' + partialSuffix + ' ' + result.lines + ' lines · ' + result.words + ' words');
   } catch (err) {
-    pushLogEvent(activeRunLog, {
+    pushLogEvent(state.activeRunLog, {
       level: 'error',
       phase: 'single export',
       outcome: 'exception',
       message: (err && err.message) || String(err),
       stack: err && err.stack,
     });
-    if (activeRunLog) await flushRunLog(activeRunLog, activeRunLogOptions);
+    if (state.activeRunLog) await flushRunLog(state.activeRunLog, state.activeRunLogOptions);
     reportFailure('single export', err);
   } finally {
-    activeRunLog = null;
+    state.activeRunLog = null;
     stopProgressPolling();
-    scanningTabId = null;
+    state.scanningTabId = null;
     btnCancel.classList.remove('visible');
     if (batchWarning) batchWarning.classList.remove('visible');
     btn.disabled = false;
-    if (btnPause && (!activeBatchJob || activeBatchJob.status === 'done')) {
+    if (btnPause && (!state.activeBatchJob || state.activeBatchJob.status === 'done')) {
       btnPause.classList.remove('visible');
     }
     refreshExportButtonLabel();
@@ -449,69 +581,71 @@ btn.addEventListener('click', async () => {
 
 showSavedBatch();
 
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {
-    addZipEntry: addZipEntry,
-    ZIP_BYTE_BUDGET: ZIP_BYTE_BUDGET,
-    artifactFilename: artifactFilename,
-    sanitizeFilenamePart: sanitizeFilenamePart,
-    splitFilenameExtension: splitFilenameExtension,
-    batchRootPath: batchRootPath,
-    buildMdFilename: buildMdFilename,
-    batchMdFilename: batchMdFilename,
-    bytesToDownloadUrl: bytesToDownloadUrl,
-    bytesToBase64DataUrl: bytesToBase64DataUrl,
-    waitForDownloadComplete: waitForDownloadComplete,
-    ZIP_WRITE_TIMEOUT_MS: ZIP_WRITE_TIMEOUT_MS,
-    ID_MARKER: ID_MARKER,
-    foldExceptId: foldExceptId,
-    candidateExportNames: candidateExportNames,
-    conversationFolderFromPath: conversationFolderFromPath,
-    mdStem: mdStem,
-    stampsInPaths: stampsInPaths,
-    conversationFolderPath: conversationFolderPath,
-    downloadOne: downloadOne,
-    downloadStaticSite: downloadStaticSite,
-    saveConversationExport: saveConversationExport,
-    buildSaveStatus: buildSaveStatus,
-    syncBatchOptions: syncBatchOptions,
-    reportFailure: reportFailure,
-    LAST_ERROR_KEY: LAST_ERROR_KEY,
-    MD_WRITE_TIMEOUT_MS: MD_WRITE_TIMEOUT_MS,
-    filterPendingConversations: filterPendingConversations,
-    classifyBatchFailure: classifyBatchFailure,
-    backoffDelayMs: backoffDelayMs,
-    waitWhilePaused: waitWhilePaused,
-    formatBatchProgress: formatBatchProgress,
-    formatExportTimestamp: formatExportTimestamp,
-    exportPath: exportPath,
-    isDownloadableFileUrl: isDownloadableFileUrl,
-    mdDownloadPath: mdDownloadPath,
-    parseArtifactRefs: parseArtifactRefs,
-    parseFileRefs: parseFileRefs,
-    parseImageRefs: parseImageRefs,
-    runBatchExport: runBatchExport,
-    sanitizeLogText: sanitizeLogText,
-    noteExportDownload: noteExportDownload,
-    revealExportFolder: revealExportFolder,
-    mergeBackupConversations: mergeBackupConversations,
-    rememberBatchJob: rememberBatchJob,
-    resumeSavedBatch: resumeSavedBatch,
-    createCallQuota: createCallQuota,
-    OPENAI_CALLS_PER_MINUTE: OPENAI_CALLS_PER_MINUTE,
-    OPENAI_CALL_WINDOW_MS: OPENAI_CALL_WINDOW_MS,
-    OPENAI_PAGE_LOAD_CALLS: OPENAI_PAGE_LOAD_CALLS,
-    OPENAI_METADATA_CALLS: OPENAI_METADATA_CALLS,
-    OPENAI_FILE_LOOKUP_CALLS: OPENAI_FILE_LOOKUP_CALLS,
-    conversationJobRecord: conversationJobRecord,
-    readBatchJob: readBatchJob,
-    writeBatchJob: writeBatchJob,
-    BATCH_JOB_KEY: BATCH_JOB_KEY,
-    searchCompletedDownloadPaths: searchCompletedDownloadPaths,
-    readExportIndex: readExportIndex,
-    recordExportedConversation: recordExportedConversation,
-    classifyAgainstIndex: classifyAgainstIndex,
-    INDEX_KEY: INDEX_KEY,
-    INDEX_BYTE_BUDGET: INDEX_BYTE_BUDGET,
-  };
-}
+export {
+  addZipEntry,
+  artifactFilename,
+  BATCH_JOB_KEY,
+  backoffDelayMs,
+  batchMdFilename,
+  batchRootPath,
+  buildMdFilename,
+  buildSaveStatus,
+  bytesToBase64DataUrl,
+  bytesToDownloadUrl,
+  candidateExportNames,
+  classifyAgainstIndex,
+  classifyBatchFailure,
+  conversationFolderFromPath,
+  conversationFolderPath,
+  conversationIdFromLocation,
+  conversationJobRecord,
+  createCallQuota,
+  downloadOne,
+  downloadStaticSite,
+  executeBatch,
+  exportPath,
+  filterPendingConversations,
+  foldExceptId,
+  formatBatchProgress,
+  formatExportTimestamp,
+  ID_MARKER,
+  INDEX_BYTE_BUDGET,
+  INDEX_KEY,
+  isDownloadableFileUrl,
+  LAST_ERROR_KEY,
+  MD_WRITE_TIMEOUT_MS,
+  mdDownloadPath,
+  mdStem,
+  mergeBackupConversations,
+  noteExportDownload,
+  OPENAI_CALL_WINDOW_MS,
+  OPENAI_CALLS_PER_MINUTE,
+  OPENAI_FILE_LOOKUP_CALLS,
+  OPENAI_METADATA_CALLS,
+  OPENAI_PAGE_LOAD_CALLS,
+  parseArtifactRefs,
+  parseFileRefs,
+  parseImageRefs,
+  projectIdFromLocation,
+  readBatchJob,
+  readExportIndex,
+  recordExportedConversation,
+  rememberBatchJob,
+  reportFailure,
+  resumeSavedBatch,
+  revealExportFolder,
+  runBatchExport,
+  sanitizeFilenamePart,
+  sanitizeLogText,
+  saveConversationExport,
+  searchCompletedDownloadPaths,
+  showSavedBatch,
+  splitFilenameExtension,
+  stampsInPaths,
+  syncBatchOptions,
+  waitForDownloadComplete,
+  waitWhilePaused,
+  writeBatchJob,
+  ZIP_BYTE_BUDGET,
+  ZIP_WRITE_TIMEOUT_MS,
+};

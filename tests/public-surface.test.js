@@ -250,7 +250,7 @@ test('shipped JavaScript has no network, storage, or analytics calls', () => {
   assert.match(contentJs, /fetchImageDataUrls/, 'fetch must be wrapped in fetchImageDataUrls');
 });
 
-test('CI is read-only and pins every action by full commit SHA', () => {
+test('PR quality CI is read-only and pins every action by full commit SHA', () => {
   const workflow = read('.github/workflows/ci.yml');
   assert.match(workflow, /permissions:\s*\n\s+contents: read/);
   assert.doesNotMatch(workflow, /pull_request_target/);

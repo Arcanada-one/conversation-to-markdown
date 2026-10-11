@@ -2,6 +2,7 @@
 .github/CODEOWNERS
 .github/dependabot.yml
 .github/workflows/ci.yml
+.github/workflows/release.yml
 .gitignore
 AGENTS.md
 CHANGELOG.md
@@ -34,6 +35,7 @@ popup.html
 popup.js
 public-files.allowlist
 scripts/build-runtime.mjs
+scripts/prepare-release.mjs
 server.js
 site.js
 src/content/artifacts.mjs
@@ -63,6 +65,7 @@ tests/manifest.test.js
 tests/package.test.js
 tests/popup.test.js
 tests/public-surface.test.js
+tests/release.test.js
 tests/server.test.js
 tests/sidebar.test.js
 tests/site.test.js

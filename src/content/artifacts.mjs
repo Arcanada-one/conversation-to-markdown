@@ -50,6 +50,42 @@ async function fetchSessionToken(fetchImpl) {
   }
 }
 
+/** Scalars for a skip decision, or null when this body cannot support one.
+ *
+ *  A modern conversations payload can be a single page. Counting that page as
+ *  the whole conversation makes the next full count look like a shrink, and the
+ *  chat is exported again on every run. page_info that names another page
+ *  withholds messageCount. updateTime and currentNode are still returned when
+ *  the body has them. A body with none of the three is null, never a zeroed
+ *  shape that could be read as "nothing changed". */
+function metadataFromConversationBody(body) {
+  if (!body || typeof body !== 'object') return null;
+  const updateTime =
+    typeof body.update_time === 'number' && Number.isFinite(body.update_time) ? body.update_time : null;
+  const currentNode = body.current_node ? String(body.current_node) : null;
+  const paged = !body.mapping && body.page_info && (body.page_info.has_previous_page || body.page_info.has_next_page);
+  let messageCount = null;
+  if (!paged && body.mapping && typeof body.mapping === 'object') {
+    // Count MESSAGES, not mapping nodes. The measured thread reported 1147 nodes
+    // and 1146 messages: branch points and system nodes carry no message body.
+    messageCount = 0;
+    for (const key of Object.keys(body.mapping)) {
+      if (body.mapping[key] && body.mapping[key].message) messageCount += 1;
+    }
+  } else if (!paged && Array.isArray(body.messages)) {
+    messageCount = 0;
+    for (const message of body.messages) {
+      if (message) messageCount += 1;
+    }
+  }
+  if (updateTime === null && !currentNode && messageCount === null) return null;
+  return {
+    updateTime: updateTime,
+    currentNode: currentNode,
+    messageCount: messageCount,
+  };
+}
+
 /** Read just enough of a conversation to decide whether it needs exporting.
  *
  *  Walking a conversation to find out whether it grew is the expensive way to
@@ -57,6 +93,12 @@ async function fetchSessionToken(fetchImpl) {
  *  finished. The page's own endpoint answers it in one request, so a batch that
  *  re-runs over 800 conversations can skip the unchanged ones in milliseconds
  *  each instead of re-reading them all.
+ *
+ *  The legacy conversation endpoint is tried first. When it does not answer,
+ *  the app-shell conversations endpoint is tried. That fallback was observed
+ *  on the live site, 2026-10-09, for artifact reads: the new endpoint returns
+ *  messages directly and may return only one page. A one-page count is not
+ *  stored as messageCount.
  *
  *  Returns null when the answer could not be read — never a zeroed shape. "I
  *  could not tell" must not be usable as "nothing changed", because that
@@ -72,36 +114,23 @@ async function fetchConversationMetadata(conversationId, options) {
   if (!doFetch || !conversationId) return null;
   const token = opts.token !== undefined ? opts.token : await fetchSessionToken(doFetch);
   if (!token) return null;
+  const init = {
+    credentials: 'include',
+    headers: { accept: 'application/json', Authorization: 'Bearer ' + token },
+  };
+  const id = encodeURIComponent(conversationId);
+  let meta = null;
   try {
-    const response = await doFetch('/backend-api/conversation/' + encodeURIComponent(conversationId), {
-      credentials: 'include',
-      headers: { accept: 'application/json', Authorization: 'Bearer ' + token },
-    });
-    if (!response || !response.ok) return null;
-    const body = await response.json();
-    if (!body || typeof body !== 'object') return null;
-    const updateTime =
-      typeof body.update_time === 'number' && Number.isFinite(body.update_time) ? body.update_time : null;
-    const currentNode = body.current_node ? String(body.current_node) : null;
-    if (
-      updateTime === null &&
-      !currentNode &&
-      (!body.mapping || typeof body.mapping !== 'object' || !Object.keys(body.mapping).length)
-    )
-      return null;
-    // Count MESSAGES, not mapping nodes. The measured thread reported 1147 nodes
-    // and 1146 messages: branch points and system nodes carry no message body.
-    // A count compared against a differently-derived one is not a comparison.
-    let messageCount = 0;
-    const mapping = body.mapping || {};
-    for (const key of Object.keys(mapping)) {
-      if (mapping[key] && mapping[key].message) messageCount += 1;
-    }
-    return {
-      updateTime: updateTime,
-      currentNode: currentNode,
-      messageCount: messageCount,
-    };
+    const response = await doFetch('/backend-api/conversation/' + id, init);
+    if (response && response.ok) meta = metadataFromConversationBody(await response.json());
+  } catch (_e) {
+    meta = null;
+  }
+  if (meta) return meta;
+  try {
+    const modern = await doFetch('/backend-api/conversations/' + id + '?num_turns=10&include_has_versions=true', init);
+    if (!modern || !modern.ok) return null;
+    return metadataFromConversationBody(await modern.json());
   } catch (_e) {
     return null;
   }

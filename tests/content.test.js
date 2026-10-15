@@ -2811,6 +2811,146 @@ test('waitForConversationReady resolves when message content mounts', async () =
   }
 });
 
+function conversationRetryDocument(withTurn) {
+  const button = {
+    textContent: 'Retry',
+    disabled: false,
+    clicked: 0,
+    click() {
+      button.clicked += 1;
+    },
+    querySelector() {
+      return null;
+    },
+    getAttribute() {
+      return null;
+    },
+  };
+  const focus = {
+    querySelector() {
+      return null;
+    },
+    querySelectorAll(selector) {
+      return selector === 'button' ? [button] : [];
+    },
+  };
+  const page = {
+    getAttribute(name) {
+      return name === 'data-app-shell-active-page' ? 'true' : null;
+    },
+    querySelector(selector) {
+      if (selector === '[data-app-shell-focus-area="main"]') return focus;
+      if (withTurn && (selector === '[data-turn-id]' || selector === '[data-message-author-role]')) return { id: 't' };
+      return null;
+    },
+    querySelectorAll(selector) {
+      if (selector === 'button') return [button];
+      return [];
+    },
+  };
+  return {
+    button,
+    querySelector(selector) {
+      return selector === '[data-app-shell-active-page]' ? page : null;
+    },
+    querySelectorAll(selector) {
+      return selector === '[data-app-shell-active-page]' ? [page] : [];
+    },
+  };
+}
+
+test('the conversation Retry screen is a rate limit, and a loaded thread is not', async () => {
+  const previousDocument = global.document;
+  const previousLocation = global.location;
+  const retrying = conversationRetryDocument(false);
+  global.location = { pathname: '/c/conv123' };
+  global.document = retrying;
+  try {
+    assert.equal(parser.findConversationRetryControl(retrying), retrying.button);
+    const limited = await parser.waitForConversationReady({
+      conversationId: 'conv123',
+      timeoutMs: 2000,
+      pollMs: 20,
+    });
+    assert.equal(limited.ready, false);
+    assert.equal(limited.rateLimited, true);
+    assert.match(limited.error, /rate limit/);
+    assert.equal(parser.clickConversationRetry(), true);
+    assert.equal(retrying.button.clicked, 1);
+
+    // Positive control: the same panel with a turn is the conversation, and
+    // must not be reported as a limit or clicked.
+    const loaded = conversationRetryDocument(true);
+    global.document = loaded;
+    assert.equal(parser.findConversationRetryControl(loaded), null);
+    const ready = await parser.waitForConversationReady({
+      conversationId: 'conv123',
+      timeoutMs: 2000,
+      pollMs: 20,
+    });
+    assert.equal(ready.ready, true);
+    assert.equal(ready.rateLimited, undefined);
+  } finally {
+    global.document = previousDocument;
+    global.location = previousLocation;
+  }
+});
+
+test('getConversationMarkdown reports the Retry screen instead of an empty conversation', async () => {
+  const previousDocument = global.document;
+  const previousLocation = global.location;
+  const retrying = conversationRetryDocument(false);
+  global.location = { pathname: '/c/conv123' };
+  global.document = retrying;
+  try {
+    const result = await parser.getConversationMarkdown({ downloadFiles: false });
+    assert.equal(result.ok, false);
+    assert.equal(result.rateLimited, true);
+    assert.match(result.error, /rate limit/);
+  } finally {
+    global.document = previousDocument;
+    global.location = previousLocation;
+  }
+});
+
+test('a zero content timeout does not wait out an empty page', { timeout: 1000 }, async () => {
+  // `timeoutMs: 0` is the single-export probe. Treating 0 as "missing" waits
+  // the 30s default on every conversation that has not mounted yet.
+  const previousDocument = global.document;
+  const previousLocation = global.location;
+  global.location = { pathname: '/c/conv123' };
+  global.document = {
+    querySelector() {
+      return null;
+    },
+    querySelectorAll() {
+      return [];
+    },
+  };
+  try {
+    const empty = await parser.waitForConversationReady({
+      conversationId: 'conv123',
+      timeoutMs: 0,
+      pollMs: 50,
+    });
+    assert.equal(empty.ready, false);
+    assert.equal(empty.rateLimited, undefined);
+    assert.match(empty.error, /did not load/);
+
+    // Positive control: messages already on the page are ready at once.
+    global.document = conversationRetryDocument(true);
+    const ready = await parser.waitForConversationReady({
+      conversationId: 'conv123',
+      timeoutMs: 0,
+      pollMs: 50,
+    });
+    assert.equal(ready.ready, true);
+  } finally {
+    global.document = previousDocument;
+    global.location = previousLocation;
+  }
+});
+
 test('waitForConversationReady times out when navigation never arrives', async () => {
   const previousDocument = global.document;
   const previousLocation = global.location;
@@ -4050,6 +4190,76 @@ test('unreadable metadata returns null rather than a shape that reads as unchang
     fetchImpl: async () => ({ ok: true, json: async () => ({ accessToken: 't' }) }),
   });
   assert.equal(noId, null, 'no conversation id means no answer');
+});
+
+test('metadata falls back to the app-shell endpoint and does not count a partial page', async () => {
+  const calls = [];
+  const modern = await parser.fetchConversationMetadata('conv-1', {
+    token: 't',
+    fetchImpl: async (url) => {
+      calls.push(url);
+      if (String(url).indexOf('/backend-api/conversations/') !== -1) {
+        return {
+          ok: true,
+          json: async () => ({
+            update_time: 40,
+            current_node: 'node-modern',
+            messages: [{ id: 'm1' }, { id: 'm2' }],
+            page_info: { has_previous_page: false, has_next_page: false },
+          }),
+        };
+      }
+      return { ok: false, status: 404 };
+    },
+  });
+  assert.equal(modern.updateTime, 40);
+  assert.equal(modern.currentNode, 'node-modern');
+  assert.equal(modern.messageCount, 2);
+  assert.ok(calls.some((url) => String(url).indexOf('/backend-api/conversations/') !== -1));
+
+  // Positive control: the legacy body already answered, so the paged endpoint
+  // is not asked. A fallback that always ran would still produce the count
+  // above and hide a deleted fallback.
+  const legacyCalls = [];
+  const legacy = await parser.fetchConversationMetadata('conv-1', {
+    token: 't',
+    fetchImpl: async (url) => {
+      legacyCalls.push(url);
+      return {
+        ok: true,
+        json: async () => ({
+          update_time: 10,
+          current_node: 'node-legacy',
+          mapping: { a: { message: { id: 'a' } } },
+        }),
+      };
+    },
+  });
+  assert.equal(legacy.messageCount, 1);
+  assert.equal(
+    legacyCalls.some((url) => String(url).indexOf('/backend-api/conversations/') !== -1),
+    false,
+    legacyCalls.join(' | '),
+  );
+
+  const paged = await parser.fetchConversationMetadata('conv-1', {
+    token: 't',
+    fetchImpl: async (url) => {
+      if (String(url).indexOf('/backend-api/conversations/') === -1) return { ok: false, status: 404 };
+      return {
+        ok: true,
+        json: async () => ({
+          update_time: 50,
+          current_node: 'node-page',
+          messages: [{ id: 'only-page' }],
+          page_info: { has_previous_page: true, has_next_page: false },
+        }),
+      };
+    },
+  });
+  assert.equal(paged.updateTime, 50);
+  assert.equal(paged.currentNode, 'node-page');
+  assert.equal(paged.messageCount, null, 'a partial page must not become the stored message count');
 });
 
 test('a sandbox: link in the message body is resolved and downloaded', async () => {

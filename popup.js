@@ -28,6 +28,8 @@
     OPENAI_FILE_LOOKUP_CALLS: () => OPENAI_FILE_LOOKUP_CALLS,
     OPENAI_METADATA_CALLS: () => OPENAI_METADATA_CALLS,
     OPENAI_PAGE_LOAD_CALLS: () => OPENAI_PAGE_LOAD_CALLS,
+    RATE_LIMIT_RETRY_CLICKS: () => RATE_LIMIT_RETRY_CLICKS,
+    RATE_LIMIT_RETRY_WAIT_MS: () => RATE_LIMIT_RETRY_WAIT_MS,
     ZIP_BYTE_BUDGET: () => ZIP_BYTE_BUDGET,
     ZIP_WRITE_TIMEOUT_MS: () => ZIP_WRITE_TIMEOUT_MS,
     addZipEntry: () => addZipEntry,
@@ -81,6 +83,7 @@
     stampsInPaths: () => stampsInPaths,
     syncBatchOptions: () => syncBatchOptions,
     waitForDownloadComplete: () => waitForDownloadComplete,
+    waitForLoadedConversation: () => waitForLoadedConversation,
     waitWhilePaused: () => waitWhilePaused,
     writeBatchJob: () => writeBatchJob
   });
@@ -547,6 +550,9 @@
     var listResult = await chrome.scripting.executeScript({
       target: { tabId },
       func: async function() {
+        if (typeof window !== "undefined") {
+          window.__c2mScan = window.__c2mScan || { cancelled: false, captured: 0, observed: 0, elapsedMs: 0 };
+        }
         if (typeof collectSidebarConversations === "function") {
           return await collectSidebarConversations();
         }
@@ -893,7 +899,7 @@ Re-run to complete it.` : "")
         var complete = [];
         for (var dir in dirs) {
           var row = dirs[dir];
-          if (row.page && row.marker && row.page.exists === true && row.marker.exists === true && row.page.state === "complete" && row.marker.state === "complete" && typeof row.page.id === "number" && typeof row.marker.id === "number" && row.marker.id > row.page.id) {
+          if (row.page && row.marker && row.page.exists !== false && row.marker.exists !== false && row.page.state === "complete" && row.marker.state === "complete" && typeof row.page.id === "number" && typeof row.marker.id === "number" && row.marker.id > row.page.id) {
             complete.push(row.marker.filename);
           }
         }
@@ -1299,6 +1305,8 @@ Re-run to complete it.` : "")
   }
   var OPENAI_CALLS_PER_MINUTE = 30;
   var OPENAI_CALL_WINDOW_MS = 60000;
+  var RATE_LIMIT_RETRY_WAIT_MS = OPENAI_CALL_WINDOW_MS;
+  var RATE_LIMIT_RETRY_CLICKS = 5;
   var OPENAI_PAGE_LOAD_CALLS = 4;
   var OPENAI_METADATA_CALLS = 2;
   var OPENAI_FILE_LOOKUP_CALLS = 2;
@@ -1359,6 +1367,55 @@ Re-run to complete it.` : "")
   }
 
   // src/popup/batch.mjs
+  async function sleepUnlessStopped(ms, guard) {
+    var left = ms > 0 ? ms : 0;
+    while (left > 0) {
+      if (!await waitWhilePaused(guard))
+        return false;
+      var step = left > 1000 ? 1000 : left;
+      await sleep(step);
+      left -= step;
+    }
+    return !(guard && guard.isCancelled && guard.isCancelled());
+  }
+  async function waitForLoadedConversation(tabId, conversationId, hooks) {
+    var guard = hooks || {};
+    var clicks = 0;
+    var limit = typeof guard.maxClicks === "number" ? guard.maxClicks : RATE_LIMIT_RETRY_CLICKS;
+    var waitMs = typeof guard.waitMs === "number" ? guard.waitMs : RATE_LIMIT_RETRY_WAIT_MS;
+    while (true) {
+      var readyResult = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: async function(id, timeoutMs) {
+          if (typeof waitForConversationReady !== "function") {
+            return { ready: false, error: "waitForConversationReady is unavailable." };
+          }
+          return await waitForConversationReady({ conversationId: id, timeoutMs });
+        },
+        args: [conversationId, guard.contentTimeoutMs == null ? 30000 : guard.contentTimeoutMs]
+      });
+      var ready = readyResult && readyResult[0] && readyResult[0].result;
+      if (!ready)
+        return { ready: false, error: "did not load" };
+      if (ready.ready || !ready.rateLimited)
+        return ready;
+      if (clicks >= limit)
+        return ready;
+      if (guard.onWait)
+        guard.onWait(clicks + 1, waitMs);
+      if (!await sleepUnlessStopped(waitMs, guard))
+        return { ready: false, error: "cancelled" };
+      clicks += 1;
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        func: function() {
+          if (typeof clickConversationRetry === "function")
+            return clickConversationRetry();
+          return false;
+        }
+      });
+    }
+  }
   async function runBatchExport(tab, options) {
     var downloadImages = options.downloadImages;
     var useTimestamp = options.useTimestamp;
@@ -1434,11 +1491,25 @@ Re-run to complete it.` : "")
     for (var m = 0;m < markdownPending.length; m++) {
       markdownPendingKeys[markdownPending[m].id || markdownPending[m].slug] = true;
     }
-    var pending = conversations;
+    function requestedFilesLanded(conv) {
+      var htmlMissing = wantHtmlRun && (!htmlHistoryKnown || !htmlChatLanded(conv, htmlCompletePaths));
+      var markdownMissing = wantMarkdown && markdownPendingKeys[conv.id || conv.slug];
+      return !htmlMissing && !markdownMissing;
+    }
+    var notYetSaved = [];
+    var alreadySaved = [];
+    for (var order = 0;order < conversations.length; order++) {
+      if (requestedFilesLanded(conversations[order]))
+        alreadySaved.push(conversations[order]);
+      else
+        notYetSaved.push(conversations[order]);
+    }
+    var pending = notYetSaved.concat(alreadySaved);
     var exported = 0;
     var errors = [];
     var indexSkipped = 0;
     var grown = 0;
+    var leftClosed = 0;
     var retried = 0;
     var held = 0;
     var partial = 0;
@@ -1455,7 +1526,12 @@ Re-run to complete it.` : "")
     pushLogEvent(runLog, {
       phase: "run",
       outcome: "started",
-      counts: { listed: conversations.length, pending: pending.length, discovered }
+      counts: {
+        listed: conversations.length,
+        pending: pending.length,
+        discovered,
+        notOnDisk: notYetSaved.length
+      }
     });
     var logOk = true;
     var logError = null;
@@ -1524,21 +1600,8 @@ Re-run to complete it.` : "")
     }
     async function readConversationMetadata(tabId, conv) {
       try {
-        await callQuota.take(OPENAI_PAGE_LOAD_CALLS);
-        var navigated = await async function() {
-          await chrome.scripting.executeScript({
-            target: { tabId },
-            func: function(href) {
-              window.location.href = href;
-            },
-            args: [conv.href]
-          });
-          return await waitForTabNavigation(tabId, conv.id, 30000);
-        }();
-        if (!navigated)
-          return null;
-        await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
         await callQuota.take(OPENAI_METADATA_CALLS);
+        await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
         var out = await chrome.scripting.executeScript({
           target: { tabId },
           func: async function(conversationId) {
@@ -1569,25 +1632,26 @@ Re-run to complete it.` : "")
         target: { tabId: tab.id },
         files: ["content.js"]
       });
-      var readyResult = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: async function(conversationId) {
-          if (typeof waitForConversationReady === "function") {
-            return await waitForConversationReady({ conversationId, timeoutMs: 30000 });
-          }
-          return { ready: false, error: "waitForConversationReady is unavailable." };
-        },
-        args: [conv.id]
+      state.scanningTabId = tab.id;
+      var ready = await waitForLoadedConversation(tab.id, conv.id, {
+        isCancelled: controls.isCancelled,
+        isPaused: controls.isPaused,
+        onWait: function() {
+          if (onProgress)
+            onProgress(index, pending.length, progressTitle + " — waiting for ChatGPT");
+        }
       });
-      var ready = readyResult?.[0]?.result;
       if (!ready || !ready.ready) {
-        return { ok: false, error: ready && ready.error || "did not load" };
+        return {
+          ok: false,
+          error: ready && ready.error || "did not load",
+          rateLimited: !!(ready && ready.rateLimited)
+        };
       }
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         files: ["content.js"]
       });
-      state.scanningTabId = tab.id;
       startProgressPolling(tab.id);
       var results;
       try {
@@ -1634,22 +1698,29 @@ Re-run to complete it.` : "")
       var liveMeta = null;
       var grewThisRound = false;
       var verdict = null;
+      var filesLanded = requestedFilesLanded(conv);
       if (exportIndex) {
         liveMeta = await readConversationMetadata(tab.id, conv);
         verdict = classifyAgainstIndex(exportIndex, conv.id, liveMeta).verdict;
-        if (verdict === "unchanged") {
-          var htmlMissing = wantHtmlRun && (!htmlHistoryKnown || !htmlChatLanded(conv, htmlCompletePaths));
-          var markdownMissing = wantMarkdown && markdownPendingKeys[conv.id || conv.slug];
-          if (!htmlMissing && !markdownMissing) {
-            indexSkipped += 1;
-            pushLogEvent(runLog, {
-              phase: "skip",
-              outcome: "unchanged",
-              conversationId: conv.id,
-              title: conv.title
-            });
-            continue;
-          }
+        if (verdict === "unchanged" && filesLanded) {
+          indexSkipped += 1;
+          pushLogEvent(runLog, {
+            phase: "skip",
+            outcome: "unchanged",
+            conversationId: conv.id,
+            title: conv.title
+          });
+          continue;
+        }
+        if ((!liveMeta || verdict === "unknown") && filesLanded) {
+          leftClosed += 1;
+          pushLogEvent(runLog, {
+            phase: "skip",
+            outcome: "file-landed",
+            conversationId: conv.id,
+            title: conv.title
+          });
+          continue;
         }
         if (verdict === "grown") {
           grewThisRound = true;
@@ -1671,6 +1742,8 @@ Re-run to complete it.` : "")
           };
         }
         if (outcome.ok)
+          break;
+        if (outcome.rateLimited)
           break;
         lastError = outcome.error;
         var kind = classifyBatchFailure(lastError);
@@ -1704,6 +1777,18 @@ Re-run to complete it.` : "")
       if (controls.isCancelled())
         break;
       if (!outcome || !outcome.ok) {
+        if (outcome && outcome.rateLimited) {
+          errors.push("ChatGPT rate limit: waited and retried, and the conversation page still asked to retry. Resume later; opening more chats would keep the limit in place.");
+          pushLogEvent(runLog, {
+            level: "error",
+            phase: "conversation",
+            outcome: "rate-limit",
+            conversationId: conv.id,
+            title: conv.title,
+            message: outcome.error
+          });
+          break;
+        }
         errors.push((conv.title || conv.id) + ": " + (lastError || "failed"));
         pushLogEvent(runLog, {
           level: "error",
@@ -1929,7 +2014,7 @@ Re-run to complete it.` : "")
     pushLogEvent(runLog, {
       phase: "run",
       outcome: controls.isCancelled() ? "cancelled" : "finished",
-      counts: { exported, unchanged: indexSkipped, partial }
+      counts: { exported, unchanged: indexSkipped, partial, leftClosed }
     });
     var finishedLog = await flushRunLog(runLog, state.activeRunLogOptions);
     if (!finishedLog.ok && logOk) {
@@ -1950,6 +2035,7 @@ Re-run to complete it.` : "")
       total: conversations.length,
       exported,
       unchanged: indexSkipped,
+      leftClosed,
       grown,
       retried,
       partial,
@@ -2058,6 +2144,9 @@ Re-run to complete it.` : "")
       if (batchResult.unchanged > 0) {
         summary += ", " + batchResult.unchanged + " unchanged";
       }
+      if (batchResult.leftClosed > 0) {
+        summary += ", " + batchResult.leftClosed + " already on disk and left closed";
+      }
       if (batchResult.discovered > 0) {
         summary += ", " + batchResult.discovered + (batchResult.discovered === 1 ? " new chat on the sidebar" : " new chats on the sidebar");
       }
@@ -2070,7 +2159,8 @@ Re-run to complete it.` : "")
       if (batchResult.cancelled)
         summary += " — stopped early";
       if (!batchResult.listComplete) {
-        summary += `
+        summary += batchResult.listReason === "history-rate-limited" ? `
+ChatGPT could not load the rest of the sidebar. The export waited and retried; run it again after history loads.` : `
 Scroll the sidebar to the end and re-run to pick up anything missing.`;
       }
       if (batchResult.zipName)
@@ -2232,6 +2322,23 @@ Errors: ` + batchResult.errors.join("; ");
         files: ["content.js"]
       });
       state.scanningTabId = tab.id;
+      var loaded = await waitForLoadedConversation(tab.id, conversationIdFromLocation(tab.url), {
+        contentTimeoutMs: 0,
+        isCancelled: function() {
+          return state.batchCancelled;
+        },
+        isPaused: function() {
+          return false;
+        },
+        onWait: function() {
+          btn.textContent = "Waiting for ChatGPT…";
+        }
+      });
+      if (loaded.error === "cancelled" || loaded.rateLimited && !loaded.ready) {
+        btnCancel.classList.remove("visible");
+        showStatus(loaded.error === "cancelled" ? "warning" : "error", loaded.error === "cancelled" ? "Stopped." : loaded.error || "Could not load this conversation.");
+        return;
+      }
       startProgressPolling(tab.id);
       const results = await chrome.scripting.executeScript({
         target: { tabId: tab.id },

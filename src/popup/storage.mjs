@@ -185,6 +185,11 @@ async function readSidebarConversations(tabId) {
   var listResult = await chrome.scripting.executeScript({
     target: { tabId: tabId },
     func: async function () {
+      // Stop during the history Retry wait reads this flag. The walk sleeps
+      // in one-second slices, so the flag has to exist before the first slice.
+      if (typeof window !== 'undefined') {
+        window.__c2mScan = window.__c2mScan || { cancelled: false, captured: 0, observed: 0, elapsedMs: 0 };
+      }
       // Scroll the virtualized sidebar so every row mounts. The one-frame
       // reader is the fallback only: it can return a subset, and a subset
       // exported as "the whole Project" is invisible to the user.
@@ -305,8 +310,10 @@ function recordExportedConversation(conversationId, record) {
 /** Compare a conversation's live metadata against what the index remembers.
  *
  *  Verdicts: 'new' (never exported), 'unchanged' (skip), 'grown' (re-export),
- *  'unknown' (metadata unreadable — export, because an unreadable answer is not
- *  an unchanged conversation).
+ *  'unknown' (metadata unreadable). Unknown is not unchanged. The batch exports
+ *  it when no finished file is on disk. A finished file stays closed for a
+ *  later run that can read the metadata, and this function does not record
+ *  that file as unchanged.
  *
  *  A message count that went DOWN also returns 'grown': a switched branch or a
  *  deleted turn means the saved file no longer matches the conversation, and

@@ -62,14 +62,23 @@ one cited file was not downloaded.
 ## Project exports
 
 Batch mode walks the conversation list visible through the Project sidebar and
-navigates the current tab through those conversations. With the HTML option
+navigates the current tab through those conversations. If ChatGPT shows a Retry
+screen instead of the conversation, the export waits, clicks Retry, and continues
+when the thread loads. While that screen remains, the batch does not open the
+next chat. With the HTML option
 off, it turns file saving on and holds it there. With **Save a static HTML site**
 on, that markdown option stays yours, and a markdown file Chrome does not
 finish does not drop the HTML page. The toolbar button opens a side panel, which stays open while you use the page. Pause stores the batch: you can close the panel and resume it later, including on another day. Cancel stops the run and keeps what already landed.
-A restarted or resumed batch checks live metadata against a local index to avoid
-re-exporting unchanged conversations. Without an index entry, it exports again:
-an old filename cannot prove that a chat has not changed. Incomplete exports are not recorded as
-complete; a failed attachment, HTML page, or HTML index remains eligible for retry.
+A restarted or resumed batch reads live metadata from the already-open ChatGPT
+tab and does not open a chat only to make that check. An unchanged chat whose
+finished file is still in download history is left closed. Chats that are not
+on disk are exported before chats that already are, so a stop on the Retry
+screen continues from the unfinished ones. A finished file whose metadata
+cannot be read is left closed and is not recorded as unchanged. A missing file,
+a partial save, or metadata that shows the chat changed is exported. A finished
+file with readable metadata and no index entry is exported once, so the index
+can be written. Incomplete exports are not recorded as complete; a failed
+attachment, HTML page, or HTML index remains eligible for retry.
 Pause becomes available after the conversation list is stored. If local storage
 fails, the panel warns that closing it cannot preserve the run. A new sync walks the sidebar. Resume keeps the saved list and also
 checks the open sidebar, adding chats in the saved job's projects that appeared since the pause and keeping

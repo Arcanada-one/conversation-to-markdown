@@ -5,6 +5,47 @@ All notable changes to Conversation to Markdown are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.1] — 2026-10-14
+
+### Changed
+
+- A version tag on `main` publishes a stable GitHub release marked Latest. The
+  asset is the extension ZIP built from that commit, with its checksum. Uploading
+  that ZIP to the Chrome Web Store stays a separate step.
+- Development builds bundle the content and popup scripts with Bun. The
+  extension package still has no runtime dependencies, and an unpacked install
+  still needs no build step.
+- When ChatGPT shows a Retry screen instead of the conversation, or a settled
+  history Retry control in the sidebar, the export waits one minute and clicks
+  that Retry button. It continues once the conversation is on the page. It tries
+  up to five times. If the screen remains, the batch stops before the next
+  conversation and stays resumable. The page measured on 2026-10-14 said
+  "Could not load this ChatGPT conversation" and "Unable to load history". It
+  did not say "rate limit" and it showed no countdown. Recovery time was not
+  measured. The wait is the existing 60-second call window.
+- A resumed export reads conversation metadata from the ChatGPT tab that is
+  already open. It does not open a chat only to decide whether that chat
+  changed. Chats with no finished file are exported before chats that already
+  have one, so a stop on the Retry screen continues from the unfinished list.
+  A finished file whose metadata cannot be read is left closed and is not
+  recorded as unchanged. The next run that can read the metadata still compares
+  it. A missing file, a partial file, or metadata that differs is exported.
+  The metadata read uses the app-shell conversations endpoint when the older
+  conversation endpoint does not answer. A page of that response is not stored
+  as the full message count.
+
+### Verification and limitations
+
+- The Retry wait is covered by fixtures taken from that page. It has not been
+  walked against a live chatgpt.com tab that ChatGPT is currently refusing.
+- The resume order is covered by fixtures. It has not been walked against a
+  live chatgpt.com account that is currently showing the Retry screen.
+- On 2026-10-14 a public extension mirror listed 1.6.6 as the store version,
+  updated 2026-09-27. The Chrome Web Store page redirected to a consent wall, so
+  the publisher dashboard was not read. The 2026-10-09 notes record 1.6.9 as
+  submitted and waiting for approval, and 1.7.0 as not submitted. 1.7.1 is
+  greater than those versions. This version has not been submitted.
+
 ## [1.7.0] — 2026-10-09
 
 ### Added

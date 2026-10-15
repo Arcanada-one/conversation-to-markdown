@@ -18,10 +18,12 @@
   var exports_export = {};
   __export(exports_export, {
     ATTACHMENT_CHIP_SELECTORS: () => ATTACHMENT_CHIP_SELECTORS,
+    RATE_LIMIT_PAGE_ERROR: () => RATE_LIMIT_PAGE_ERROR,
     UNPREVIEWABLE_FORMATS: () => UNPREVIEWABLE_FORMATS,
     activeConversationRoot: () => activeConversationRoot,
     appendPanelArtifacts: () => appendPanelArtifacts,
     buildConversationMarkdown: () => buildConversationMarkdown,
+    clickConversationRetry: () => clickConversationRetry,
     collectButtonDownloads: () => collectButtonDownloads,
     collectSidebarConversations: () => collectSidebarConversations,
     dedupeNamed: () => dedupeNamed,
@@ -42,6 +44,8 @@
     filterButtonsAgainstPanel: () => filterButtonsAgainstPanel,
     findButtonsByScrolling: () => findButtonsByScrolling,
     findCollapsedProjectRows: () => findCollapsedProjectRows,
+    findConversationRetryControl: () => findConversationRetryControl,
+    findHistoryRetryControl: () => findHistoryRetryControl,
     findScrollContainer: () => findScrollContainer,
     findShowMoreControl: () => findShowMoreControl,
     findSidebarScroller: () => findSidebarScroller,
@@ -503,6 +507,34 @@ $$
       return null;
     }
   }
+  function metadataFromConversationBody(body) {
+    if (!body || typeof body !== "object")
+      return null;
+    const updateTime = typeof body.update_time === "number" && Number.isFinite(body.update_time) ? body.update_time : null;
+    const currentNode = body.current_node ? String(body.current_node) : null;
+    const paged = !body.mapping && body.page_info && (body.page_info.has_previous_page || body.page_info.has_next_page);
+    let messageCount = null;
+    if (!paged && body.mapping && typeof body.mapping === "object") {
+      messageCount = 0;
+      for (const key of Object.keys(body.mapping)) {
+        if (body.mapping[key] && body.mapping[key].message)
+          messageCount += 1;
+      }
+    } else if (!paged && Array.isArray(body.messages)) {
+      messageCount = 0;
+      for (const message of body.messages) {
+        if (message)
+          messageCount += 1;
+      }
+    }
+    if (updateTime === null && !currentNode && messageCount === null)
+      return null;
+    return {
+      updateTime,
+      currentNode,
+      messageCount
+    };
+  }
   async function fetchConversationMetadata(conversationId, options) {
     const opts = options || {};
     const doFetch = opts.fetchImpl || (typeof fetch === "function" ? fetch : null);
@@ -511,31 +543,26 @@ $$
     const token = opts.token !== undefined ? opts.token : await fetchSessionToken(doFetch);
     if (!token)
       return null;
+    const init = {
+      credentials: "include",
+      headers: { accept: "application/json", Authorization: "Bearer " + token }
+    };
+    const id = encodeURIComponent(conversationId);
+    let meta = null;
     try {
-      const response = await doFetch("/backend-api/conversation/" + encodeURIComponent(conversationId), {
-        credentials: "include",
-        headers: { accept: "application/json", Authorization: "Bearer " + token }
-      });
-      if (!response || !response.ok)
+      const response = await doFetch("/backend-api/conversation/" + id, init);
+      if (response && response.ok)
+        meta = metadataFromConversationBody(await response.json());
+    } catch (_e) {
+      meta = null;
+    }
+    if (meta)
+      return meta;
+    try {
+      const modern = await doFetch("/backend-api/conversations/" + id + "?num_turns=10&include_has_versions=true", init);
+      if (!modern || !modern.ok)
         return null;
-      const body = await response.json();
-      if (!body || typeof body !== "object")
-        return null;
-      const updateTime = typeof body.update_time === "number" && Number.isFinite(body.update_time) ? body.update_time : null;
-      const currentNode = body.current_node ? String(body.current_node) : null;
-      if (updateTime === null && !currentNode && (!body.mapping || typeof body.mapping !== "object" || !Object.keys(body.mapping).length))
-        return null;
-      let messageCount = 0;
-      const mapping = body.mapping || {};
-      for (const key of Object.keys(mapping)) {
-        if (mapping[key] && mapping[key].message)
-          messageCount += 1;
-      }
-      return {
-        updateTime,
-        currentNode,
-        messageCount
-      };
+      return metadataFromConversationBody(await modern.json());
     } catch (_e) {
       return null;
     }
@@ -2285,6 +2312,28 @@ $$
       return false;
     }
   }
+  function findHistoryRetryControl(doc) {
+    const root = doc || (typeof document !== "undefined" ? document : null);
+    if (!root || !root.querySelectorAll)
+      return null;
+    let nodes;
+    try {
+      nodes = root.querySelectorAll('nav [role="status"]');
+    } catch (_e) {
+      return null;
+    }
+    for (const node of nodes) {
+      if (node.getAttribute && node.getAttribute("aria-busy") === "true")
+        continue;
+      const button = node.querySelector ? node.querySelector("button") : null;
+      if (!button || typeof button.click !== "function")
+        continue;
+      if (button.querySelector && button.querySelector('a[href*="/c/"]'))
+        continue;
+      return button;
+    }
+    return null;
+  }
   function findShowMoreControl(doc) {
     const root = doc || (typeof document !== "undefined" ? document : null);
     if (!root || !root.querySelectorAll)
@@ -2326,6 +2375,19 @@ $$
   }
 
   // src/content/sidebar-walk.mjs
+  async function sleepUnlessRateLimitedCancelled(sleep, ms) {
+    let left = ms > 0 ? ms : 0;
+    while (left > 0) {
+      try {
+        if (typeof window !== "undefined" && window.__c2mScan && window.__c2mScan.cancelled)
+          return false;
+      } catch (_e) {}
+      const step = Math.min(left, 1000);
+      await sleep(step);
+      left -= step;
+    }
+    return true;
+  }
   async function collectSidebarConversations(options) {
     const supplied = options || {};
     const doc = supplied.doc || (typeof document !== "undefined" ? document : null);
@@ -2335,6 +2397,8 @@ $$
     const scrollStepRatio = supplied.scrollStepRatio || 0.5;
     const maxShowMoreClicks = supplied.maxShowMoreClicks === undefined ? 60 : supplied.maxShowMoreClicks;
     const showMoreSettleMs = supplied.showMoreSettleMs || 1200;
+    const rateLimitWaitMs = supplied.rateLimitWaitMs == null ? 60000 : supplied.rateLimitWaitMs;
+    const maxHistoryRetryClicks = supplied.maxHistoryRetryClicks == null ? 5 : supplied.maxHistoryRetryClicks;
     const expandProjects = supplied.expandProjects !== false;
     const maxProjectExpansions = supplied.maxProjectExpansions === undefined ? 40 : supplied.maxProjectExpansions;
     const projectSettleMs = supplied.projectSettleMs || 1400;
@@ -2517,6 +2581,7 @@ $$
     let reachedBottom = false;
     let coverageVerified = false;
     let showMoreClicks = 0;
+    let historyRetryClicks = 0;
     let barrenShowMoreClicks = 0;
     let showMoreExhausted = true;
     let tailReason = null;
@@ -2559,6 +2624,26 @@ $$
       }
       if (findShowMoreControl(doc))
         showMoreExhausted = false;
+      const historyRetry = findHistoryRetryControl(doc);
+      if (historyRetry && historyRetryClicks < maxHistoryRetryClicks) {
+        const waited = await sleepUnlessRateLimitedCancelled(sleep, rateLimitWaitMs);
+        if (!waited) {
+          blocked = true;
+          break;
+        }
+        let clickFailed = false;
+        try {
+          historyRetry.click();
+          historyRetryClicks += 1;
+        } catch (_e) {
+          clickFailed = true;
+        }
+        if (!clickFailed) {
+          await sleep(settleMs);
+          added += absorb();
+          quiet = 0;
+        }
+      }
       const nowTop = scroller.scrollTop || 0;
       const nowMaxTop = Math.max(0, (scroller.scrollHeight || 0) - (scroller.clientHeight || 0));
       const atBottom = nowTop >= nowMaxTop - 1;
@@ -2620,12 +2705,18 @@ $$
       projectsExhausted = false;
     if (!showMoreExhausted || !projectsExhausted)
       complete = false;
+    if (findHistoryRetryControl(doc)) {
+      complete = false;
+      tailReason = "history-rate-limited";
+    }
     try {
       scroller.scrollTop = startTop;
     } catch (_e) {}
     let reason;
     if (complete) {
       reason = "reached-end";
+    } else if (tailReason === "history-rate-limited") {
+      reason = tailReason;
     } else if (blocked) {
       reason = "scroll-blocked";
     } else if (!showMoreExhausted) {
@@ -2664,9 +2755,87 @@ $$
     });
     return active.length === 1 ? active[0] : null;
   }
+  function conversationHasMessages(root) {
+    if (!root || !root.querySelector)
+      return false;
+    if (root.querySelector("[data-turn-id]") || root.querySelector("[data-message-author-role]"))
+      return true;
+    return modernMessageSections(root).some(function(unit) {
+      return !!modernMessageRole(unit);
+    });
+  }
+  function retryButtonText(button) {
+    return String(button && button.textContent || "").replace(/\s+/g, " ").trim();
+  }
+  function loneActionButton(container) {
+    if (!container || !container.querySelectorAll)
+      return null;
+    let buttons;
+    try {
+      buttons = Array.from(container.querySelectorAll("button"));
+    } catch (_e) {
+      return null;
+    }
+    const usable = buttons.filter(function(button) {
+      if (!button || typeof button.click !== "function")
+        return false;
+      if (button.disabled)
+        return false;
+      if (button.getAttribute && button.getAttribute("aria-disabled") === "true")
+        return false;
+      if (button.querySelector && button.querySelector('a[href*="/c/"]'))
+        return false;
+      return retryButtonText(button).length > 0;
+    });
+    return usable.length === 1 ? usable[0] : null;
+  }
+  function findConversationRetryControl(doc) {
+    const root = doc || (typeof document !== "undefined" ? document : null);
+    if (!root || !root.querySelector)
+      return null;
+    const page = activeConversationRoot(root);
+    if (!page || !page.querySelector)
+      return null;
+    if (conversationHasMessages(page))
+      return null;
+    const focus = page.querySelector('[data-app-shell-focus-area="main"]');
+    const fromFocus = loneActionButton(focus);
+    if (fromFocus)
+      return fromFocus;
+    const main = page.querySelector("main") || page;
+    if (!main.querySelectorAll)
+      return null;
+    let buttons;
+    try {
+      buttons = Array.from(main.querySelectorAll("button"));
+    } catch (_e) {
+      return null;
+    }
+    const labeled = buttons.filter(function(button) {
+      return retryButtonText(button) === "Retry" && typeof button.click === "function" && !button.disabled;
+    });
+    return labeled.length === 1 ? labeled[0] : null;
+  }
+  function clickConversationRetry() {
+    const button = findConversationRetryControl(typeof document !== "undefined" ? document : null);
+    if (!button)
+      return false;
+    try {
+      button.click();
+      return true;
+    } catch (_e) {
+      return false;
+    }
+  }
+  var RATE_LIMIT_PAGE_ERROR = "ChatGPT rate limit: the conversation page asked to retry.";
+  function rateLimitPageError(doc) {
+    if (!findConversationRetryControl(doc || (typeof document !== "undefined" ? document : null)))
+      return null;
+    return { ok: false, error: RATE_LIMIT_PAGE_ERROR, rateLimited: true };
+  }
   function waitForConversationReady(options) {
     const supplied = options || {};
-    const timeoutMs = supplied.timeoutMs || 30000;
+    const timeoutMs = supplied.timeoutMs == null ? 30000 : supplied.timeoutMs;
     const pollMs = supplied.pollMs || 300;
     const conversationId = supplied.conversationId || null;
     return new Promise(function(resolve) {
@@ -2682,10 +2851,10 @@ $$
           }
         }
         const root = typeof document !== "undefined" ? activeConversationRoot(document) : null;
-        if (root && (root.querySelector("[data-turn-id]") || root.querySelector("[data-message-author-role]") || modernMessageSections(root).some(function(unit) {
-          return !!modernMessageRole(unit);
-        }))) {
+        if (conversationHasMessages(root))
           return resolve({ ready: true });
+        if (findConversationRetryControl(typeof document !== "undefined" ? document : null)) {
+          return resolve({ ready: false, rateLimited: true, error: RATE_LIMIT_PAGE_ERROR });
         }
         if (Date.now() - startedAt >= timeoutMs) {
           return resolve({ ready: false, error: "Conversation content did not load." });
@@ -2791,7 +2960,7 @@ $$
           md = prefixPartialNotice(md, scanMeta.reason);
       }
       if (!md)
-        return { ok: false, error: "No conversation found on this page." };
+        return rateLimitPageError(document) || { ok: false, error: "No conversation found on this page." };
       let attachmentsIncomplete = false;
       if (wantFiles) {
         const controller = typeof AbortController === "function" ? new AbortController : null;
@@ -2996,7 +3165,7 @@ $$
       return { ok: false, error: "Could not identify the active conversation. Try again after it loads." };
     var turns = turnsOnRoot(root);
     if (!turns.length)
-      return { ok: false, error: "No conversation found on this page." };
+      return rateLimitPageError(doc) || { ok: false, error: "No conversation found on this page." };
     var saved = [];
     var missing = [];
     var partial = !!opts.partial;

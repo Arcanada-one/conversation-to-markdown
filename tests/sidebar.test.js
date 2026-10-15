@@ -1079,3 +1079,158 @@ test('a conversation row is never mistaken for pagination', () => {
   assert.equal(parser.findShowMoreControl(convRow.doc), null,
     'a list item that IS a conversation row is not the control');
 });
+
+/** One mounted chat plus the measured history-failure status.
+ *  `clearOnClick` removes the status and mounts the chat that had not loaded.
+ *  Without that, the mounted row's own list structure would prove the tail,
+ *  which is what makes a "complete" verdict a real failure.
+ */
+function historyRetrySidebar(clearOnClick) {
+  let statusPresent = true;
+  const links = [];
+  function makeLink(id) {
+    const link = {
+      getAttribute(name) {
+        return name === 'href' ? '/c/' + id : null;
+      },
+      querySelector() {
+        return null;
+      },
+      textContent: id,
+      parentElement: null,
+      getBoundingClientRect() {
+        return { top: 0, bottom: 20, height: 20 };
+      },
+    };
+    const li = {
+      tagName: 'LI',
+      querySelector(selector) {
+        return typeof selector === 'string' && selector.indexOf('/c/') !== -1 ? link : null;
+      },
+      nextElementSibling: null,
+      parentElement: null,
+    };
+    link.parentElement = li;
+    return { link, li };
+  }
+  const kept = makeLink('kept');
+  const revealed = makeLink('revealed');
+  links.push(kept);
+  const tail = { tagName: 'LI', querySelector() { return null; }, nextElementSibling: null, parentElement: null };
+  kept.li.nextElementSibling = tail;
+  const button = {
+    textContent: 'Retry',
+    click() {
+      if (!clearOnClick) return;
+      statusPresent = false;
+      links.push(revealed);
+      revealed.li.nextElementSibling = tail;
+      kept.li.nextElementSibling = revealed.li;
+    },
+  };
+  const status = {
+    getAttribute(name) {
+      return name === 'aria-busy' ? 'false' : name === 'role' ? 'status' : null;
+    },
+    querySelector(selector) {
+      return selector === 'button' ? button : null;
+    },
+  };
+  const scroller = { scrollTop: 0, clientHeight: 100, scrollHeight: 100, parentElement: null };
+  const doc = {
+    querySelectorAll(selector) {
+      if (selector === 'nav li') {
+        const items = links.map((entry) => entry.li);
+        items.push(tail);
+        return items;
+      }
+      if (selector === 'nav [role="status"]') return statusPresent ? [status] : [];
+      if (typeof selector === 'string' && selector.indexOf('/c/') !== -1) return links.map((entry) => entry.link);
+      return [];
+    },
+    querySelector() {
+      return null;
+    },
+  };
+  return { doc, scroller, button };
+}
+
+test('sidebar history Retry is waited out, then the revealed chat is part of the list', async () => {
+  const waits = [];
+  const fixture = historyRetrySidebar(true);
+  const walked = await parser.collectSidebarConversations({
+    doc: fixture.doc,
+    scroller: fixture.scroller,
+    sleep: async (ms) => {
+      waits.push(ms);
+    },
+    settleMs: 1,
+    quietRounds: 1,
+    finalSweep: false,
+    expandProjects: false,
+    maxHistoryRetryClicks: 1,
+  });
+  assert.equal(
+    waits.filter((ms) => ms === 1000).reduce((sum, ms) => sum + ms, 0),
+    60000,
+    'the walk must wait the one-minute window before clicking Retry',
+  );
+  assert.deepEqual(
+    walked.conversations.map((row) => row.id).sort(),
+    ['kept', 'revealed'],
+  );
+  assert.equal(walked.complete, true, 'once Retry is gone and the tail is proven, the list is complete');
+});
+
+test('a sidebar that still shows history Retry is not a complete list', async () => {
+  // Positive control for the fixture: the same rows with the status hidden are complete.
+  const open = historyRetrySidebar(false);
+  const original = open.doc.querySelectorAll;
+  open.doc.querySelectorAll = function (selector) {
+    if (selector === 'nav [role="status"]') return [];
+    return original(selector);
+  };
+  const opened = await parser.collectSidebarConversations({
+    doc: open.doc,
+    scroller: open.scroller,
+    sleep: async () => {},
+    settleMs: 1,
+    quietRounds: 1,
+    finalSweep: false,
+    expandProjects: false,
+    maxHistoryRetryClicks: 0,
+  });
+  assert.equal(opened.complete, true, 'this fixture can report a complete list');
+
+  const blocked = historyRetrySidebar(false);
+  const walked = await parser.collectSidebarConversations({
+    doc: blocked.doc,
+    scroller: blocked.scroller,
+    sleep: async () => {},
+    settleMs: 1,
+    quietRounds: 1,
+    finalSweep: false,
+    expandProjects: false,
+    maxHistoryRetryClicks: 0,
+  });
+  assert.equal(walked.complete, false);
+  assert.equal(walked.reason, 'history-rate-limited');
+  assert.equal(parser.findHistoryRetryControl(blocked.doc), blocked.button);
+  const busy = {
+    getAttribute(name) {
+      return name === 'aria-busy' ? 'true' : null;
+    },
+    querySelector() {
+      return blocked.button;
+    },
+  };
+  assert.equal(
+    parser.findHistoryRetryControl({
+      querySelectorAll(selector) {
+        return selector === 'nav [role="status"]' ? [busy] : [];
+      },
+    }),
+    null,
+    'a status that is still busy is not the settled failure',
+  );
+});

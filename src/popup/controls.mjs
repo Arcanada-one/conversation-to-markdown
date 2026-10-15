@@ -1,4 +1,4 @@
-import { runBatchExport } from './batch.mjs';
+import { runBatchExport, waitForLoadedConversation } from './batch.mjs';
 import {
   addZipEntry,
   bytesToBase64DataUrl,
@@ -74,6 +74,8 @@ import {
   OPENAI_FILE_LOOKUP_CALLS,
   OPENAI_METADATA_CALLS,
   OPENAI_PAGE_LOAD_CALLS,
+  RATE_LIMIT_RETRY_CLICKS,
+  RATE_LIMIT_RETRY_WAIT_MS,
   waitWhilePaused,
 } from './quota.mjs';
 import { state } from './state.mjs';
@@ -201,6 +203,9 @@ async function executeBatch(tab, batchOptions) {
     if (batchResult.unchanged > 0) {
       summary += ', ' + batchResult.unchanged + ' unchanged';
     }
+    if (batchResult.leftClosed > 0) {
+      summary += ', ' + batchResult.leftClosed + ' already on disk and left closed';
+    }
     if (batchResult.discovered > 0) {
       summary +=
         ', ' +
@@ -218,7 +223,10 @@ async function executeBatch(tab, batchOptions) {
     }
     if (batchResult.cancelled) summary += ' — stopped early';
     if (!batchResult.listComplete) {
-      summary += '\nScroll the sidebar to the end and re-run to pick up anything missing.';
+      summary +=
+        batchResult.listReason === 'history-rate-limited'
+          ? '\nChatGPT could not load the rest of the sidebar. The export waited and retried; run it again after history loads.'
+          : '\nScroll the sidebar to the end and re-run to pick up anything missing.';
     }
     if (batchResult.zipName) summary += '\nZip: ' + batchResult.zipName;
     if (batchOptions.downloadHtml) {
@@ -405,6 +413,30 @@ btn.addEventListener('click', async () => {
     });
 
     state.scanningTabId = tab.id;
+    var loaded = await waitForLoadedConversation(tab.id, conversationIdFromLocation(tab.url), {
+      // One look is enough to notice the Retry screen. A page that is simply
+      // still mounting is the scan's job; a 30s wait here would delay every
+      // export that is not a conversation.
+      contentTimeoutMs: 0,
+      isCancelled: function () {
+        return state.batchCancelled;
+      },
+      isPaused: function () {
+        return false;
+      },
+      onWait: function () {
+        btn.textContent = 'Waiting for ChatGPT…';
+      },
+    });
+    if (loaded.error === 'cancelled' || (loaded.rateLimited && !loaded.ready)) {
+      btnCancel.classList.remove('visible');
+      showStatus(
+        loaded.error === 'cancelled' ? 'warning' : 'error',
+        loaded.error === 'cancelled' ? 'Stopped.' : loaded.error || 'Could not load this conversation.'
+      );
+      return;
+    }
+
     startProgressPolling(tab.id);
 
     const results = await chrome.scripting.executeScript({
@@ -627,6 +659,8 @@ export {
   parseFileRefs,
   parseImageRefs,
   projectIdFromLocation,
+  RATE_LIMIT_RETRY_CLICKS,
+  RATE_LIMIT_RETRY_WAIT_MS,
   readBatchJob,
   readExportIndex,
   recordExportedConversation,
@@ -644,6 +678,7 @@ export {
   stampsInPaths,
   syncBatchOptions,
   waitForDownloadComplete,
+  waitForLoadedConversation,
   waitWhilePaused,
   writeBatchJob,
   ZIP_BYTE_BUDGET,

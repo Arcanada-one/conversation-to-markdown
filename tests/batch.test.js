@@ -568,9 +568,8 @@ test('a batch asks the quota before each ChatGPT read', async () => {
     downloadImages: false,
   }, { downloadState: 'complete' });
   assert.equal(res.exported, 1, JSON.stringify(res));
-  // Page load, then the metadata read, then the scan's own page load.
+  // Metadata is read on the open tab. The page load is only the scan.
   assert.deepEqual(takes, [
-    popupApi.OPENAI_PAGE_LOAD_CALLS,
     popupApi.OPENAI_METADATA_CALLS,
     popupApi.OPENAI_PAGE_LOAD_CALLS,
   ]);
@@ -629,6 +628,7 @@ function runBatchAgainstFakeChrome(conversations, downloadBehaviour, options, ch
           if (/location\.href/.test(src)) {
             // Mirror the tab landing on whatever href the batch asked for.
             var wanted = (o.args && o.args[0]) || '';
+            if (chromeOpts.navigations) chromeOpts.navigations.push(wanted);
             context.__tabUrl = CHAT_ORIGIN + wanted;
             // The document is replaced: content.js helpers are gone until
             // something re-injects them.
@@ -648,7 +648,14 @@ function runBatchAgainstFakeChrome(conversations, downloadBehaviour, options, ch
             if (chromeOpts.navigationLatency && !context.__scriptPresent) {
               return [{ result: { ready: false, error: 'waitForConversationReady is unavailable.' } }];
             }
+            if (typeof chromeOpts.readyResult === 'function') {
+              return [{ result: chromeOpts.readyResult(o) }];
+            }
             return [{ result: { ready: true } }];
+          }
+          if (/clickConversationRetry/.test(src)) {
+            if (chromeOpts.onRetryClick) chromeOpts.onRetryClick();
+            return [{ result: true }];
           }
           if (/fetchConversationMetadata/.test(src)) {
             // The metadata the page would report for this conversation. Absent
@@ -733,6 +740,7 @@ function runBatchAgainstFakeChrome(conversations, downloadBehaviour, options, ch
     __cursor: 0,
     setTimeout: (fn, ms) => {
       context.__lastDelay = ms;
+      if (chromeOpts.delays) chromeOpts.delays.push(ms);
       return setTimeout(fn, 0);
     },
     clearTimeout, setInterval: () => 0, clearInterval() {},
@@ -1629,6 +1637,7 @@ test('WIRING: the batch itself skips unchanged conversations and stamps grown on
     { id: 'c-same', slug: 'same', title: 'Unchanged', href: '/c/c-same' },
     { id: 'c-grew', slug: 'grew', title: 'Grown', href: '/c/c-grew' },
     { id: 'c-fresh', slug: 'fresh', title: 'Never seen', href: '/c/c-fresh' },
+    { id: 'c-absent', slug: 'absent', title: 'Missing file', href: '/c/c-absent' },
   ];
 
   // Seed the index as a previous run would have left it.
@@ -1641,30 +1650,48 @@ test('WIRING: the batch itself skips unchanged conversations and stamps grown on
   await seeder.recordExportedConversation('c-grew', {
     updateTime: 100, currentNode: 'n-old', messageCount: 10, bytes: 500, files: 0,
   });
+  await seeder.recordExportedConversation('c-absent', {
+    updateTime: 100, currentNode: 'n-absent', messageCount: 4, bytes: 100, files: 0,
+  });
 
+  const navigations = [];
   const { res, attempted } = await runBatchAgainstFakeChrome(
     conversations,
     () => true,
     { projectSlug: 'proj', batchStamp: '20260818-1830', useTimestamp: false },
     {
       storage: { local: storage },
+      navigations,
+      downloadRows: [{
+        filename: '/Downloads/chatgpt-export/proj/same/same--20260817-1200~c-same.md',
+        exists: true, state: 'complete',
+      }],
       liveMetadata: {
         // Identical to what was stored: nothing to do.
         'c-same': { updateTime: 100, currentNode: 'n-same', messageCount: 10 },
         // A new newest message: this one grew.
         'c-grew': { updateTime: 200, currentNode: 'n-new', messageCount: 25 },
         'c-fresh': { updateTime: 300, currentNode: 'n-f', messageCount: 5 },
+        'c-absent': { updateTime: 100, currentNode: 'n-absent', messageCount: 4 },
       },
     },
   );
 
   assert.equal(res.ok, true);
+  assert.equal(res.unchanged, 1, JSON.stringify(res));
 
   const md = attempted.filter((name) => name.endsWith('.md'));
   const wrote = (needle) => md.filter((name) => name.indexOf(needle) !== -1);
 
-  // The unchanged conversation was not written at all.
-  assert.deepEqual(wrote('same~'), [], 'an unchanged conversation must not be re-exported');
+  // The needle has to be the id marker. `same~` does not occur in
+  // `same--<stamp>~c-same.md`, so that assertion stayed green while the file
+  // was written.
+  assert.deepEqual(wrote('~c-same.md'), [], 'an unchanged conversation must not be re-exported');
+  assert.equal(
+    navigations.some((href) => href.indexOf('c-same') !== -1),
+    false,
+    'an unchanged chat whose file landed must not be opened: ' + navigations.join(' | '),
+  );
   // The grown one was, and under a STAMPED name so the earlier file survives:
   // Chrome cannot append, and overwriting would destroy the previous export.
   const grewFiles = wrote('grew');
@@ -1676,6 +1703,14 @@ test('WIRING: the batch itself skips unchanged conversations and stamps grown on
   const freshFiles = wrote('fresh');
   assert.equal(freshFiles.length, 1);
   assert.match(freshFiles[0], /fresh--20260818-1830~c-fresh\.md$/);
+  // Positive control: the same index match with no file on disk is exported.
+  // A deleted download must not be treated as a finished backup.
+  const absentFiles = wrote('~c-absent.md');
+  assert.equal(absentFiles.length, 1, 'md written: ' + JSON.stringify(md));
+  assert.ok(
+    navigations.some((href) => href.indexOf('c-absent') !== -1),
+    'a missing file must still be opened',
+  );
 
   // And the index now records what this run did, so the NEXT run can skip it.
   const after = await seeder.readExportIndex();
@@ -1756,6 +1791,92 @@ test('WIRING: metadata that cannot be read exports rather than skips', async () 
     attempted.filter((n) => n.endsWith('.md')).length, 1,
     'an unreadable answer must produce an export, not a skip',
   );
+});
+
+test('a finished file is left closed when metadata cannot be read, and a missing file is still opened', async () => {
+  // The resume loop this covers: stop, then start again, and the saved list
+  // opens the chats that already landed. Those page opens are what bring the
+  // Retry screen back before the unsaved tail is reached. Download history is
+  // the record those earlier runs left; their metadata index was never written.
+  const storage = fakeStorage();
+  const done = { id: 'c-done', slug: 'done', title: 'Done', href: '/c/c-done' };
+  const part = { id: 'c-part', slug: 'part', title: 'Part', href: '/c/c-part' };
+  const fresh = { id: 'c-fresh', slug: 'fresh', title: 'Fresh', href: '/c/c-fresh' };
+  const navigations = [];
+  const { res, attempted } = await runBatchAgainstFakeChrome(
+    [done, part, fresh],
+    () => true,
+    { projectSlug: 'proj', batchStamp: '20261015-0903' },
+    {
+      storage: { local: storage },
+      navigations,
+      downloadState: 'complete',
+      downloadRows: [
+        {
+          filename: '/Downloads/chatgpt-export/proj/done/done--20261014-2035~c-done.md',
+          exists: true,
+          state: 'complete',
+        },
+        {
+          filename: '/Downloads/chatgpt-export/proj/part/part-partial--20261014-2035~c-part.md',
+          exists: true,
+          state: 'complete',
+        },
+      ],
+      liveMetadata: {},
+    },
+  );
+
+  assert.equal(res.leftClosed, 1, JSON.stringify(res));
+  assert.equal(res.unchanged, 0, 'an unreadable answer must not be reported as unchanged');
+  assert.equal(res.exported, 2, JSON.stringify(res));
+  const md = attempted.filter((name) => name.endsWith('.md'));
+  assert.equal(md.some((name) => name.indexOf('~c-done.md') !== -1), false, md.join(' | '));
+  assert.ok(md.some((name) => name.indexOf('~c-fresh.md') !== -1), md.join(' | '));
+  assert.ok(md.some((name) => name.indexOf('~c-part.md') !== -1), 'a partial file must be exported again: ' + md.join(' | '));
+  assert.equal(navigations.some((href) => href.indexOf('c-done') !== -1), false, navigations.join(' | '));
+  assert.ok(navigations.some((href) => href.indexOf('c-fresh') !== -1), 'the chat with no file must be opened');
+  assert.ok(navigations.some((href) => href.indexOf('c-part') !== -1), 'the partial chat must be opened');
+  const index = await loadPopupExportsWithChrome({
+    storage: { local: storage }, runtime: storage.__runtime,
+  }).readExportIndex();
+  assert.equal(index['c-done'], undefined, 'a closed file must not gain a fake unchanged index row');
+});
+
+test('chats that are not on disk are opened before a finished chat that still needs a repair', async () => {
+  // Repair still exports a finished file once when metadata is readable and
+  // the index has no row. That open can hit the Retry screen. It has to happen
+  // after the chats that have no file, or the unfinished tail is never reached.
+  const repair = { id: 'c-repair', slug: 'repair', title: 'Repair', href: '/c/c-repair' };
+  const fresh = { id: 'c-fresh', slug: 'fresh', title: 'Fresh', href: '/c/c-fresh' };
+  const navigations = [];
+  const { res } = await runBatchAgainstFakeChrome(
+    [repair, fresh],
+    () => true,
+    { projectSlug: 'proj', batchStamp: '20261015-0903' },
+    {
+      storage: { local: fakeStorage() },
+      navigations,
+      downloadState: 'complete',
+      downloadRows: [{
+        filename: '/Downloads/chatgpt-export/proj/repair/repair--20261014-2035~c-repair.md',
+        exists: true,
+        state: 'complete',
+      }],
+      liveMetadata: {
+        'c-repair': { updateTime: 20, currentNode: 'new', messageCount: 3 },
+        'c-fresh': { updateTime: 30, currentNode: 'f', messageCount: 1 },
+      },
+    },
+  );
+
+  assert.equal(res.exported, 2, JSON.stringify(res));
+  assert.ok(navigations.length >= 2, navigations.join(' | '));
+  const repairAt = navigations.findIndex((href) => href.indexOf('c-repair') !== -1);
+  const freshAt = navigations.findIndex((href) => href.indexOf('c-fresh') !== -1);
+  assert.ok(freshAt !== -1, 'the chat with no file must be opened');
+  assert.ok(repairAt !== -1, 'a readable metadata answer with no index row must still open the finished file');
+  assert.ok(freshAt < repairAt, 'the unfinished chat must be opened first: ' + navigations.join(' | '));
 });
 
 test('WIRING: no storage permission leaves the batch exactly as it was', async () => {
@@ -2328,4 +2449,73 @@ test('an HTML batch does not lock markdown saving on', () => {
   popupUi.syncBatchOptions();
   assert.equal(images.checked, false, 'a later sync must not turn markdown saving back on');
   assert.equal(images.disabled, false);
+});
+
+function rateLimitPage() {
+  return {
+    ready: false,
+    rateLimited: true,
+    error: 'ChatGPT rate limit: the conversation page asked to retry.',
+  };
+}
+
+test('a Retry screen is waited out, then the conversation is exported', async () => {
+  const conv = {
+    id: 'c-one',
+    href: '/g/g-p-x/c/c-one',
+    projectId: 'g-p-x',
+    title: 'One',
+    slug: 'One',
+  };
+  const delays = [];
+  let probes = 0;
+  let clicks = 0;
+  let waitedBeforeClick = 0;
+  const { res } = await runBatchAgainstFakeChrome([conv], () => true, {
+    maxAttempts: 3,
+    maxHoldRounds: 5,
+  }, {
+    downloadState: 'complete',
+    delays,
+    readyResult() {
+      probes += 1;
+      return probes === 1 ? rateLimitPage() : { ready: true };
+    },
+    onRetryClick() {
+      clicks += 1;
+      waitedBeforeClick = delays.filter((ms) => ms === 1000).reduce((sum, ms) => sum + ms, 0);
+    },
+  });
+  assert.equal(clicks, 1);
+  assert.equal(waitedBeforeClick, 60000, 'Retry is clicked after the one-minute wait');
+  assert.equal(res.exported, 1);
+  assert.equal(res.errors.join('\n'), '');
+});
+
+test('a Retry screen that stays up stops the batch before the next chat', async () => {
+  // maxAttempts and maxHoldRounds are large on purpose. Treating the screen as
+  // a transient network error would open the same page again, and then the
+  // next conversation. That is the failure this test exists to catch.
+  const rows = [
+    { id: 'c-one', href: '/g/g-p-x/c/c-one', projectId: 'g-p-x', title: 'One', slug: 'One' },
+    { id: 'c-two', href: '/g/g-p-x/c/c-two', projectId: 'g-p-x', title: 'Two', slug: 'Two' },
+  ];
+  const navigations = [];
+  let clicks = 0;
+  const { res } = await runBatchAgainstFakeChrome(rows, () => true, {
+    maxAttempts: 3,
+    maxHoldRounds: 5,
+  }, {
+    downloadState: 'complete',
+    navigations,
+    readyResult: () => rateLimitPage(),
+    onRetryClick() {
+      clicks += 1;
+    },
+  });
+  assert.equal(clicks, 5);
+  assert.equal(res.exported, 0);
+  assert.equal(navigations.some((href) => href.indexOf('c-two') !== -1), false);
+  assert.ok(navigations.some((href) => href.indexOf('c-one') !== -1), 'the first chat must actually be opened');
+  assert.match(res.errors.join('\n'), /rate limit/);
 });

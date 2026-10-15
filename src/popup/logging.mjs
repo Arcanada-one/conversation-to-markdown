@@ -305,11 +305,17 @@ function searchHtmlCompletePaths() {
           var row = dirs[dir];
           // The marker is written after the page. A later page write without a
           // later marker is partial, and a marker without a page proves nothing.
+          // exists === false means the file was deleted. An absent exists field
+          // is the same history row the Markdown search already keeps: Chrome
+          // does not always set the field, and requiring true made every HTML
+          // chat look missing and forced the page open. A missing marker, an
+          // interrupted download, or a marker that is not newer than the page
+          // is still incomplete.
           if (
             row.page &&
             row.marker &&
-            row.page.exists === true &&
-            row.marker.exists === true &&
+            row.page.exists !== false &&
+            row.marker.exists !== false &&
             row.page.state === 'complete' &&
             row.marker.state === 'complete' &&
             typeof row.page.id === 'number' &&

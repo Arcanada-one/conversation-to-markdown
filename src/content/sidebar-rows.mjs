@@ -314,6 +314,33 @@ function isPaginationControl(button) {
   }
 }
 
+/** The sidebar's settled "history did not load" Retry control.
+ *
+ *  Measured 2026-10-14: a `nav [role="status"]` after the mounted rows, with
+ *  aria-busy="false" and one button. The visible sentence was "Unable to load
+ *  history". The button text is not required, so a translated label still
+ *  matches. A status that is still busy is a loader, not this failure. A
+ *  status with no button has nothing to press.
+ */
+function findHistoryRetryControl(doc) {
+  const root = doc || (typeof document !== 'undefined' ? document : null);
+  if (!root || !root.querySelectorAll) return null;
+  let nodes;
+  try {
+    nodes = root.querySelectorAll('nav [role="status"]');
+  } catch (_e) {
+    return null;
+  }
+  for (const node of nodes) {
+    if (node.getAttribute && node.getAttribute('aria-busy') === 'true') continue;
+    const button = node.querySelector ? node.querySelector('button') : null;
+    if (!button || typeof button.click !== 'function') continue;
+    if (button.querySelector && button.querySelector('a[href*="/c/"]')) continue;
+    return button;
+  }
+  return null;
+}
+
 function findShowMoreControl(doc) {
   const root = doc || (typeof document !== 'undefined' ? document : null);
   if (!root || !root.querySelectorAll) return null;
@@ -357,6 +384,7 @@ export {
   escapeForRegExp,
   extractConversationTitle,
   findCollapsedProjectRows,
+  findHistoryRetryControl,
   findShowMoreControl,
   findSidebarScroller,
   isPaginationControl,

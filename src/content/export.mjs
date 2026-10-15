@@ -42,6 +42,7 @@ import { findScrollContainer, scrollToConversationStart } from './scroll.mjs';
 import {
   extractConversationTitle,
   findCollapsedProjectRows,
+  findHistoryRetryControl,
   findShowMoreControl,
   findSidebarScroller,
   knownProjectName,
@@ -78,10 +79,98 @@ function activeConversationRoot(doc) {
   return active.length === 1 ? active[0] : null;
 }
 
-/** Wait until a navigated conversation page has mountable message content. */
+function conversationHasMessages(root) {
+  if (!root || !root.querySelector) return false;
+  if (root.querySelector('[data-turn-id]') || root.querySelector('[data-message-author-role]')) return true;
+  return modernMessageSections(root).some(function (unit) {
+    return !!modernMessageRole(unit);
+  });
+}
+
+function retryButtonText(button) {
+  return String((button && button.textContent) || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function loneActionButton(container) {
+  if (!container || !container.querySelectorAll) return null;
+  let buttons;
+  try {
+    buttons = Array.from(container.querySelectorAll('button'));
+  } catch (_e) {
+    return null;
+  }
+  const usable = buttons.filter(function (button) {
+    if (!button || typeof button.click !== 'function') return false;
+    if (button.disabled) return false;
+    if (button.getAttribute && button.getAttribute('aria-disabled') === 'true') return false;
+    if (button.querySelector && button.querySelector('a[href*="/c/"]')) return false;
+    return retryButtonText(button).length > 0;
+  });
+  return usable.length === 1 ? usable[0] : null;
+}
+
+/** The active thread's Retry control, present only when the thread did not load.
+ *
+ *  Measured 2026-10-14. The active page's
+ *  `[data-app-shell-focus-area="main"]` held no turns and exactly one button.
+ *  The sentence above it was "Could not load this ChatGPT conversation".
+ *  Header and sidebar buttons sit outside that focus area. Several buttons
+ *  means some other empty state and must not be clicked. The English label
+ *  "Retry" is only the fallback for a page that lost the focus-area marker.
+ */
+function findConversationRetryControl(doc) {
+  const root = doc || (typeof document !== 'undefined' ? document : null);
+  if (!root || !root.querySelector) return null;
+  const page = activeConversationRoot(root);
+  if (!page || !page.querySelector) return null;
+  if (conversationHasMessages(page)) return null;
+  const focus = page.querySelector('[data-app-shell-focus-area="main"]');
+  const fromFocus = loneActionButton(focus);
+  if (fromFocus) return fromFocus;
+  const main = page.querySelector('main') || page;
+  if (!main.querySelectorAll) return null;
+  let buttons;
+  try {
+    buttons = Array.from(main.querySelectorAll('button'));
+  } catch (_e) {
+    return null;
+  }
+  const labeled = buttons.filter(function (button) {
+    return retryButtonText(button) === 'Retry' && typeof button.click === 'function' && !button.disabled;
+  });
+  return labeled.length === 1 ? labeled[0] : null;
+}
+
+function clickConversationRetry() {
+  const button = findConversationRetryControl(typeof document !== 'undefined' ? document : null);
+  if (!button) return false;
+  try {
+    button.click();
+    return true;
+  } catch (_e) {
+    return false;
+  }
+}
+
+const RATE_LIMIT_PAGE_ERROR = 'ChatGPT rate limit: the conversation page asked to retry.';
+
+function rateLimitPageError(doc) {
+  if (!findConversationRetryControl(doc || (typeof document !== 'undefined' ? document : null))) return null;
+  return { ok: false, error: RATE_LIMIT_PAGE_ERROR, rateLimited: true };
+}
+
+/** Wait until a navigated conversation page has mountable message content.
+ *  The Retry screen is reported at once. The popup waits and clicks; this
+ *  function does not, so a 30s content timeout is not spent staring at a
+ *  button that will fail again if pressed immediately.
+ */
 function waitForConversationReady(options) {
   const supplied = options || {};
-  const timeoutMs = supplied.timeoutMs || 30000;
+  // 0 is a real timeout: one look, then the caller decides. `||` would turn
+  // that into a 30s wait on every page that is still mounting.
+  const timeoutMs = supplied.timeoutMs == null ? 30000 : supplied.timeoutMs;
   const pollMs = supplied.pollMs || 300;
   const conversationId = supplied.conversationId || null;
 
@@ -98,15 +187,9 @@ function waitForConversationReady(options) {
         }
       }
       const root = typeof document !== 'undefined' ? activeConversationRoot(document) : null;
-      if (
-        root &&
-        (root.querySelector('[data-turn-id]') ||
-          root.querySelector('[data-message-author-role]') ||
-          modernMessageSections(root).some(function (unit) {
-            return !!modernMessageRole(unit);
-          }))
-      ) {
-        return resolve({ ready: true });
+      if (conversationHasMessages(root)) return resolve({ ready: true });
+      if (findConversationRetryControl(typeof document !== 'undefined' ? document : null)) {
+        return resolve({ ready: false, rateLimited: true, error: RATE_LIMIT_PAGE_ERROR });
       }
       if (Date.now() - startedAt >= timeoutMs) {
         return resolve({ ready: false, error: 'Conversation content did not load.' });
@@ -288,7 +371,7 @@ async function getConversationMarkdown(settings) {
       md = buildConversationMarkdown(turns);
       if (scanMeta.partial) md = prefixPartialNotice(md, scanMeta.reason);
     }
-    if (!md) return { ok: false, error: 'No conversation found on this page.' };
+    if (!md) return rateLimitPageError(document) || { ok: false, error: 'No conversation found on this page.' };
     // Generated (code-interpreter) files render in a panel outside the message
     // tree with no href and no testid, so the per-turn scan above cannot see
     // them. Appending them here puts them in the markdown, which is where the
@@ -562,7 +645,7 @@ function exportActiveSessionHtml(doc, options) {
   var root = activeConversationRoot(doc);
   if (!root) return { ok: false, error: 'Could not identify the active conversation. Try again after it loads.' };
   var turns = turnsOnRoot(root);
-  if (!turns.length) return { ok: false, error: 'No conversation found on this page.' };
+  if (!turns.length) return rateLimitPageError(doc) || { ok: false, error: 'No conversation found on this page.' };
   var saved = [];
   var missing = [];
   var partial = !!opts.partial;
@@ -612,6 +695,7 @@ export {
   activeConversationRoot,
   appendPanelArtifacts,
   buildConversationMarkdown,
+  clickConversationRetry,
   collectButtonDownloads,
   collectSidebarConversations,
   dedupeNamed,
@@ -632,6 +716,8 @@ export {
   filterButtonsAgainstPanel,
   findButtonsByScrolling,
   findCollapsedProjectRows,
+  findConversationRetryControl,
+  findHistoryRetryControl,
   findScrollContainer,
   findShowMoreControl,
   findSidebarScroller,
@@ -646,6 +732,7 @@ export {
   parseTurnOrder,
   prefixPartialNotice,
   projectRowContainer,
+  RATE_LIMIT_PAGE_ERROR,
   readModernPagination,
   resolveArtifactPanelFiles,
   resolveSandboxDownloadUrl,

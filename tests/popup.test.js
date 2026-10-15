@@ -47,6 +47,7 @@ function createPopupHarness(runScan, options = {}) {
   const injected = [];
   const blobs = [];
   const blobUrls = new Map();
+  const timerDelays = [];
   // Stands in for the page's window.__c2mScan the scan loop reads.
   const pageScanState = { cancelled: false, captured: 0, observed: 0, elapsedMs: 0 };
   const button = {
@@ -146,6 +147,19 @@ function createPopupHarness(runScan, options = {}) {
           injected.push(opts);
           if (opts.files) return [];
           const funcSource = opts.func ? String(opts.func) : '';
+          // The Retry probe is its own injection. Routing it into runScan would
+          // hand the scan result to the wait, and a page that is simply ready
+          // would look like a second scan.
+          if (funcSource.includes('waitForConversationReady')) {
+            const ready = typeof options.readyResult === 'function'
+              ? options.readyResult(opts)
+              : { ready: true };
+            return [{ result: ready }];
+          }
+          if (funcSource.includes('clickConversationRetry')) {
+            if (options.onRetryClick) options.onRetryClick();
+            return [{ result: true }];
+          }
           if (opts.args && /fetchImageDataUrls|extractImageDataUrls/.test(funcSource)) {
             return [{ result: options.extracted || [] }];
           }
@@ -207,7 +221,12 @@ function createPopupHarness(runScan, options = {}) {
         },
       },
     },
-    setTimeout,
+    setTimeout: options.immediateTimers
+      ? (fn, ms, ...rest) => {
+          timerDelays.push(ms);
+          return setTimeout(fn, 0, ...rest);
+        }
+      : setTimeout,
     clearTimeout,
     setInterval,
     clearInterval,
@@ -275,6 +294,7 @@ function createPopupHarness(runScan, options = {}) {
       return Buffer.concat(blob.parts.map((part) => Buffer.from(part))).toString('utf8');
     },
     scriptCalls: () => scriptCalls,
+    timerDelays: () => timerDelays,
     downloads: () => downloads,
     batchCheckbox,
     imagesCheckbox: checkbox,
@@ -374,11 +394,63 @@ test('waits for asynchronous scanning before writing Markdown to the clipboard',
   await click;
   assert.equal(pauseVisibleDuringScan, false, 'a single scan cannot pause a batch job');
 
-  assert.equal(harness.scriptCalls(), 2);
+  // content.js, the Retry-screen probe, then the scan.
+  assert.equal(harness.scriptCalls(), 3);
   assert.equal(harness.clipboardValue(), '# complete');
   assert.equal(harness.status.className, 'success');
   assert.equal(harness.button.disabled, false);
   assert.equal(harness.button.textContent, 'Copy as Markdown');
+});
+
+test('a Retry screen is waited out, then the open conversation is copied', async () => {
+  let probes = 0;
+  let clicks = 0;
+  let waitedBeforeClick = 0;
+  const harness = createPopupHarness(async () => [{
+    result: { ok: true, md: '# recovered', lines: 1, words: 1 },
+  }], {
+    immediateTimers: true,
+    readyResult() {
+      probes += 1;
+      return probes === 1
+        ? { ready: false, rateLimited: true, error: 'ChatGPT rate limit: the conversation page asked to retry.' }
+        : { ready: true };
+    },
+    onRetryClick() {
+      clicks += 1;
+      waitedBeforeClick = harness.timerDelays().filter((ms) => ms === 1000).reduce((sum, ms) => sum + ms, 0);
+    },
+  });
+  await harness.click();
+  assert.equal(clicks, 1);
+  assert.equal(waitedBeforeClick, 60000);
+  assert.equal(harness.clipboardValue(), '# recovered');
+  assert.equal(harness.status.className, 'success');
+});
+
+test('a Retry screen that stays up is not exported as an empty conversation', async () => {
+  let scans = 0;
+  let clicks = 0;
+  const harness = createPopupHarness(async (opts) => {
+    if (String(opts.func || '').includes('getConversationMarkdown')) scans += 1;
+    return [{ result: { ok: true, md: '# should-not-run', lines: 1, words: 2 } }];
+  }, {
+    immediateTimers: true,
+    readyResult: () => ({
+      ready: false,
+      rateLimited: true,
+      error: 'ChatGPT rate limit: the conversation page asked to retry.',
+    }),
+    onRetryClick() {
+      clicks += 1;
+    },
+  });
+  await harness.click();
+  assert.equal(scans, 0);
+  assert.equal(clicks, 5);
+  assert.equal(harness.clipboardValue(), null);
+  assert.equal(harness.status.className, 'error');
+  assert.match(harness.status.textContent, /rate limit/);
 });
 
 test('writes a partial export to the clipboard instead of showing an error', async () => {

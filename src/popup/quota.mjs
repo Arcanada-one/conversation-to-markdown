@@ -45,6 +45,21 @@ function sleep(ms) {
  */
 var OPENAI_CALLS_PER_MINUTE = 30;
 var OPENAI_CALL_WINDOW_MS = 60000;
+/**
+ * How long to wait before clicking ChatGPT's Retry control.
+ *
+ * Measured 2026-10-14 from a saved chatgpt.com conversation page: after too
+ * many page opens the active thread has no messages and one Retry button
+ * ("Could not load this ChatGPT conversation"), and the sidebar has a settled
+ * role=status ("Unable to load history") with its own Retry button. aria-busy
+ * is false. The page does not say "rate limit" and shows no countdown.
+ * Recovery time was not measured. This wait reuses the one-minute call window
+ * above, which is also not a measured recovery time. Clicking Retry immediately
+ * repeats the failed read.
+ */
+var RATE_LIMIT_RETRY_WAIT_MS = OPENAI_CALL_WINDOW_MS;
+/** Presses of Retry before the run stops instead of opening the next chat. */
+var RATE_LIMIT_RETRY_CLICKS = 5;
 var OPENAI_PAGE_LOAD_CALLS = 4;
 var OPENAI_METADATA_CALLS = 2;
 var OPENAI_FILE_LOOKUP_CALLS = 2;
@@ -117,6 +132,8 @@ export {
   OPENAI_FILE_LOOKUP_CALLS,
   OPENAI_METADATA_CALLS,
   OPENAI_PAGE_LOAD_CALLS,
+  RATE_LIMIT_RETRY_CLICKS,
+  RATE_LIMIT_RETRY_WAIT_MS,
   sleep,
   waitWhilePaused,
 };

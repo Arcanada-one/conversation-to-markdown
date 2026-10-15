@@ -12,6 +12,7 @@
     "globals": [
       "Bun",
       "chrome",
+      "clickConversationRetry",
       "buildStoreZip",
       "bytesToDataUrl",
       "collectSidebarConversations",

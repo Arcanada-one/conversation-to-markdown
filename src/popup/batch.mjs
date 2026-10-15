@@ -29,6 +29,8 @@ import {
   OPENAI_FILE_LOOKUP_CALLS,
   OPENAI_METADATA_CALLS,
   OPENAI_PAGE_LOAD_CALLS,
+  RATE_LIMIT_RETRY_CLICKS,
+  RATE_LIMIT_RETRY_WAIT_MS,
   sleep,
   waitWhilePaused,
 } from './quota.mjs';
@@ -43,6 +45,55 @@ import {
   rememberBatchJob,
   writeBatchJob,
 } from './storage.mjs';
+
+/** Sleep in slices so Stop and Pause are noticed during the rate-limit wait. */
+async function sleepUnlessStopped(ms, guard) {
+  var left = ms > 0 ? ms : 0;
+  while (left > 0) {
+    if (!(await waitWhilePaused(guard))) return false;
+    var step = left > 1000 ? 1000 : left;
+    await sleep(step);
+    left -= step;
+  }
+  return !(guard && guard.isCancelled && guard.isCancelled());
+}
+
+/** See the conversation Retry screen, wait, click it, and repeat until the
+ *  thread is actually on the page. Opening the next chat while this screen
+ *  is up is what keeps the limit in place.
+ */
+async function waitForLoadedConversation(tabId, conversationId, hooks) {
+  var guard = hooks || {};
+  var clicks = 0;
+  var limit = typeof guard.maxClicks === 'number' ? guard.maxClicks : RATE_LIMIT_RETRY_CLICKS;
+  var waitMs = typeof guard.waitMs === 'number' ? guard.waitMs : RATE_LIMIT_RETRY_WAIT_MS;
+  while (true) {
+    var readyResult = await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      func: async function (id, timeoutMs) {
+        if (typeof waitForConversationReady !== 'function') {
+          return { ready: false, error: 'waitForConversationReady is unavailable.' };
+        }
+        return await waitForConversationReady({ conversationId: id, timeoutMs: timeoutMs });
+      },
+      args: [conversationId, guard.contentTimeoutMs == null ? 30000 : guard.contentTimeoutMs],
+    });
+    var ready = readyResult && readyResult[0] && readyResult[0].result;
+    if (!ready) return { ready: false, error: 'did not load' };
+    if (ready.ready || !ready.rateLimited) return ready;
+    if (clicks >= limit) return ready;
+    if (guard.onWait) guard.onWait(clicks + 1, waitMs);
+    if (!(await sleepUnlessStopped(waitMs, guard))) return { ready: false, error: 'cancelled' };
+    clicks += 1;
+    await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      func: function () {
+        if (typeof clickConversationRetry === 'function') return clickConversationRetry();
+        return false;
+      },
+    });
+  }
+}
 
 /** Walk the sidebar conversation list in the active tab, export each in turn. */
 async function runBatchExport(tab, options) {
@@ -127,13 +178,33 @@ async function runBatchExport(tab, options) {
     markdownPendingKeys[markdownPending[m].id || markdownPending[m].slug] = true;
   }
   // A filename says a file landed once, not whether the chat changed since.
-  // With no index row we cannot prove it is unchanged, so inspect it too.
-  var pending = conversations;
+  // With no index row we cannot prove it is unchanged, so a readable metadata
+  // answer still exports that chat once. The filename does decide which chats
+  // can be left closed while the unfinished ones are saved.
+  function requestedFilesLanded(conv) {
+    var htmlMissing = wantHtmlRun && (!htmlHistoryKnown || !htmlChatLanded(conv, htmlCompletePaths));
+    var markdownMissing = wantMarkdown && markdownPendingKeys[conv.id || conv.slug];
+    return !htmlMissing && !markdownMissing;
+  }
+  // Measured from the 2026-10-10, 2026-10-14 and 2026-10-15 export logs: resume
+  // walked the saved list from the start, opened chats already logged as saved,
+  // and stopped on the Retry screen. The 2026-10-15 run repeated the first 10
+  // of 40 conversation events from 2026-10-14 and recorded zero skips. Chats
+  // with no finished file go first, so that stop happens after progress on the
+  // unfinished tail.
+  var notYetSaved = [];
+  var alreadySaved = [];
+  for (var order = 0; order < conversations.length; order++) {
+    if (requestedFilesLanded(conversations[order])) alreadySaved.push(conversations[order]);
+    else notYetSaved.push(conversations[order]);
+  }
+  var pending = notYetSaved.concat(alreadySaved);
   var exported = 0;
   var errors = [];
   var indexSkipped = 0;
   var grown = 0;
 
+  var leftClosed = 0;
   var retried = 0;
   var held = 0;
   var partial = 0;
@@ -150,7 +221,12 @@ async function runBatchExport(tab, options) {
   pushLogEvent(runLog, {
     phase: 'run',
     outcome: 'started',
-    counts: { listed: conversations.length, pending: pending.length, discovered: discovered },
+    counts: {
+      listed: conversations.length,
+      pending: pending.length,
+      discovered: discovered,
+      notOnDisk: notYetSaved.length,
+    },
   });
   var logOk = true;
   var logError = null;
@@ -243,27 +319,17 @@ async function runBatchExport(tab, options) {
    *
    *  Runs in the tab rather than the popup because the request needs the
    *  session the user is already signed in with, and that session belongs to the
-   *  page. Requires navigating there first, which is why this is called after
-   *  the tab has arrived — the saving is in not SCANNING an unchanged
-   *  conversation, which is where the minutes go, not in avoiding the visit.
+   *  page. The session cookie is already on this tab, so the request does not
+   *  navigate. Opening each saved chat to ask the question is what brings up
+   *  the Retry screen and stops the run before the unsaved chats.
    *
-   *  Any failure returns null, which classifies as 'unknown' and exports. */
+   *  Any failure returns null. Null is not "unchanged". The caller exports when
+   *  no finished file is already on disk, and leaves a finished file closed
+   *  until a later run can read the metadata. */
   async function readConversationMetadata(tabId, conv) {
     try {
-      await callQuota.take(OPENAI_PAGE_LOAD_CALLS);
-      var navigated = await (async function () {
-        await chrome.scripting.executeScript({
-          target: { tabId: tabId },
-          func: function (href) {
-            window.location.href = href;
-          },
-          args: [conv.href],
-        });
-        return await waitForTabNavigation(tabId, conv.id, 30000);
-      })();
-      if (!navigated) return null;
-      await chrome.scripting.executeScript({ target: { tabId: tabId }, files: ['content.js'] });
       await callQuota.take(OPENAI_METADATA_CALLS);
+      await chrome.scripting.executeScript({ target: { tabId: tabId }, files: ['content.js'] });
       var out = await chrome.scripting.executeScript({
         target: { tabId: tabId },
         func: async function (conversationId) {
@@ -297,19 +363,20 @@ async function runBatchExport(tab, options) {
       files: ['content.js'],
     });
 
-    var readyResult = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: async function (conversationId) {
-        if (typeof waitForConversationReady === 'function') {
-          return await waitForConversationReady({ conversationId: conversationId, timeoutMs: 30000 });
-        }
-        return { ready: false, error: 'waitForConversationReady is unavailable.' };
+    state.scanningTabId = tab.id;
+    var ready = await waitForLoadedConversation(tab.id, conv.id, {
+      isCancelled: controls.isCancelled,
+      isPaused: controls.isPaused,
+      onWait: function () {
+        if (onProgress) onProgress(index, pending.length, progressTitle + ' — waiting for ChatGPT');
       },
-      args: [conv.id],
     });
-    var ready = readyResult?.[0]?.result;
     if (!ready || !ready.ready) {
-      return { ok: false, error: (ready && ready.error) || 'did not load' };
+      return {
+        ok: false,
+        error: (ready && ready.error) || 'did not load',
+        rateLimited: !!(ready && ready.rateLimited),
+      };
     }
 
     await chrome.scripting.executeScript({
@@ -317,7 +384,6 @@ async function runBatchExport(tab, options) {
       files: ['content.js'],
     });
 
-    state.scanningTabId = tab.id;
     startProgressPolling(tab.id);
     var results;
     try {
@@ -364,35 +430,42 @@ async function runBatchExport(tab, options) {
     var progressTitle = conv.title || conv.slug || conv.id;
     if (onProgress) onProgress(index, pending.length, progressTitle);
 
-    // Ask the cheap question first. `filterPendingConversations` can only reason
-    // about filenames, and a filename cannot say whether a conversation gained
-    // messages since it was saved — so a conversation already on disk arrives
-    // here either way. One metadata request decides it: unchanged conversations
-    // cost milliseconds instead of the minutes a full walk takes.
+    // Ask the cheap question first. One metadata request on the already-open
+    // tab decides it, and that request does not open the conversation. A
+    // filename cannot say whether a conversation gained messages, so a readable
+    // answer that has no index row still exports once.
     //
-    // Every uncertain answer resolves towards exporting. 'unknown' (metadata
-    // unreadable) and a missing index both export, because the cost of an
-    // unnecessary export is bandwidth while the cost of a wrong skip is a
-    // conversation that never lands and cannot be recovered by re-running.
+    // Every uncertain answer resolves towards exporting when no finished file
+    // is on disk. A wrong skip loses the conversation. A finished file plus an
+    // unreadable metadata read is left closed and is not recorded as unchanged:
+    // opening it is what brings the Retry screen back, and the next run that
+    // can read the metadata still compares.
     var liveMeta = null;
     var grewThisRound = false;
     var verdict = null;
+    var filesLanded = requestedFilesLanded(conv);
     if (exportIndex) {
       liveMeta = await readConversationMetadata(tab.id, conv);
       verdict = classifyAgainstIndex(exportIndex, conv.id, liveMeta).verdict;
-      if (verdict === 'unchanged') {
-        var htmlMissing = wantHtmlRun && (!htmlHistoryKnown || !htmlChatLanded(conv, htmlCompletePaths));
-        var markdownMissing = wantMarkdown && markdownPendingKeys[conv.id || conv.slug];
-        if (!htmlMissing && !markdownMissing) {
-          indexSkipped += 1;
-          pushLogEvent(runLog, {
-            phase: 'skip',
-            outcome: 'unchanged',
-            conversationId: conv.id,
-            title: conv.title,
-          });
-          continue;
-        }
+      if (verdict === 'unchanged' && filesLanded) {
+        indexSkipped += 1;
+        pushLogEvent(runLog, {
+          phase: 'skip',
+          outcome: 'unchanged',
+          conversationId: conv.id,
+          title: conv.title,
+        });
+        continue;
+      }
+      if ((!liveMeta || verdict === 'unknown') && filesLanded) {
+        leftClosed += 1;
+        pushLogEvent(runLog, {
+          phase: 'skip',
+          outcome: 'file-landed',
+          conversationId: conv.id,
+          title: conv.title,
+        });
+        continue;
       }
       if (verdict === 'grown') {
         grewThisRound = true;
@@ -418,6 +491,9 @@ async function runBatchExport(tab, options) {
         };
       }
       if (outcome.ok) break;
+      // The wait-and-click budget was already spent. Another hold would open
+      // the same limited page again. Stop this conversation and, below, the run.
+      if (outcome.rateLimited) break;
 
       lastError = outcome.error;
       var kind = classifyBatchFailure(lastError);
@@ -452,6 +528,20 @@ async function runBatchExport(tab, options) {
 
     if (controls.isCancelled()) break;
     if (!outcome || !outcome.ok) {
+      if (outcome && outcome.rateLimited) {
+        errors.push(
+          'ChatGPT rate limit: waited and retried, and the conversation page still asked to retry. Resume later; opening more chats would keep the limit in place.'
+        );
+        pushLogEvent(runLog, {
+          level: 'error',
+          phase: 'conversation',
+          outcome: 'rate-limit',
+          conversationId: conv.id,
+          title: conv.title,
+          message: outcome.error,
+        });
+        break;
+      }
       errors.push((conv.title || conv.id) + ': ' + (lastError || 'failed'));
       pushLogEvent(runLog, {
         level: 'error',
@@ -761,7 +851,7 @@ async function runBatchExport(tab, options) {
   pushLogEvent(runLog, {
     phase: 'run',
     outcome: controls.isCancelled() ? 'cancelled' : 'finished',
-    counts: { exported: exported, unchanged: indexSkipped, partial: partial },
+    counts: { exported: exported, unchanged: indexSkipped, partial: partial, leftClosed: leftClosed },
   });
   var finishedLog = await flushRunLog(runLog, state.activeRunLogOptions);
   if (!finishedLog.ok && logOk) {
@@ -774,6 +864,8 @@ async function runBatchExport(tab, options) {
       controls.isCancelled() ||
       controls.isPaused() ||
       partial > 0 ||
+      // leftClosed is a finished file we could not check. It is not proof the
+      // chat is unchanged, so the job stays resumable.
       exported + indexSkipped < conversations.length ||
       !htmlOk ||
       !listComplete
@@ -792,6 +884,9 @@ async function runBatchExport(tab, options) {
     exported: exported,
     // Metadata proved the conversation had not changed since it was exported.
     unchanged: indexSkipped,
+    // Finished files left closed because metadata could not be read. Not
+    // counted as unchanged, and not given an index row.
+    leftClosed: leftClosed,
     // Conversations that gained messages since the last export and were written
     // beside the earlier file under their own stamp, not over it.
     grown: grown,
@@ -817,4 +912,4 @@ async function runBatchExport(tab, options) {
   };
 }
 
-export { runBatchExport };
+export { runBatchExport, waitForLoadedConversation };

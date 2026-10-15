@@ -454,7 +454,10 @@ navigating mid-run: the .md must land.
 chats that are new, that gained or lost messages, or whose last save was
 incomplete. A chat whose update time, newest message, and message count match
 the index stays on disk and is reported as unchanged. Without an index entry,
-the chat is exported again. An attachment that cannot be retrieved or whose download
+the chat is exported again when no finished file is on disk. A finished file
+whose metadata cannot be read is left closed and is not recorded as unchanged.
+The next run that can read the metadata still compares it. A finished file with
+readable metadata and no index entry is exported once. An attachment that cannot be retrieved or whose download
 is interrupted, and a failed HTML page or index, leave the chat retryable instead
 of banking it as complete. Resuming a paused backup walks the open sidebar
 again and appends chats in the saved job's projects that were not on the saved list.
@@ -485,6 +488,16 @@ verified as observed with no gaps. An unconfirmed walk is reported as
 unconfirmed. Verify on a Project of 100+ conversations — an unmatched pagination
 control used to make a partial list report as complete.
 
+**ChatGPT Retry screen.** *(fixture-only)* A conversation page with no messages
+and one Retry button in the main focus area, or a sidebar history status with a
+Retry button, means ChatGPT refused the read after too many page opens. The
+export waits one minute, clicks that button, and continues when the thread is
+on the page. It tries up to five times. If the screen remains, the batch stops
+and the saved job stays resumable, so a later run can export the chats that
+were not opened. The page shows no countdown. The one minute is the batch's
+existing call window; the time ChatGPT needs to recover was not measured. A
+live check needs a page ChatGPT is currently refusing.
+
 **Any interface language.** Pagination, titles and download controls are located
 by page structure, not English wording. Verify with the browser language set to
 Russian **and** to one other language: ChatGPT translates its UI by browser
@@ -493,8 +506,9 @@ locale, not by account setting.
 **Long-run survival.** *(fixture-only)* The toolbar button opens a side panel.
 Clicking the page does not close it, so the export keeps running. Transient
 failures retry with capped backoff. A dropped network, an unreachable site, or
-a rate-limit response holds the run instead of skipping the conversation. The
-batch starts at most 30 ChatGPT calls per minute, counted as 4 for each page
+an HTTP rate-limit response holds the run instead of skipping the conversation.
+The on-page Retry screen is waited out and clicked; if it stays, the run stops
+before the next chat. The batch starts at most 30 ChatGPT calls per minute, counted as 4 for each page
 load plus the extension's own metadata and file reads. A continuous export
 began receiving errors after about 50 sessions; the rate that still succeeds
 was not measured, and 30 sits under that burst. Pause stores the batch. Closing
@@ -504,22 +518,32 @@ job's projects since the pause. A finished run hides Pause. A resumed run stamps
 so a chat that grew during the pause is written beside the earlier file.
 Cancel keeps what landed.
 
-**Navigation correctness.** Each conversation is navigated to, the content script
-re-injected into the new document, and the thread confirmed rendered before
-capture. Verify the exported count matches the conversations actually saved —
-before 1.2.0 the counter counted attempts, and a whole batch could write nothing
-while reporting progress.
+**Navigation correctness.** *(fixture-only)* A conversation that still needs a
+file is navigated to, the content script re-injected into the new document, and
+the thread confirmed rendered before capture. A chat whose finished file is
+already on disk is not opened when its metadata matches the index, or when that
+metadata cannot be read. Verify the exported count matches the conversations
+actually saved — before 1.2.0 the counter counted attempts, and a whole batch
+could write nothing while reporting progress.
 
-**Resume.** A restarted export skips what already landed, identifying each
-conversation by its ChatGPT id, so conversations sharing a title (several called
-"Untitled") never mask one another. Verify by deleting one exported file and
-re-running: that conversation must be re-exported, the rest skipped.
+**Resume.** *(fixture-only)* A restarted export continues with chats that have
+no finished file before it reopens chats that already have one, identifying
+each conversation by its ChatGPT id, so conversations sharing a title (several
+called "Untitled") never mask one another. The metadata check uses the open
+tab and does not open a chat only to make the check. A finished file whose
+metadata cannot be read is left closed and is not reported as unchanged.
+Verify by deleting one exported file and re-running: that conversation must be
+re-exported, the rest skipped. Verify a stop on the Retry screen, then resume:
+chats already on disk stay closed, and a chat that was never saved is opened.
 
-**Unchanged conversations are skipped.** A conversation whose metadata matches
-what was recorded is skipped without being re-read. Verify the run reports them
-as unchanged. This decision reads the export INDEX, never a filename — with every
-export stamped, a rebuilt filename can never match, so a build that fell back to
-name matching would re-export the whole project on every run.
+**Unchanged conversations are skipped.** *(fixture-only)* A conversation whose
+metadata matches what was recorded, and whose finished file is still in download
+history, is skipped without opening its page. Verify the run reports them as
+unchanged. This decision reads the export INDEX, never a filename alone — with
+every export stamped, a rebuilt filename can never match, so a build that fell
+back to name matching would re-export the whole project on every run. A missing
+file is still exported when the index matches, because a deleted download is
+not a finished backup.
 
 **Grown conversations get a new dated copy.** A conversation that gained messages
 is written beside the earlier file under its own stamp; the old file is
@@ -598,7 +622,7 @@ match the CHANGELOG's top entry, and users must never see a gap. The last entry
 below is the version being shipped; a test checks this line against the CHANGELOG
 so a release cannot be added without revisiting this file.
 
-Version history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8, 1.6.0, 1.6.1, 1.6.2, 1.6.3, 1.6.4, 1.6.5, 1.6.6, 1.6.7, 1.6.8, 1.6.9, 1.7.0
+Version history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8, 1.6.0, 1.6.1, 1.6.2, 1.6.3, 1.6.4, 1.6.5, 1.6.6, 1.6.7, 1.6.8, 1.6.9, 1.7.0, 1.7.1
 
 The latest entry identifies the prepared local build; it does not imply Chrome
 Web Store publication. Attachment retrieval is unchanged in 1.6.0.

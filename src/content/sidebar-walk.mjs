@@ -1,5 +1,6 @@
 import {
   findCollapsedProjectRows,
+  findHistoryRetryControl,
   findShowMoreControl,
   findSidebarScroller,
   listSidebarConversations,
@@ -16,6 +17,23 @@ import {
  * silently reports success is unfalsifiable for the user: they have nothing to
  * compare the export against.
  */
+/** Wait out a rate-limit Retry, in slices so cancellation is visible.
+ *  A single 60s timer would ignore Stop until it fired. */
+async function sleepUnlessRateLimitedCancelled(sleep, ms) {
+  let left = ms > 0 ? ms : 0;
+  while (left > 0) {
+    try {
+      if (typeof window !== 'undefined' && window.__c2mScan && window.__c2mScan.cancelled) return false;
+    } catch (_e) {
+      /* a missing window is not a cancel */
+    }
+    const step = Math.min(left, 1000);
+    await sleep(step);
+    left -= step;
+  }
+  return true;
+}
+
 async function collectSidebarConversations(options) {
   const supplied = options || {};
   const doc = supplied.doc || (typeof document !== 'undefined' ? document : null);
@@ -33,6 +51,11 @@ async function collectSidebarConversations(options) {
   const maxShowMoreClicks = supplied.maxShowMoreClicks === undefined ? 60 : supplied.maxShowMoreClicks;
   // Revealing a page is a network round-trip; it needs longer than a scroll.
   const showMoreSettleMs = supplied.showMoreSettleMs || 1200;
+  // Same wait as the popup's RATE_LIMIT_RETRY_WAIT_MS. Recovery was not
+  // measured on 2026-10-14; the page shows a Retry button and no countdown.
+  // Kept here because this walk runs in the page, not the popup.
+  const rateLimitWaitMs = supplied.rateLimitWaitMs == null ? 60000 : supplied.rateLimitWaitMs;
+  const maxHistoryRetryClicks = supplied.maxHistoryRetryClicks == null ? 5 : supplied.maxHistoryRetryClicks;
   // Projects start collapsed; opening one is a click plus a fetch.
   const expandProjects = supplied.expandProjects !== false;
   const maxProjectExpansions = supplied.maxProjectExpansions === undefined ? 40 : supplied.maxProjectExpansions;
@@ -286,6 +309,7 @@ async function collectSidebarConversations(options) {
   // quiescence. Surfaced so a caller can tell a proof from a best guess.
   let coverageVerified = false;
   let showMoreClicks = 0;
+  let historyRetryClicks = 0;
   let barrenShowMoreClicks = 0;
   // False when a "Show more" control was still standing at the end of the walk:
   // rows exist that were never listed.
@@ -354,6 +378,30 @@ async function collectSidebarConversations(options) {
       if (barrenShowMoreClicks >= 2) break;
     }
     if (findShowMoreControl(doc)) showMoreExhausted = false;
+
+    // A settled history Retry means the rows below this point were not loaded.
+    // Waiting and clicking is what asks for them. Reaching the bottom of the
+    // rows that did mount is not the end of the list.
+    const historyRetry = findHistoryRetryControl(doc);
+    if (historyRetry && historyRetryClicks < maxHistoryRetryClicks) {
+      const waited = await sleepUnlessRateLimitedCancelled(sleep, rateLimitWaitMs);
+      if (!waited) {
+        blocked = true;
+        break;
+      }
+      let clickFailed = false;
+      try {
+        historyRetry.click();
+        historyRetryClicks += 1;
+      } catch (_e) {
+        clickFailed = true;
+      }
+      if (!clickFailed) {
+        await sleep(settleMs);
+        added += absorb();
+        quiet = 0;
+      }
+    }
 
     const nowTop = scroller.scrollTop || 0;
     const nowMaxTop = Math.max(0, (scroller.scrollHeight || 0) - (scroller.clientHeight || 0));
@@ -443,6 +491,12 @@ async function collectSidebarConversations(options) {
   if (findShowMoreControl(doc)) showMoreExhausted = false;
   if (findCollapsedProjectRows(doc).length) projectsExhausted = false;
   if (!showMoreExhausted || !projectsExhausted) complete = false;
+  // The history failure is still on the page. The mounted rows are a subset
+  // even when their own geometry lines up.
+  if (findHistoryRetryControl(doc)) {
+    complete = false;
+    tailReason = 'history-rate-limited';
+  }
 
   // Put the sidebar back where the user left it.
   try {
@@ -454,6 +508,8 @@ async function collectSidebarConversations(options) {
   let reason;
   if (complete) {
     reason = 'reached-end';
+  } else if (tailReason === 'history-rate-limited') {
+    reason = tailReason;
   } else if (blocked) {
     reason = 'scroll-blocked';
   } else if (!showMoreExhausted) {

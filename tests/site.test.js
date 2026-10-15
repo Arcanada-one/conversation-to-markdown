@@ -244,7 +244,9 @@ function runHtmlBatch(conversations, htmlSiteDir, options) {
           const source = String(call.func || '');
           if (call.files) return [];
           if (/location\.href/.test(source)) {
-            context.__tabUrl = CHAT_ORIGIN + ((call.args && call.args[0]) || '');
+            const href = (call.args && call.args[0]) || '';
+            if (options.navigations) options.navigations.push(href);
+            context.__tabUrl = CHAT_ORIGIN + href;
             return [{ result: true }];
           }
           if (/collectSidebarConversations|listSidebarConversations/.test(source)) {
@@ -977,6 +979,50 @@ test('markdown already on disk still gets an HTML page, and the log omits the co
     assert.equal(log.includes(secretUrl), false);
   } finally {
     fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+test('an HTML chat with an unset exists field is already on disk, and a deleted one is not', async () => {
+  const conv = { id: 'html-id', title: 'Notes', slug: 'Notes', href: '/c/html-id', md: 'BODY\n' };
+  const meta = { updateTime: 1, currentNode: 'same', messageCount: 2 };
+  const page = '/Downloads/chatgpt-export/html/chats/Notes~html-id/index.html';
+  const marker = '/Downloads/chatgpt-export/html/chats/Notes~html-id/export-complete.txt';
+  const presentDir = tempDir('c2m-html-exists-present-');
+  const deletedDir = tempDir('c2m-html-exists-deleted-');
+  try {
+    const presentNavigations = [];
+    const present = await runHtmlBatch([conv], presentDir, {
+      navigations: presentNavigations,
+      storageStore: { c2mExportIndex: { 'html-id': meta } },
+      liveMetadata: { 'html-id': meta },
+      downloadRows: [
+        { filename: page, id: 1, state: 'complete' },
+        { filename: marker, id: 2, state: 'complete' },
+      ],
+    });
+    assert.equal(present.unchanged, 1, JSON.stringify(present));
+    assert.equal(present.exported, 0, JSON.stringify(present));
+    assert.equal(presentNavigations.length, 0, presentNavigations.join(' | '));
+    assert.equal(fs.existsSync(path.join(presentDir, 'chats', 'Notes~html-id', 'index.html')), false);
+
+    const deletedNavigations = [];
+    const deleted = await runHtmlBatch([conv], deletedDir, {
+      navigations: deletedNavigations,
+      storageStore: { c2mExportIndex: { 'html-id': meta } },
+      liveMetadata: { 'html-id': meta },
+      downloadRows: [
+        { filename: page, id: 1, exists: false, state: 'complete' },
+        { filename: marker, id: 2, exists: false, state: 'complete' },
+      ],
+    });
+    assert.equal(deleted.exported, 1, JSON.stringify(deleted));
+    assert.equal(deleted.unchanged, 0, JSON.stringify(deleted));
+    assert.ok(deletedNavigations.some((href) => href.indexOf('html-id') !== -1), deletedNavigations.join(' | '));
+    const written = fs.readFileSync(path.join(deletedDir, 'chats', 'Notes~html-id', 'index.html'), 'utf8');
+    assert.match(written, /BODY/);
+  } finally {
+    fs.rmSync(presentDir, { recursive: true, force: true });
+    fs.rmSync(deletedDir, { recursive: true, force: true });
   }
 });
 

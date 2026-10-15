@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Package and publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - name: Check out tagged revision and main history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up project tools
+        uses: jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5 # v5.0.0
+      - name: Verify tag and prepare release notes
+        run: mise exec -- node scripts/prepare-release.mjs "$RELEASE_TAG"
+      - name: Install development dependencies
+        run: mise exec -- npm ci
+      - name: Test
+        run: mise exec -- npm test
+      - name: Static checks
+        run: mise exec -- npm run check
+      - name: Build exact tagged package
+        run: |
+          mise exec -- bash package-extension.sh HEAD
+          (cd dist && shasum -a 256 -c "conversation-to-markdown-$RELEASE_TAG.zip.sha256")
+      - name: Publish stable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            "dist/conversation-to-markdown-$RELEASE_TAG.zip" \
+            "dist/conversation-to-markdown-$RELEASE_TAG.zip.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$RELEASE_TAG" \
+            --notes-file dist/release-notes.md \
+            --verify-tag \
+            --latest

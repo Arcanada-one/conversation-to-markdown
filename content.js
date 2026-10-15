@@ -1,4001 +1,3221 @@
-/**
- * ChatGPT → Markdown
- * Content script: parses the live ChatGPT conversation and returns clean Markdown.
- *
- * Iterates [data-turn-id] sections (not just [data-message-author-role]) so that
- * generated images — which live outside the message div but inside the turn section —
- * are correctly captured. Strips query parameters from exported URLs (privacy).
- *
- * NO VERSION NUMBER IN THIS HEADER. It carried a stale one for two releases
- * while manifest.json had moved on, because a header comment is the one place
- * the version-coupling tests cannot see. A number that only some releases
- * remember to bump is worse than no number: it reads as authoritative and is
- * silently wrong. A test now keeps this header free of one.
- *
- * DOUBLE INJECTION IS EXPECTED, and this file must survive it.
- *
- * The manifest declares this script on every chatgpt.com page, AND popup.js
- * re-injects it with `chrome.scripting.executeScript` after a batch navigation
- * replaces the document. In a batch that navigation is real and the re-inject is
- * required. For a single export on an already-loaded tab it is not: the script
- * is already there, the second copy runs against the same window, and a
- * top-level `const` throws
- *
- *   Uncaught SyntaxError: Identifier 'ATTACHMENT_CHIP_SELECTORS' has already
- *   been declared
- *
- * — thrown at PARSE time, so nothing in the second copy runs at all. The first
- * copy's listener still answers, which is why the export still produced a file
- * and the only symptom was an error page most users never open.
- *
- * Hence `var`, not `const`, for every top-level binding in this file: a repeated
- * `var` is a no-op where a repeated `const` is a fatal parse error. Wrapping the
- * file in a guard block was tried first and is WRONG — it moves the declarations
- * into a block scope, and popup.js calls these functions by name through
- * `executeScript`, which can only see globals. A test asserts both halves: that
- * a second injection does not throw, and that the first one really did define
- * the binding the second would collide with.
- */
-if (typeof globalThis !== 'undefined') globalThis.__c2mContentScriptLoaded = true;
-
-/** Convert an HTML element's content to plain Markdown text. */
-function stripUrlQuery(url, allowedQueryNames) {
-  const allowedNames = new Set(allowedQueryNames || []);
-  for (const name of Array.from(url.searchParams.keys())) {
-    if (!allowedNames.has(name)) url.searchParams.delete(name);
+(() => {
+  var __defProp = Object.defineProperty;
+  var __returnValue = (v) => v;
+  function __exportSetter(name, newValue) {
+    this[name] = __returnValue.bind(null, newValue);
   }
-  return url;
-}
-
-function resolveHttpUrl(rawUrl, allowedQueryNames) {
-  if (!rawUrl) return null;
-  try {
-    const baseUrl = typeof location !== 'undefined' ? location.href : 'https://chatgpt.com/';
-    const resolved = new URL(rawUrl, baseUrl);
-    if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') return null;
-    return stripUrlQuery(resolved, allowedQueryNames).href;
-  } catch (_error) {
-    return null;
-  }
-}
-
-/** Resolve an image URL preserving query parameters (SAS tokens etc. needed for fetch). */
-function resolveImageUrl(rawUrl) {
-  if (!rawUrl) return null;
-  try {
-    const baseUrl = typeof location !== 'undefined' ? location.href : 'https://chatgpt.com/';
-    const resolved = new URL(rawUrl, baseUrl);
-    if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') return null;
-    return resolved.href;
-  } catch (_error) {
-    return null;
-  }
-}
-
-/** Visible placeholder when a non-text artifact cannot be exported verbatim. */
-function artifactPlaceholder(kind, detail) {
-  const label = detail ? ' (' + detail + ')' : '';
-  return '\n\n*[' + kind + ' artifact — not exported' + label + ']*\n\n';
-}
-
-function isKatexMathml(node) {
-  const cls = node.className || '';
-  return typeof cls === 'string' && /\bkatex-mathml\b/.test(cls);
-}
-
-function isKatexRoot(node) {
-  const cls = node.className || '';
-  // `katex-display` wraps the actual `katex` span. A word-boundary check also
-  // matches that wrapper at the hyphen, turning display math into inline math.
-  return typeof cls === 'string' && /(?:^|\s)katex(?:\s|$)/.test(cls);
-}
-
-/** Fixture-derived: live ChatGPT attachment chips use data-testid="file-chip". */
-function isAttachmentChip(node) {
-  return node.getAttribute && node.getAttribute('data-testid') === 'file-chip';
-}
-
-function hrefFromAttachmentChip(node) {
-  if (!node) return null;
-  if (node.tagName && node.tagName.toLowerCase() === 'a') {
-    return node.getAttribute('href') || null;
-  }
-  if (typeof node.querySelector === 'function') {
-    const link = node.querySelector('a[href]');
-    return link ? link.getAttribute('href') : null;
-  }
-  return null;
-}
-
-function labelFromAttachmentChip(node) {
-  const text = (node.textContent || '').trim();
-  if (text) return text;
-  const href = hrefFromAttachmentChip(node);
-  if (!href) return 'attachment';
-  try {
-    const parts = new URL(href, 'https://chatgpt.com/').pathname.split('/');
-    return parts[parts.length - 1] || 'attachment';
-  } catch (_error) {
-    return 'attachment';
-  }
-}
-
-function markdownLink(label, href) {
-  const safeLabel = (label || href).trim();
-  return safeLabel ? '[' + safeLabel + '](' + href + ')' : href;
-}
-
-function nodeToMarkdown(node, depth) {
-  if (depth === undefined) depth = 0;
-
-  if (node.nodeType === Node.TEXT_NODE) {
-    return node.textContent;
-  }
-
-  if (node.nodeType !== Node.ELEMENT_NODE) return '';
-
-  const tag = node.tagName.toLowerCase();
-  const children = function() {
-    return Array.from(node.childNodes).map(function(n) { return nodeToMarkdown(n, depth); }).join('');
+  var __export = (target, all) => {
+    for (var name in all)
+      __defProp(target, name, {
+        get: all[name],
+        enumerable: true,
+        configurable: true,
+        set: __exportSetter.bind(all, name)
+      });
   };
 
-  if (node.getAttribute && node.getAttribute('data-file-reference') === 'true') {
-    const name = node.getAttribute('data-markdown-copy-text') || node.textContent || '';
-    return '`' + name.replace(/`/g, '') + '`';
-  }
+  // src/content/export.mjs
+  var exports_export = {};
+  __export(exports_export, {
+    ATTACHMENT_CHIP_SELECTORS: () => ATTACHMENT_CHIP_SELECTORS,
+    RATE_LIMIT_PAGE_ERROR: () => RATE_LIMIT_PAGE_ERROR,
+    UNPREVIEWABLE_FORMATS: () => UNPREVIEWABLE_FORMATS,
+    activeConversationRoot: () => activeConversationRoot,
+    appendPanelArtifacts: () => appendPanelArtifacts,
+    buildConversationMarkdown: () => buildConversationMarkdown,
+    clickConversationRetry: () => clickConversationRetry,
+    collectButtonDownloads: () => collectButtonDownloads,
+    collectSidebarConversations: () => collectSidebarConversations,
+    dedupeNamed: () => dedupeNamed,
+    dismissViewerOverlay: () => dismissViewerOverlay,
+    downloadButtonsInPage: () => downloadButtonsInPage,
+    downloadNameFromUrl: () => downloadNameFromUrl,
+    escapeKeydownEvent: () => escapeKeydownEvent,
+    exportActiveSessionHtml: () => exportActiveSessionHtml,
+    extractAttachments: () => extractAttachments,
+    extractAttachmentsDetailed: () => extractAttachmentsDetailed,
+    extractConversationTitle: () => extractConversationTitle,
+    extractImages: () => extractImages,
+    extractTurn: () => extractTurn,
+    fetchConversationArtifacts: () => fetchConversationArtifacts,
+    fetchConversationMetadata: () => fetchConversationMetadata,
+    fetchImageDataUrls: () => fetchImageDataUrls,
+    fetchSessionToken: () => fetchSessionToken,
+    filterButtonsAgainstPanel: () => filterButtonsAgainstPanel,
+    findButtonsByScrolling: () => findButtonsByScrolling,
+    findCollapsedProjectRows: () => findCollapsedProjectRows,
+    findConversationRetryControl: () => findConversationRetryControl,
+    findHistoryRetryControl: () => findHistoryRetryControl,
+    findScrollContainer: () => findScrollContainer,
+    findShowMoreControl: () => findShowMoreControl,
+    findSidebarScroller: () => findSidebarScroller,
+    foldForNameMatching: () => foldForNameMatching,
+    getConversationMarkdown: () => getConversationMarkdown,
+    knownProjectName: () => knownProjectName,
+    largestCoverageGap: () => largestCoverageGap,
+    listArtifactPanelFiles: () => listArtifactPanelFiles,
+    listSidebarConversations: () => listSidebarConversations,
+    nodeToMarkdown: () => nodeToMarkdown,
+    orderCapturedTurns: () => orderCapturedTurns,
+    parseTurnOrder: () => parseTurnOrder,
+    prefixPartialNotice: () => prefixPartialNotice,
+    projectRowContainer: () => projectRowContainer,
+    readModernPagination: () => readModernPagination,
+    resolveArtifactPanelFiles: () => resolveArtifactPanelFiles,
+    resolveSandboxDownloadUrl: () => resolveSandboxDownloadUrl,
+    sandboxFilesFromMarkdown: () => sandboxFilesFromMarkdown,
+    sandboxPathsFromApiMessage: () => sandboxPathsFromApiMessage,
+    scanTurns: () => scanTurns,
+    scrollToConversationStart: () => scrollToConversationStart,
+    slugifyTitle: () => slugifyTitle,
+    stripSidebarLabelSuffix: () => stripSidebarLabelSuffix,
+    titleFromSidebarLink: () => titleFromSidebarLink,
+    turnsOnRoot: () => turnsOnRoot,
+    waitForArtifactPanel: () => waitForArtifactPanel,
+    waitForConversationReady: () => waitForConversationReady
+  });
 
-  // App-shell Markdown embeds table controls inside the rendered content.
-  if (node.getAttribute && node.getAttribute('data-block-actions') !== null) return '';
-  // The app shell renders a fenced code block as a div, not a pre. Its
-  // data-markdown-copy marker encloses both the code and a toolbar; reading
-  // children flattened the lines and added the toolbar's label and SVG.
-  if (node.getAttribute && node.getAttribute('data-markdown-copy') === 'code-block') {
-    const code = node.querySelector && node.querySelector('code');
-    if (code) return '```\n' + code.textContent.replace(/\n$/, '') + '\n```\n\n';
-  }
-  if (isKatexMathml(node)) return '';
-  if (isKatexRoot(node)) {
-    // Visible KaTeX text flattens fractions into an ambiguous string. The
-    // rendered formula carries its original TeX in a semantic annotation.
-    const annotation = node.querySelector('annotation[encoding="application/x-tex"]');
-    if (annotation && annotation.textContent) {
-      const tex = annotation.textContent.trim();
-      const display = node.parentElement && /\bkatex-display\b/.test(node.parentElement.className || '');
-      return display ? '$$\n' + tex + '\n$$\n\n' : '$' + tex + '$';
+  // src/content/markdown.mjs
+  if (typeof globalThis !== "undefined")
+    globalThis.__c2mContentScriptLoaded = true;
+  function stripUrlQuery(url, allowedQueryNames) {
+    const allowedNames = new Set(allowedQueryNames || []);
+    for (const name of Array.from(url.searchParams.keys())) {
+      if (!allowedNames.has(name))
+        url.searchParams.delete(name);
     }
-    const htmlEl = node.querySelector('.katex-html');
-    if (htmlEl) return nodeToMarkdown(htmlEl, depth);
-    return children();
+    return url;
   }
-  if (isAttachmentChip(node)) {
+  function resolveHttpUrl(rawUrl, allowedQueryNames) {
+    if (!rawUrl)
+      return null;
+    try {
+      const baseUrl = typeof location !== "undefined" ? location.href : "https://chatgpt.com/";
+      const resolved = new URL(rawUrl, baseUrl);
+      if (resolved.protocol !== "http:" && resolved.protocol !== "https:")
+        return null;
+      return stripUrlQuery(resolved, allowedQueryNames).href;
+    } catch (_error) {
+      return null;
+    }
+  }
+  function resolveImageUrl(rawUrl) {
+    if (!rawUrl)
+      return null;
+    try {
+      const baseUrl = typeof location !== "undefined" ? location.href : "https://chatgpt.com/";
+      const resolved = new URL(rawUrl, baseUrl);
+      if (resolved.protocol !== "http:" && resolved.protocol !== "https:")
+        return null;
+      if (resolved.hostname !== "files.oaiusercontent.com" && resolved.hostname !== "chatgpt.com" && resolved.hostname !== "chat.openai.com") {
+        stripUrlQuery(resolved);
+      }
+      return resolved.href;
+    } catch (_error) {
+      return null;
+    }
+  }
+  function artifactPlaceholder(kind, detail) {
+    const label = detail ? " (" + detail + ")" : "";
+    return `
+
+*[` + kind + " artifact — not exported" + label + `]*
+
+`;
+  }
+  function isKatexMathml(node) {
+    const cls = node.className || "";
+    return typeof cls === "string" && /\bkatex-mathml\b/.test(cls);
+  }
+  function isKatexRoot(node) {
+    const cls = node.className || "";
+    return typeof cls === "string" && /(?:^|\s)katex(?:\s|$)/.test(cls);
+  }
+  function isAttachmentChip(node) {
+    return node.getAttribute && node.getAttribute("data-testid") === "file-chip";
+  }
+  function hrefFromAttachmentChip(node) {
+    if (!node)
+      return null;
+    if (node.tagName && node.tagName.toLowerCase() === "a") {
+      return node.getAttribute("href") || null;
+    }
+    if (typeof node.querySelector === "function") {
+      const link = node.querySelector("a[href]");
+      return link ? link.getAttribute("href") : null;
+    }
+    return null;
+  }
+  function labelFromAttachmentChip(node) {
+    const text = (node.textContent || "").trim();
+    if (text)
+      return text;
     const href = hrefFromAttachmentChip(node);
-    if (!href) return labelFromAttachmentChip(node);
-    if (href.startsWith('sandbox:')) {
-      return '> **Attachment (Code Interpreter):** `' + href + '`\n\n';
+    if (!href)
+      return "attachment";
+    try {
+      const parts = new URL(href, "https://chatgpt.com/").pathname.split("/");
+      return parts[parts.length - 1] || "attachment";
+    } catch (_error) {
+      return "attachment";
     }
-    const absHref = resolveImageUrl(href);
-    if (!absHref) return labelFromAttachmentChip(node);
-    return markdownLink(labelFromAttachmentChip(node), absHref) + '\n\n';
   }
+  function markdownDestination(href) {
+    return /[()]/.test(href) ? "<" + href + ">" : href;
+  }
+  function markdownLabel(label) {
+    return String(label).replace(/([\\\[\]])/g, "\\$1");
+  }
+  function markdownLink(label, href) {
+    const safeLabel = (label || href).trim();
+    return safeLabel ? "[" + markdownLabel(safeLabel) + "](" + markdownDestination(href) + ")" : href;
+  }
+  function nodeToMarkdown(node, depth) {
+    if (depth === undefined)
+      depth = 0;
+    if (node.nodeType === Node.TEXT_NODE) {
+      return node.textContent;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE)
+      return "";
+    const tag = node.tagName.toLowerCase();
+    const children = function() {
+      return Array.from(node.childNodes).map(function(n) {
+        return nodeToMarkdown(n, depth);
+      }).join("");
+    };
+    if (node.getAttribute && node.getAttribute("data-file-reference") === "true") {
+      const name = node.getAttribute("data-markdown-copy-text") || node.textContent || "";
+      return "`" + name.replace(/`/g, "") + "`";
+    }
+    if (node.getAttribute && node.getAttribute("data-block-actions") !== null)
+      return "";
+    if (node.getAttribute && node.getAttribute("data-markdown-copy") === "code-block") {
+      const code = node.querySelector && node.querySelector("code");
+      if (code)
+        return "```\n" + code.textContent.replace(/\n$/, "") + "\n```\n\n";
+    }
+    if (isKatexMathml(node))
+      return "";
+    if (isKatexRoot(node)) {
+      const annotation = node.querySelector('annotation[encoding="application/x-tex"]');
+      if (annotation && annotation.textContent) {
+        const tex = annotation.textContent.trim();
+        const display = node.parentElement && /\bkatex-display\b/.test(node.parentElement.className || "");
+        return display ? `$$
+` + tex + `
+$$
 
-  switch (tag) {
-    case 'p':
-      return children() + '\n\n';
-    case 'br':
-      return '\n';
-    case 'strong':
-    case 'b':
-      return '**' + children() + '**';
-    case 'em':
-    case 'i':
-      return '*' + children() + '*';
-    case 'code': {
-      const text = node.textContent;
-      if (node.parentElement && node.parentElement.tagName.toLowerCase() === 'pre') return text;
-      return '`' + text + '`';
-    }
-    case 'pre': {
-      const codeEl = node.querySelector('code');
-      const lang = codeEl
-        ? ((codeEl.className.match(/language-(\S+)/) || [])[1] || '')
-        : '';
-      const text = codeEl ? codeEl.textContent : node.textContent;
-      return '```' + lang + '\n' + text + '\n```\n\n';
-    }
-    case 'h1': return '# ' + children() + '\n\n';
-    case 'h2': return '## ' + children() + '\n\n';
-    case 'h3': return '### ' + children() + '\n\n';
-    case 'h4': return '#### ' + children() + '\n\n';
-    case 'h5': return '##### ' + children() + '\n\n';
-    case 'h6': return '###### ' + children() + '\n\n';
-    case 'ul': {
-      var items = Array.from(node.children)
-        .map(function(li) { return '- ' + nodeToMarkdown(li, depth + 1).trim(); })
-        .join('\n');
-      return items + '\n\n';
-    }
-    case 'ol': {
-      var items = Array.from(node.children)
-        .map(function(li, i) { return (i + 1) + '. ' + nodeToMarkdown(li, depth + 1).trim(); })
-        .join('\n');
-      return items + '\n\n';
-    }
-    case 'li':
-      return children();
-    case 'blockquote':
-      return children()
-        .split('\n')
-        .map(function(l) { return '> ' + l; })
-        .join('\n') + '\n\n';
-    case 'a': {
-      const href = node.getAttribute('href') || '';
-      const text = children().trim();
-      if (!href) return text;
-      if (href.startsWith('sandbox:')) {
-        const label = text || href.replace(/^sandbox:/, '');
-        return '> **Code Interpreter file:** `' + href + '`' + (label && label !== href ? ' (' + label + ')' : '') + '\n\n';
+` : "$" + tex + "$";
       }
-      const absHref = resolveHttpUrl(href);
-      if (!absHref) return text;
-      return text ? '[' + text + '](' + absHref + ')' : absHref;
+      const htmlEl = node.querySelector(".katex-html");
+      if (htmlEl)
+        return nodeToMarkdown(htmlEl, depth);
+      return children();
     }
-    case 'img': {
-      // Skip favicons, decorative icons, and aria-hidden images
-      if (node.getAttribute('aria-hidden') === 'true') return '';
-      const src = node.getAttribute('src') || '';
-      if (!src || src.startsWith('data:') || src.startsWith('blob:')) return '';
-      // Skip small favicons (google s2 favicons, etc.)
-      if (src.includes('favicon') || src.includes('s2/favicons')) return '';
+    if (isAttachmentChip(node)) {
+      const href = hrefFromAttachmentChip(node);
+      if (!href)
+        return labelFromAttachmentChip(node);
+      if (href.startsWith("sandbox:")) {
+        return "> **Attachment (Code Interpreter):** `" + href + `\`
+
+`;
+      }
+      const absHref = resolveImageUrl(href);
+      if (!absHref)
+        return labelFromAttachmentChip(node);
+      return markdownLink(labelFromAttachmentChip(node), absHref) + `
+
+`;
+    }
+    switch (tag) {
+      case "p":
+        return children() + `
+
+`;
+      case "br":
+        return `
+`;
+      case "strong":
+      case "b":
+        return "**" + children() + "**";
+      case "em":
+      case "i":
+        return "*" + children() + "*";
+      case "code": {
+        const text = node.textContent;
+        if (node.parentElement && node.parentElement.tagName.toLowerCase() === "pre")
+          return text;
+        return "`" + text + "`";
+      }
+      case "pre": {
+        const codeEl = node.querySelector("code");
+        const lang = codeEl ? (codeEl.className.match(/language-(\S+)/) || [])[1] || "" : "";
+        const text = codeEl ? codeEl.textContent : node.textContent;
+        return "```" + lang + `
+` + text + "\n```\n\n";
+      }
+      case "h1":
+        return "# " + children() + `
+
+`;
+      case "h2":
+        return "## " + children() + `
+
+`;
+      case "h3":
+        return "### " + children() + `
+
+`;
+      case "h4":
+        return "#### " + children() + `
+
+`;
+      case "h5":
+        return "##### " + children() + `
+
+`;
+      case "h6":
+        return "###### " + children() + `
+
+`;
+      case "ul": {
+        var items = Array.from(node.children).map(function(li) {
+          return "- " + nodeToMarkdown(li, depth + 1).trim();
+        }).join(`
+`);
+        return items + `
+
+`;
+      }
+      case "ol": {
+        var items = Array.from(node.children).map(function(li, i) {
+          return i + 1 + ". " + nodeToMarkdown(li, depth + 1).trim();
+        }).join(`
+`);
+        return items + `
+
+`;
+      }
+      case "li":
+        return children();
+      case "blockquote":
+        return children().split(`
+`).map(function(l) {
+          return "> " + l;
+        }).join(`
+`) + `
+
+`;
+      case "a": {
+        const href = node.getAttribute("href") || "";
+        const text = children().trim();
+        if (!href)
+          return text;
+        if (href.startsWith("sandbox:")) {
+          const label = text || href.replace(/^sandbox:/, "");
+          return "> **Code Interpreter file:** `" + href + "`" + (label && label !== href ? " (" + label + ")" : "") + `
+
+`;
+        }
+        const absHref = resolveHttpUrl(href);
+        if (!absHref)
+          return text;
+        return text ? markdownLink(text, absHref) : absHref;
+      }
+      case "img": {
+        if (node.getAttribute("aria-hidden") === "true")
+          return "";
+        const src = node.getAttribute("src") || "";
+        if (!src || src.startsWith("data:") || src.startsWith("blob:"))
+          return "";
+        if (src.includes("favicon") || src.includes("s2/favicons"))
+          return "";
+        const absSrc = resolveImageUrl(src);
+        if (!absSrc)
+          return "";
+        const alt = (node.getAttribute("alt") || "").trim();
+        return "![" + markdownLabel(alt) + "](" + markdownDestination(absSrc) + `)
+
+`;
+      }
+      case "hr":
+        return `---
+
+`;
+      case "table": {
+        const rows = Array.from(node.querySelectorAll("tr"));
+        if (!rows.length)
+          return "";
+        const parseRow = function(row) {
+          return Array.from(row.querySelectorAll("th, td")).map(function(cell) {
+            return cell.textContent.trim();
+          }).join(" | ");
+        };
+        const header = parseRow(rows[0]);
+        const sep = header.split(" | ").map(function() {
+          return "---";
+        }).join(" | ");
+        const body = rows.slice(1).map(parseRow).join(`
+`);
+        return "| " + header + ` |
+| ` + sep + ` |
+` + (body ? body.split(`
+`).map(function(r) {
+          return "| " + r + " |";
+        }).join(`
+`) + `
+` : "") + `
+`;
+      }
+      case "canvas":
+        return artifactPlaceholder("canvas");
+      case "audio":
+        return artifactPlaceholder("audio");
+      case "video":
+        return artifactPlaceholder("video");
+      case "svg":
+        if (node.getAttribute("aria-hidden") === "true")
+          return "";
+        return artifactPlaceholder("svg");
+      case "button": {
+        if (node.getAttribute("data-testid") === "chatgpt-library-file-citation") {
+          const label = node.getAttribute("aria-label") || "";
+          const name = /([^\s/\\]+\.(?:md|txt|pdf|docx?|xlsx?|csv|json|zip|png|jpe?g))$/i.exec(label);
+          if (name)
+            return " `" + name[1].replace(/`/g, "") + "` (referenced file; not downloaded)";
+        }
+        return "";
+      }
+      default:
+        return children();
+    }
+  }
+  function extractImages(section) {
+    const seenSrcs = new Set;
+    const results = [];
+    const imgEls = section.querySelectorAll("img");
+    for (const img of imgEls) {
+      if (img.getAttribute("aria-hidden") === "true")
+        continue;
+      const src = img.getAttribute("src") || "";
+      if (!src || src.startsWith("data:") || src.startsWith("blob:"))
+        continue;
+      if (src.includes("favicon") || src.includes("s2/favicons"))
+        continue;
+      if (typeof img.closest === "function" && (img.closest(".markdown") || img.closest('[class*="prose"]')))
+        continue;
       const absSrc = resolveImageUrl(src);
-      if (!absSrc) return '';
-      const alt = (node.getAttribute('alt') || '').trim();
-      return '![' + alt + '](' + absSrc + ')\n\n';
+      if (!absSrc)
+        continue;
+      if (seenSrcs.has(absSrc))
+        continue;
+      seenSrcs.add(absSrc);
+      const alt = (img.getAttribute("alt") || "").trim();
+      results.push("![" + markdownLabel(alt) + "](" + markdownDestination(absSrc) + ")");
     }
-    case 'hr':
-      return '---\n\n';
-    case 'table': {
-      const rows = Array.from(node.querySelectorAll('tr'));
-      if (!rows.length) return '';
-      const parseRow = function(row) {
-        return Array.from(row.querySelectorAll('th, td'))
-          .map(function(cell) { return cell.textContent.trim(); })
-          .join(' | ');
-      };
-      const header = parseRow(rows[0]);
-      const sep = header.split(' | ').map(function() { return '---'; }).join(' | ');
-      const body = rows.slice(1).map(parseRow).join('\n');
-      return '| ' + header + ' |\n| ' + sep + ' |\n' +
-        (body ? body.split('\n').map(function(r) { return '| ' + r + ' |'; }).join('\n') + '\n' : '') + '\n';
-    }
-    case 'canvas':
-      return artifactPlaceholder('canvas');
-    case 'audio':
-      return artifactPlaceholder('audio');
-    case 'video':
-      return artifactPlaceholder('video');
-    case 'svg':
-      if (node.getAttribute('aria-hidden') === 'true') return '';
-      return artifactPlaceholder('svg');
-    case 'button': {
-      if (node.getAttribute('data-testid') === 'chatgpt-library-file-citation') {
-        const label = node.getAttribute('aria-label') || '';
-        const name = /([^\s/\\]+\.(?:md|txt|pdf|docx?|xlsx?|csv|json|zip|png|jpe?g))$/i.exec(label);
-        if (name) return ' `'+ name[1].replace(/`/g, '') + '` (referenced file; not downloaded)';
-      }
-      return '';
-    }
-    default:
-      return children();
+    return results;
   }
-}
-
-/** Extract images from a turn section that live OUTSIDE the .markdown prose
- *  container (nodeToMarkdown handles images inside .markdown). Captures all
- *  visible images regardless of CDN path. */
-function extractImages(section) {
-  const seenSrcs = new Set();
-  const results = [];
-
-  const imgEls = section.querySelectorAll('img');
-  for (const img of imgEls) {
-    if (img.getAttribute('aria-hidden') === 'true') continue;
-
-    const src = img.getAttribute('src') || '';
-    if (!src || src.startsWith('data:') || src.startsWith('blob:')) continue;
-    if (src.includes('favicon') || src.includes('s2/favicons')) continue;
-
-    // Skip images already inside a markdown/prose container —
-    // nodeToMarkdown will emit them with their surrounding context.
-    if (typeof img.closest === 'function' &&
-        (img.closest('.markdown') || img.closest('[class*="prose"]'))) continue;
-
-    // All image URLs: preserve query params — estuary needs p+ts,
-    // CDN needs SAS tokens. fetchImageDataUrls replaces them with
-    // local paths after download.
-    const absSrc = resolveImageUrl(src);
-    if (!absSrc) continue;
-
-    if (seenSrcs.has(absSrc)) continue;
-    seenSrcs.add(absSrc);
-
-    const alt = (img.getAttribute('alt') || '').trim();
-    results.push('![' + alt + '](' + absSrc + ')');
-  }
-
-  return results;
-}
-
-/** Selectors that have identified an attachment chip, most specific first.
- *  More than one on purpose: a single `data-testid` value is a private contract
- *  that can be renamed without notice, and if the only selector misses, every
- *  attachment in every conversation disappears while the export still reports
- *  success. The fallbacks are shape-based (a link to a file host) so a rename
- *  degrades coverage instead of zeroing it. */
-var ATTACHMENT_CHIP_SELECTORS = [
-  '[data-testid="file-chip"]',
-  '[data-testid*="file-chip"]',
-  '[data-testid*="attachment"]',
-  'a[href*="/files/"]',
-  'a[href*="/backend-api/files/"]',
-  'a[href*="files.oaiusercontent.com"]',
-];
-
-/** True only when the URL's PARSED host is one that serves conversation files.
- *  Exact host comparison, never a substring: `evil.example/?x=files.oaiuser
- *  content.com` and `files.oaiusercontent.com.attacker.net` both contain the
- *  string and neither is the host. */
-function isConversationFileUrl(url) {
-  let parsed;
-  try {
-    parsed = new URL(url);
-  } catch (_e) {
+  var ATTACHMENT_CHIP_SELECTORS = [
+    '[data-testid="file-chip"]',
+    '[data-testid*="file-chip"]',
+    '[data-testid*="attachment"]',
+    'a[href*="/files/"]',
+    'a[href*="/backend-api/files/"]',
+    'a[href*="files.oaiusercontent.com"]'
+  ];
+  function isConversationFileUrl(url) {
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch (_e) {
+      return false;
+    }
+    if (parsed.protocol !== "https:")
+      return false;
+    if (parsed.hostname === "files.oaiusercontent.com")
+      return true;
+    if (parsed.hostname === "chatgpt.com" || parsed.hostname === "chat.openai.com") {
+      return parsed.pathname.indexOf("/files/") !== -1 || parsed.pathname.indexOf("/estuary/") !== -1;
+    }
     return false;
   }
-  if (parsed.protocol !== 'https:') return false;
-  if (parsed.hostname === 'files.oaiusercontent.com') return true;
-  if (parsed.hostname === 'chatgpt.com' || parsed.hostname === 'chat.openai.com') {
-    return parsed.pathname.indexOf('/files/') !== -1 ||
-      parsed.pathname.indexOf('/estuary/') !== -1;
-  }
-  return false;
-}
-
-/** Extract file attachments from a turn section outside the prose container.
- *  Returns the markdown links, and reports which selector actually matched so a
- *  drifted primary selector is distinguishable from a turn with no attachments —
- *  the two were previously both an empty array. */
-function extractAttachmentsDetailed(section) {
-  const seenHrefs = new Set();
-  const results = [];
-  const empty = { links: results, matchedBy: null, primaryMatched: false };
-  if (!section || !section.querySelectorAll) return empty;
-
-  let chips = [];
-  let matchedBy = null;
-  for (const selector of ATTACHMENT_CHIP_SELECTORS) {
-    let found;
-    try {
-      found = section.querySelectorAll(selector);
-    } catch (_e) {
-      continue;
+  function extractAttachmentsDetailed(section) {
+    const seenHrefs = new Set;
+    const results = [];
+    const empty = { links: results, matchedBy: null, primaryMatched: false };
+    if (!section || !section.querySelectorAll)
+      return empty;
+    let chips = [];
+    let matchedBy = null;
+    for (const selector of ATTACHMENT_CHIP_SELECTORS) {
+      let found;
+      try {
+        found = section.querySelectorAll(selector);
+      } catch (_e) {
+        continue;
+      }
+      const list = found ? Array.from(found) : [];
+      if (list.length) {
+        chips = list;
+        matchedBy = selector;
+        break;
+      }
     }
-    const list = found ? Array.from(found) : [];
-    if (list.length) {
-      chips = list;
-      matchedBy = selector;
-      break;
-    }
-  }
-
-  // A `[href*="…"]` selector matches a SUBSTRING, so `https://evil.example/
-  // ?x=files.oaiusercontent.com` satisfies it. Anything the fallbacks find is
-  // therefore re-checked against the real parsed host before it is treated as an
-  // attachment — the popup fetches these URLs, so a substring match is not a
-  // sufficient reason to trust one.
-  const usedFallbackHrefMatch = matchedBy !== null &&
-    matchedBy !== ATTACHMENT_CHIP_SELECTORS[0] &&
-    matchedBy.indexOf('href') !== -1;
-
-  for (const chip of chips) {
-    if (typeof chip.closest === 'function' &&
-        (chip.closest('.markdown') || chip.closest('[class*="prose"]'))) {
-      continue;
-    }
-    const href = hrefFromAttachmentChip(chip);
-    if (!href || href.startsWith('sandbox:')) continue;
-    const absHref = resolveImageUrl(href);
-    if (!absHref || seenHrefs.has(absHref)) continue;
-    if (usedFallbackHrefMatch && !isConversationFileUrl(absHref)) continue;
-    seenHrefs.add(absHref);
-    results.push(markdownLink(labelFromAttachmentChip(chip), absHref));
-  }
-
-  return {
-    links: results,
-    matchedBy: matchedBy,
-    // False when attachments were found only by a fallback: the primary testid
-    // no longer matches, which is worth surfacing before it silently becomes
-    // "this conversation had no files".
-    primaryMatched: matchedBy === ATTACHMENT_CHIP_SELECTORS[0],
-  };
-}
-
-/** Backwards-compatible view: just the markdown links. */
-function extractAttachments(section) {
-  return extractAttachmentsDetailed(section).links;
-}
-
-/* ------------------------------------------------------------------------- *
- * Artefacts that render NO chip at all.
- *
- * Measured on a production conversation the operator supplied as one that
- * "definitely contains the documents": five generated PDF/DOCX files, and
- * EVERY ONE of the six ATTACHMENT_CHIP_SELECTORS found nothing —
- *
- *   a[href*="/files/"], a[href*="files.oaiusercontent.com"] -> []
- *   [data-testid*="file-chip"], [data-testid*="attachment"] -> {} (none)
- *   [download] -> []
- *
- * Code-interpreter output is rendered in a separate artefact <section> with no
- * href, no testid and no download attribute; the file name lives in a bare
- * <span> and the bytes are fetched on click. The panel is also OUTSIDE the
- * message tree (`button.closest('[data-message-id]')` === null at 28 ancestors),
- * so a per-turn DOM scan cannot associate a file with its message even in
- * principle. A DOM-only implementation would have exported ZERO documents from
- * that conversation while reporting success.
- *
- * The conversation API carries what the DOM does not, in one request and with no
- * translatable strings involved (verified: 200, 12 uploaded attachments with
- * {message_id, name, file_id, mime_type, size} plus 31 generated assets):
- *
- *   GET /backend-api/conversation/{id}          (Bearer from /api/auth/session)
- *   GET /backend-api/conversation/{id}/interpreter/download
- *         ?message_id=…&sandbox_path=/mnt/data/…   -> { download_url, … }
- *
- * `message_id` is MANDATORY on the download call (omitting it returns 422), and
- * it is only obtainable from the API — which is the reason this path exists
- * rather than being an optimisation of the DOM one.
- * ------------------------------------------------------------------------- */
-
-/** Fetch the page's own session token. Same-origin, cookie-authenticated; the
- *  token is never stored, logged, or sent anywhere but chatgpt.com. */
-async function fetchSessionToken(fetchImpl) {
-  const doFetch = fetchImpl || (typeof fetch === 'function' ? fetch : null);
-  if (!doFetch) return null;
-  try {
-    const response = await doFetch('/api/auth/session', {
-      credentials: 'include',
-      headers: { accept: 'application/json' },
-    });
-    if (!response || !response.ok) return null;
-    const body = await response.json();
-    return (body && body.accessToken) || null;
-  } catch (_e) {
-    return null;
-  }
-}
-
-/** Read just enough of a conversation to decide whether it needs exporting.
- *
- *  Walking a conversation to find out whether it grew is the expensive way to
- *  ask: measured on a real 1146-message thread, 282 seconds and it had not
- *  finished. The page's own endpoint answers it in one request, so a batch that
- *  re-runs over 800 conversations can skip the unchanged ones in milliseconds
- *  each instead of re-reading them all.
- *
- *  Returns null when the answer could not be read — never a zeroed shape. "I
- *  could not tell" must not be usable as "nothing changed", because that
- *  direction of mistake skips a conversation permanently and re-running cannot
- *  repair it.
- *
- *  Only three scalars leave this function. The response also carries the whole
- *  message mapping, which was 4 661 057 bytes for the measured thread; it is
- *  read to count messages and then dropped. */
-async function fetchConversationMetadata(conversationId, options) {
-  const opts = options || {};
-  const doFetch = opts.fetchImpl || (typeof fetch === 'function' ? fetch : null);
-  if (!doFetch || !conversationId) return null;
-  const token = opts.token !== undefined ? opts.token : await fetchSessionToken(doFetch);
-  if (!token) return null;
-  try {
-    const response = await doFetch('/backend-api/conversation/' + encodeURIComponent(conversationId), {
-      credentials: 'include',
-      headers: { accept: 'application/json', Authorization: 'Bearer ' + token },
-    });
-    if (!response || !response.ok) return null;
-    const body = await response.json();
-    if (!body) return null;
-    // Count MESSAGES, not mapping nodes. The measured thread reported 1147 nodes
-    // and 1146 messages: branch points and system nodes carry no message body.
-    // A count compared against a differently-derived one is not a comparison.
-    let messageCount = 0;
-    const mapping = body.mapping || {};
-    for (const key of Object.keys(mapping)) {
-      if (mapping[key] && mapping[key].message) messageCount += 1;
+    const usedFallbackHrefMatch = matchedBy !== null && matchedBy !== ATTACHMENT_CHIP_SELECTORS[0] && matchedBy.indexOf("href") !== -1;
+    for (const chip of chips) {
+      if (typeof chip.closest === "function" && (chip.closest(".markdown") || chip.closest('[class*="prose"]'))) {
+        continue;
+      }
+      const href = hrefFromAttachmentChip(chip);
+      if (!href || href.startsWith("sandbox:"))
+        continue;
+      const absHref = resolveImageUrl(href);
+      if (!absHref || seenHrefs.has(absHref))
+        continue;
+      if (usedFallbackHrefMatch && !isConversationFileUrl(absHref))
+        continue;
+      seenHrefs.add(absHref);
+      results.push(markdownLink(labelFromAttachmentChip(chip), absHref));
     }
     return {
-      updateTime: typeof body.update_time === 'number' ? body.update_time : null,
-      currentNode: body.current_node ? String(body.current_node) : null,
-      messageCount: messageCount,
+      links: results,
+      matchedBy,
+      primaryMatched: matchedBy === ATTACHMENT_CHIP_SELECTORS[0]
     };
-  } catch (_e) {
-    return null;
   }
-}
-
-/** Sandbox paths written in the TEXT of an API message.
- *
- *  Measured on a production conversation (2026-09-13) whose .zip and .diff had
- *  survived six releases of click-interception work: all six generated files —
- *  both archives included — are named in the API response as bare paths
- *
- *    /mnt/data/canon-consilium-prompt-bundle-v1.zip
- *    /mnt/data/Canon_Arcana_v0.2_to_v0.3.diff
- *
- *  and every one resolves through the ordinary interpreter/download endpoint.
- *  No click, no world boundary, no prototype patch: the answer was already in a
- *  response the extension downloads on every export and then read only for
- *  `metadata.attachments` and `part.asset_pointer`.
- *
- *  Two reasons the existing readers miss them, and this function answers both:
- *    - the paths are BARE. `sandboxFilesFromMarkdown` requires the `sandbox:`
- *      scheme, so it matched zero of the six;
- *    - the paths live in messages that never reach the markdown at all — the
- *      `tool` role among them — so searching the exported text cannot find them
- *      no matter how the pattern is written (measured: zero occurrences in the
- *      exported file, six in the API response).
- *
- *  Reads only `role`s that can name a produced file. The USER's text is skipped
- *  on purpose: a path the user typed is a request, not an artefact, and asking
- *  the backend for it costs a request per mention and answers "no such file".
- */
-function sandboxPathsFromApiMessage(message) {
-  const content = (message && message.content) || {};
-  const parts = Array.isArray(content.parts) ? content.parts : [];
-  const chunks = [];
-  for (const part of parts) {
-    if (typeof part === 'string') chunks.push(part);
+  function extractAttachments(section) {
+    return extractAttachmentsDetailed(section).links;
   }
-  if (typeof content.text === 'string') chunks.push(content.text);
-  const text = chunks.join('\n');
-  const out = [];
-  const seen = new Set();
-  // Accepts both shapes at once: the optional `sandbox:` scheme, then the path.
-  // Stops at whitespace, quote, backtick, or a closing bracket — a Cyrillic
-  // label frequently follows the path with no separator.
-  // Explicit sandbox links now point into /workspace/scratch too (live 2026-10-09).
-  // Bare paths remain restricted to the legacy output directory: arbitrary tool
-  // paths are not proof of an offered file.
-  const pattern = /(?:sandbox:(\/[^\s`)\]}"'\\,;]+)|(\/mnt\/data\/[^\s`)\]}"'\\,;]+))/g;
-  let match;
-  while ((match = pattern.exec(text)) !== null) {
-    // A trailing period is sentence punctuation far more often than part of a
-    // file name; a path that really ends in one resolves to nothing anyway, and
-    // the unresolved-file notice keeps that visible instead of silent.
-    const sandboxPath = (match[1] || match[2]).replace(/[.]+$/, '');
-    if (!sandboxPath || seen.has(sandboxPath)) continue;
-    const name = sandboxPath.split('/').pop();
-    // A bare directory ("/mnt/data/") names no file.
-    if (!name) continue;
-    seen.add(sandboxPath);
-    out.push({ name: name, sandboxPath: sandboxPath });
-  }
-  return out;
-}
 
-/** Enumerate a conversation's artefacts from the API.
- *
- *  Returns null — not an empty list — when the API could not be read. The
- *  distinction matters: "no artefacts" and "could not tell" must never collapse
- *  into the same value, or a failed request reads as a clean conversation. */
-async function fetchConversationArtifacts(conversationId, options) {
-  const opts = options || {};
-  const doFetch = opts.fetchImpl || (typeof fetch === 'function' ? fetch : null);
-  if (!doFetch || !conversationId) return null;
-  const token = opts.token !== undefined
-    ? opts.token
-    : await fetchSessionToken(doFetch);
-  if (!token) return null;
-
-  let payload;
-  const init = {
-    credentials: 'include',
-    headers: { accept: 'application/json', authorization: 'Bearer ' + token },
-  };
-  try {
-    const response = await doFetch('/backend-api/conversation/' + conversationId, init);
-    if (response && response.ok) payload = await response.json();
-    // The app-shell endpoint returns messages directly rather than mapping nodes.
-    // Observed on the live site, 2026-10-09. Retain the legacy full inventory
-    // whenever it is available, since the new endpoint may return only one page.
-    if (!payload || (!payload.mapping && !Array.isArray(payload.messages))) {
-      const modern = await doFetch('/backend-api/conversations/' + conversationId +
-        '?num_turns=10&include_has_versions=true', init);
-      if (!modern || !modern.ok) return null;
-      payload = await modern.json();
+  // src/content/artifacts.mjs
+  async function fetchSessionToken(fetchImpl) {
+    const doFetch = fetchImpl || (typeof fetch === "function" ? fetch : null);
+    if (!doFetch)
+      return null;
+    try {
+      const response = await doFetch("/api/auth/session", {
+        credentials: "include",
+        headers: { accept: "application/json" }
+      });
+      if (!response || !response.ok)
+        return null;
+      const body = await response.json();
+      return body && body.accessToken || null;
+    } catch (_e) {
+      return null;
     }
-  } catch (_e) {
-    return null;
   }
-  if (!payload || (!payload.mapping && !Array.isArray(payload.messages))) return null;
-  if (!payload.mapping && payload.page_info &&
-      (payload.page_info.has_previous_page || payload.page_info.has_next_page)) return null;
-
-  const artifacts = [];
-  const seen = new Set();
-  const messages = payload.mapping
-    ? Object.values(payload.mapping).map(function(node) { return node && node.message; })
-    : payload.messages;
-  for (const message of messages) {
-    if (!message) continue;
-    const messageId = message.id || null;
-    const metadata = message.metadata || {};
-    const role = ((message.author || {}).role) || '';
-
-    // Files the answer NAMES rather than attaches. See
-    // sandboxPathsFromApiMessage: this is the only source that carried the
-    // archives, and the `tool` role is half of it.
-    // Tool instructions and private planning name intended paths, not files
-    // produced for the user. In an observed failed website fetch, the command
-    // named an HTML output but DNS failed before open(..., 'w') ran. Treating
-    // that input as output produced a false missing-attachment warning.
-    // Keep actual tool RESULTS and user-facing answers as independent sources;
-    // metadata attachments below are deliberately outside this filter.
-    const isAssistantInstruction = role === 'assistant' && (
-      (message.recipient && message.recipient !== 'all') ||
-      ((message.content || {}).content_type === 'code') ||
-      message.channel === 'analysis');
-    if (role !== 'user' && !isAssistantInstruction) {
-      for (const found of sandboxPathsFromApiMessage(message)) {
-        const key = 'sbx:' + found.sandboxPath;
-        const parts = (message.content || {}).parts || [];
-        const chunks = (Array.isArray(parts) ? parts : []).concat((message.content || {}).text || '');
-        const offered = chunks.some(function(part) {
-          return typeof part === 'string' && part.indexOf('sandbox:' + found.sandboxPath) !== -1;
-        });
-        const priority = offered ? 0 : (role === 'assistant' ? 1 : 2);
-        if (seen.has(key)) {
-          const existing = artifacts.find(function(a) { return a.sandboxPath === found.sandboxPath; });
-          if (existing && priority < existing.priority) {
-            existing.priority = priority;
-            existing.messageId = messageId;
+  function metadataFromConversationBody(body) {
+    if (!body || typeof body !== "object")
+      return null;
+    const updateTime = typeof body.update_time === "number" && Number.isFinite(body.update_time) ? body.update_time : null;
+    const currentNode = body.current_node ? String(body.current_node) : null;
+    const paged = !body.mapping && body.page_info && (body.page_info.has_previous_page || body.page_info.has_next_page);
+    let messageCount = null;
+    if (!paged && body.mapping && typeof body.mapping === "object") {
+      messageCount = 0;
+      for (const key of Object.keys(body.mapping)) {
+        if (body.mapping[key] && body.mapping[key].message)
+          messageCount += 1;
+      }
+    } else if (!paged && Array.isArray(body.messages)) {
+      messageCount = 0;
+      for (const message of body.messages) {
+        if (message)
+          messageCount += 1;
+      }
+    }
+    if (updateTime === null && !currentNode && messageCount === null)
+      return null;
+    return {
+      updateTime,
+      currentNode,
+      messageCount
+    };
+  }
+  async function fetchConversationMetadata(conversationId, options) {
+    const opts = options || {};
+    const doFetch = opts.fetchImpl || (typeof fetch === "function" ? fetch : null);
+    if (!doFetch || !conversationId)
+      return null;
+    const token = opts.token !== undefined ? opts.token : await fetchSessionToken(doFetch);
+    if (!token)
+      return null;
+    const init = {
+      credentials: "include",
+      headers: { accept: "application/json", Authorization: "Bearer " + token }
+    };
+    const id = encodeURIComponent(conversationId);
+    let meta = null;
+    try {
+      const response = await doFetch("/backend-api/conversation/" + id, init);
+      if (response && response.ok)
+        meta = metadataFromConversationBody(await response.json());
+    } catch (_e) {
+      meta = null;
+    }
+    if (meta)
+      return meta;
+    try {
+      const modern = await doFetch("/backend-api/conversations/" + id + "?num_turns=10&include_has_versions=true", init);
+      if (!modern || !modern.ok)
+        return null;
+      return metadataFromConversationBody(await modern.json());
+    } catch (_e) {
+      return null;
+    }
+  }
+  function sandboxPathsFromApiMessage(message) {
+    const content = message && message.content || {};
+    const parts = Array.isArray(content.parts) ? content.parts : [];
+    const chunks = [];
+    for (const part of parts) {
+      if (typeof part === "string")
+        chunks.push(part);
+    }
+    if (typeof content.text === "string")
+      chunks.push(content.text);
+    const text = chunks.join(`
+`);
+    const out = [];
+    const seen = new Set;
+    const pattern = /(?:sandbox:(\/[^\s`)\]}"'\\,;]+)|(\/mnt\/data\/[^\s`)\]}"'\\,;]+))/g;
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      const sandboxPath = (match[1] || match[2]).replace(/[.]+$/, "");
+      if (!sandboxPath || seen.has(sandboxPath))
+        continue;
+      const name = sandboxPath.split("/").pop();
+      if (!name)
+        continue;
+      seen.add(sandboxPath);
+      out.push({ name, sandboxPath });
+    }
+    return out;
+  }
+  async function fetchConversationArtifacts(conversationId, options) {
+    const opts = options || {};
+    const doFetch = opts.fetchImpl || (typeof fetch === "function" ? fetch : null);
+    if (!doFetch || !conversationId)
+      return null;
+    const token = opts.token !== undefined ? opts.token : await fetchSessionToken(doFetch);
+    if (!token)
+      return null;
+    let payload;
+    const init = {
+      credentials: "include",
+      headers: { accept: "application/json", authorization: "Bearer " + token }
+    };
+    try {
+      const response = await doFetch("/backend-api/conversation/" + conversationId, init);
+      if (response && response.ok)
+        payload = await response.json();
+      if (!payload || !payload.mapping && !Array.isArray(payload.messages)) {
+        const modern = await doFetch("/backend-api/conversations/" + conversationId + "?num_turns=10&include_has_versions=true", init);
+        if (!modern || !modern.ok)
+          return null;
+        payload = await modern.json();
+      }
+    } catch (_e) {
+      return null;
+    }
+    if (!payload || !payload.mapping && !Array.isArray(payload.messages))
+      return null;
+    if (!payload.mapping && payload.page_info && (payload.page_info.has_previous_page || payload.page_info.has_next_page))
+      return null;
+    const artifacts = [];
+    const seen = new Set;
+    const messages = payload.mapping ? Object.values(payload.mapping).map(function(node) {
+      return node && node.message;
+    }) : payload.messages;
+    for (const message of messages) {
+      if (!message)
+        continue;
+      const messageId = message.id || null;
+      const metadata = message.metadata || {};
+      const role = (message.author || {}).role || "";
+      const isAssistantInstruction = role === "assistant" && (message.recipient && message.recipient !== "all" || (message.content || {}).content_type === "code" || message.channel === "analysis");
+      if (role !== "user" && !isAssistantInstruction) {
+        for (const found of sandboxPathsFromApiMessage(message)) {
+          const key = "sbx:" + found.sandboxPath;
+          const parts = (message.content || {}).parts || [];
+          const chunks = (Array.isArray(parts) ? parts : []).concat((message.content || {}).text || "");
+          const offered = chunks.some(function(part) {
+            return typeof part === "string" && part.indexOf("sandbox:" + found.sandboxPath) !== -1;
+          });
+          const priority = offered ? 0 : role === "assistant" ? 1 : 2;
+          if (seen.has(key)) {
+            const existing = artifacts.find(function(a) {
+              return a.sandboxPath === found.sandboxPath;
+            });
+            if (existing && priority < existing.priority) {
+              existing.priority = priority;
+              existing.messageId = messageId;
+            }
+            continue;
           }
-          continue;
+          seen.add(key);
+          artifacts.push({
+            kind: "sandbox",
+            priority,
+            messageId,
+            name: found.name,
+            fileId: null,
+            mimeType: null,
+            size: null,
+            sandboxPath: found.sandboxPath
+          });
         }
+      }
+      for (const attachment of metadata.attachments || []) {
+        const key = "att:" + (attachment.id || attachment.name);
+        if (!attachment.name || seen.has(key))
+          continue;
         seen.add(key);
         artifacts.push({
-          kind: 'sandbox',
-          priority: priority,
-          messageId: messageId,
-          name: found.name,
-          fileId: null,
-          mimeType: null,
-          size: null,
-          sandboxPath: found.sandboxPath,
+          kind: "attachment",
+          messageId,
+          name: attachment.name,
+          fileId: attachment.id || null,
+          mimeType: attachment.mime_type || null,
+          size: typeof attachment.size === "number" ? attachment.size : null,
+          sandboxPath: null
+        });
+      }
+      const parts = (message.content || {}).parts || [];
+      for (const part of parts) {
+        if (!part || typeof part !== "object" || !part.asset_pointer)
+          continue;
+        const pointer = String(part.asset_pointer);
+        if (seen.has("ast:" + pointer))
+          continue;
+        seen.add("ast:" + pointer);
+        artifacts.push({
+          kind: "asset",
+          messageId,
+          name: part.name || null,
+          fileId: (pointer.match(/(file[-_][A-Za-z0-9]+)/) || [])[1] || null,
+          mimeType: part.mime_type || null,
+          size: typeof part.size === "number" ? part.size : null,
+          sandboxPath: null
         });
       }
     }
-
-    for (const attachment of metadata.attachments || []) {
-      const key = 'att:' + (attachment.id || attachment.name);
-      if (!attachment.name || seen.has(key)) continue;
-      seen.add(key);
-      artifacts.push({
-        kind: 'attachment',
-        messageId: messageId,
-        name: attachment.name,
-        fileId: attachment.id || null,
-        mimeType: attachment.mime_type || null,
-        size: typeof attachment.size === 'number' ? attachment.size : null,
-        sandboxPath: null,
-      });
-    }
-
-    const parts = (message.content || {}).parts || [];
-    for (const part of parts) {
-      if (!part || typeof part !== 'object' || !part.asset_pointer) continue;
-      const pointer = String(part.asset_pointer);
-      if (seen.has('ast:' + pointer)) continue;
-      seen.add('ast:' + pointer);
-      artifacts.push({
-        kind: 'asset',
-        messageId: messageId,
-        name: part.name || null,
-        // "sediment://file_abc" / "file-service://file_abc" -> the file id.
-        fileId: (pointer.match(/(file[-_][A-Za-z0-9]+)/) || [])[1] || null,
-        mimeType: part.mime_type || null,
-        size: typeof part.size === 'number' ? part.size : null,
-        sandboxPath: null,
-      });
-    }
+    return artifacts;
   }
-  return artifacts;
-}
-
-/** Resolve a sandbox artefact (code-interpreter output) to a fetchable URL.
- *  Returns null on any failure — the caller must not invent a URL. */
-async function resolveSandboxDownloadUrl(conversationId, messageId, sandboxPath, options) {
-  const opts = options || {};
-  const doFetch = opts.fetchImpl || (typeof fetch === 'function' ? fetch : null);
-  if (!doFetch || !conversationId || !messageId || !sandboxPath) return null;
-  const token = opts.token !== undefined
-    ? opts.token
-    : await fetchSessionToken(doFetch);
-  if (!token) return null;
-  const url = '/backend-api/conversation/' + conversationId +
-    '/interpreter/download?message_id=' + encodeURIComponent(messageId) +
-    '&sandbox_path=' + encodeURIComponent(sandboxPath);
-  return requestArtifactDownloadUrl(url, doFetch, token, opts);
-}
-
-/** Uploaded files use the file service, not the interpreter sandbox.
- * Request path and response fields were observed on a manual document download.
- * Never derive a sandbox path from an uploaded filename. */
-async function resolveUploadedDownloadUrl(conversationId, fileId, options) {
-  const opts = options || {};
-  const doFetch = opts.fetchImpl || (typeof fetch === 'function' ? fetch : null);
-  if (!doFetch || !conversationId || !fileId) return null;
-  const token = opts.token !== undefined ? opts.token : await fetchSessionToken(doFetch);
-  if (!token) return null;
-  const url = '/backend-api/files/download/' + encodeURIComponent(fileId) +
-    '?conversation_id=' + encodeURIComponent(conversationId) + '&download_intent=true';
-  return requestArtifactDownloadUrl(url, doFetch, token, opts);
-}
-
-async function requestArtifactDownloadUrl(url, doFetch, token, opts) {
-  const fail = function(kind, host) {
-    if (typeof opts.onFailure === 'function') opts.onFailure(kind, host);
-    return null;
-  };
-  let step = 'request';
-  try {
-    const response = await doFetch(url, {
-      credentials: 'include',
-      headers: { accept: 'application/json', authorization: 'Bearer ' + token },
-    });
-    if (!response || !response.ok) return fail('http-error');
-    step = 'json';
-    const body = await response.json();
-    const resolved = body && (body.download_url || body.url);
-    if (typeof resolved !== 'string' || !resolved) return fail('missing-url');
-    if (!isConversationFileUrl(resolved)) {
-      let host = '';
-      try { host = new URL(resolved).hostname; } catch (_e) { /* invalid URL */ }
-      return fail('rejected-url', host);
-    }
-    return {
-      url: resolved,
-      fileName: (body && body.file_name) || null,
-      mimeType: (body && body.mime_type) || null,
-      size: (body && typeof body.file_size_bytes === 'number')
-        ? body.file_size_bytes
-        : null,
+  async function resolveSandboxDownloadUrl(conversationId, messageId, sandboxPath, options) {
+    const opts = options || {};
+    const doFetch = opts.fetchImpl || (typeof fetch === "function" ? fetch : null);
+    if (!doFetch || !conversationId || !messageId || !sandboxPath)
+      return null;
+    const token = opts.token !== undefined ? opts.token : await fetchSessionToken(doFetch);
+    if (!token)
+      return null;
+    const url = "/backend-api/conversation/" + conversationId + "/interpreter/download?message_id=" + encodeURIComponent(messageId) + "&sandbox_path=" + encodeURIComponent(sandboxPath);
+    return requestArtifactDownloadUrl(url, doFetch, token, opts);
+  }
+  async function resolveUploadedDownloadUrl(conversationId, fileId, options) {
+    const opts = options || {};
+    const doFetch = opts.fetchImpl || (typeof fetch === "function" ? fetch : null);
+    if (!doFetch || !conversationId || !fileId)
+      return null;
+    const token = opts.token !== undefined ? opts.token : await fetchSessionToken(doFetch);
+    if (!token)
+      return null;
+    const url = "/backend-api/files/download/" + encodeURIComponent(fileId) + "?conversation_id=" + encodeURIComponent(conversationId) + "&download_intent=true";
+    return requestArtifactDownloadUrl(url, doFetch, token, opts);
+  }
+  async function requestArtifactDownloadUrl(url, doFetch, token, opts) {
+    const fail = function(kind, host) {
+      if (typeof opts.onFailure === "function")
+        opts.onFailure(kind, host);
+      return null;
     };
-  } catch (_e) {
-    return fail(step === 'json' ? 'unreadable-json' : 'request-error');
-  }
-}
-
-/** Resolve every artefact panel file to a download URL.
- *
- *  `message_id` is mandatory on the endpoint but does NOT select the file:
- *  measured against 12 different message ids in the same conversation, all
- *  returned the SAME file id for one sandbox_path (`distinctFileIds` length 1).
- *  The path identifies the bytes; the id is only required context. So one
- *  working id is found once and reused, instead of retrying per file — which
- *  would otherwise be O(files x messages) requests against the operator's
- *  account for no gain.
- */
-async function resolveArtifactPanelFiles(conversationId, options) {
-  const opts = options || {};
-  const files = opts.files || listArtifactPanelFiles(opts.doc);
-  if (!files.length) return [];
-  const doFetch = opts.fetchImpl || (typeof fetch === 'function' ? fetch : null);
-  const token = opts.token !== undefined
-    ? opts.token
-    : await fetchSessionToken(doFetch);
-  if (!token) return files.map((f) => ({ file: f, resolved: null }));
-
-  const messageIds = Array.from(new Set(opts.messageIds || []));
-  let workingId = opts.messageId || null;
-  const out = [];
-  for (const file of files) {
-    let resolved = null;
-    // An API path carries its own message context. Retrying every unrelated
-    // message id for the same path starves subsequent files without changing
-    // which file the endpoint selects. Panel-only paths retain the legacy search.
-    const candidates = file.messageId ? [file.messageId] :
-      Array.from(new Set([workingId].concat(messageIds).filter(Boolean)));
-    if (file.kind === 'attachment') {
-      resolved = await resolveUploadedDownloadUrl(conversationId, file.fileId,
-        { fetchImpl: doFetch, token: token, onFailure: opts.onFailure });
-    }
-    for (const candidate of file.kind === 'attachment' ? [] : candidates) {
-      const attempt = await resolveSandboxDownloadUrl(
-        conversationId, candidate, file.sandboxPath,
-        { fetchImpl: doFetch, token: token, onFailure: opts.onFailure });
-      if (attempt) { workingId = candidate; resolved = attempt; break; }
-    }
-    const entry = { file: file, resolved: resolved };
-    out.push(entry);
-    if (typeof opts.onResolved === 'function') opts.onResolved(entry);
-  }
-  return out;
-}
-
-/** Wait for the artefact panel to mount, then list it.
- *
- *  Measured on production: after navigating to a conversation, `[data-message-id]`
- *  turns appeared at ~9s and the artefact rows only at ~12s — no scrolling
- *  involved, just render latency. Reading one frame at 11s returned nothing, so
- *  an export triggered right after opening a conversation dropped all five of its
- *  generated documents without a word.
- *
- *  Bounded and silent on absence: most conversations have no panel at all, and
- *  waiting the full budget for every one of them would slow every export.
- *
- *  Waits for the list to STOP GROWING, not for its first row. Measured on a
- *  production conversation (2026-09-12): five files in the panel, four exported,
- *  `TZ-01_Arcanada_Ecosystem_Project_Cards.md` missing with no notice — the file
- *  appeared nowhere in the markdown, not even as unresolved. The panel mounts its
- *  rows progressively, and the old loop returned on the first one, so every row
- *  that rendered a frame later was dropped silently. Reproduced on a fixture: one
- *  poll, 1 file of 3, and the row that mounts late is the one lost.
- *
- *  Absence still costs only one poll: the union wait begins after rows exist.
- *
- *  ACCUMULATES the union of every reading rather than keeping the last one.
- *  Measured (2026-09-13) after a count-based version failed to fix anything: the
- *  panel showed TZ-01..TZ-04 while the export contained TZ-02..TZ-04 plus
- *  `arcanada_talomnia_89_articles_narratives.md` — two DIFFERENT sets of four.
- *  The panel does not only grow, it is REPLACED as the page settles, and a
- *  same-length replacement looked perfectly stable to a count-based wait: four
- *  before, four after, so it returned a set missing the file the user wanted.
- *  Taking the union means a row seen in any frame survives the frame that drops
- *  it. The cost of a stale extra name is one failed resolve, reported as
- *  unresolved; the cost of a dropped name is a file the user never learns about.
- */
-async function waitForArtifactPanel(doc, options) {
-  const opts = options || {};
-  const root = doc || (typeof document !== 'undefined' ? document : null);
-  const budgetMs = opts.panelWaitMs === undefined ? 15000 : opts.panelWaitMs;
-  const stepMs = opts.panelPollMs === undefined ? 500 : opts.panelPollMs;
-  // How many consecutive polls must add nothing new before the list is believed
-  // complete. Two, because one unchanged frame is exactly what a half-rendered
-  // panel looks like between two renders.
-  const stablePolls = opts.panelStablePolls === undefined ? 2 : opts.panelStablePolls;
-  const sleep = opts.sleep || function(ms) {
-    return new Promise(function(resolve) { setTimeout(resolve, ms); });
-  };
-  const now = opts.now || function() { return Date.now(); };
-
-  const deadline = now() + budgetMs;
-  let files = listArtifactPanelFiles(root);
-  while (!files.length && now() < deadline) {
-    await sleep(stepMs);
-    files = listArtifactPanelFiles(root);
-  }
-  if (!files.length) return files;
-
-  // Rows exist; accumulate by name until no poll contributes anything new.
-  const byName = new Map();
-  for (const file of files) byName.set(file.name, file);
-  let steady = 0;
-  while (steady < stablePolls && now() < deadline) {
-    await sleep(stepMs);
-    let added = 0;
-    for (const file of listArtifactPanelFiles(root)) {
-      if (byName.has(file.name)) continue;
-      byName.set(file.name, file);
-      added += 1;
-    }
-    // Only a poll that CONTRIBUTES resets the counter. A frame that merely
-    // swaps one set for another of equal size adds names here rather than
-    // replacing them, which is the whole point.
-    steady = added > 0 ? 0 : steady + 1;
-  }
-  return Array.from(byName.values());
-}
-
-/** Read the artefact panel's rows from the DOM: file name plus its sandbox path.
- *  This supplies the sandbox_path the API needs for interpreter output. The panel
- *  is identified structurally (no testid exists) and its label is the file name,
- *  which is user data rather than a translated UI string. */
-function listArtifactPanelFiles(doc) {
-  const root = doc || (typeof document !== 'undefined' ? document : null);
-  if (!root || !root.querySelectorAll) return [];
-  let buttons;
-  try {
-    buttons = root.querySelectorAll('button[class*="open-file"], [class*="artifact-row"] button');
-  } catch (_e) {
-    return [];
-  }
-  const files = [];
-  const seen = new Set();
-  for (const button of buttons) {
-    const label = button.getAttribute ? (button.getAttribute('aria-label') || '') : '';
-    // A file name, not the sibling download button whose label is translated
-    // ("Download file" / "Скачать файл"). An extension is the discriminator.
-    if (!/\.[A-Za-z0-9]{1,8}$/.test(label) || seen.has(label)) continue;
-    seen.add(label);
-    files.push({ name: label, sandboxPath: '/mnt/data/' + label });
-  }
-  return files;
-}
-
-function orderCapturedTurns(turns) {
-  const ordered = turns instanceof Map ? Array.from(turns.values()) : Array.from(turns);
-  const hasCompleteNumericOrder = ordered.every(function(turn) {
-    return turn.order !== null && turn.order !== undefined;
-  });
-  return ordered.sort(function(a, b) {
-    if (hasCompleteNumericOrder && a.order !== b.order) return a.order - b.order;
-    return a.discoveryIndex - b.discoveryIndex;
-  });
-}
-
-function parseTurnOrder(testId) {
-  const match = String(testId || '').match(/^conversation-turn-(\d+)$/);
-  return match ? Number(match[1]) : null;
-}
-
-function buildConversationMarkdown(turns) {
-  const parts = [];
-  for (const turn of turns) {
-    if (!turn.markdown) continue;
-    if (turn.role === 'user') parts.push('#### You said:\n\n' + turn.markdown);
-    if (turn.role === 'assistant') parts.push('#### ChatGPT said:\n\n' + turn.markdown);
-  }
-  return parts.length ? parts.join('\n\n---\n\n') : null;
-}
-
-/** App-shell DOM measured on 2026-09-27. A turn-key wraps both roles.
- * Search units, not turn-key containers, are the independently captured messages.
- * Use semantic attributes; hashed CSS names and translated headings are unstable.
- */
-function modernMessageRole(section) {
-  if (!section.getAttribute || section.getAttribute('data-chatgpt-search-unit-key') === null) return null;
-  if (section.querySelector('[data-user-message-bubble]')) return 'user';
-  if (section.querySelector('[data-conversation-role]') &&
-      section.querySelector('[data-chatgpt-selection-message-id]')) return 'assistant';
-  return null;
-}
-
-function modernMessageSections(root) {
-  if (!root || !root.querySelectorAll) return [];
-  return Array.from(root.querySelectorAll('[data-chatgpt-search-unit-key]')).filter(function(unit) {
-    // Scope to measured conversation turns, excluding search panels and previews.
-    return unit.closest && unit.closest('[data-turn-key]');
-  });
-}
-
-/** History boundary measured in Chrome on 2026-09-29: the direct header
- * status persists while older pages exist, then disappears at the first message.
- * The hidden separator and zero-offset virtual slots distinguish this layout
- * from arbitrary status widgets and from a viewport mounted halfway down.
- */
-function readModernPagination(container) {
-  const root = container.querySelector && container.querySelector('[data-thread-find-target="conversation"]');
-  if (!root || root.getAttribute('data-chatgpt-conversation-selection-target') !== 'true') return null;
-  const children = Array.from(root.children || []);
-  const separatorIndex = children.findIndex(function(el) {
-    return el.tagName === 'SPAN' && el.getAttribute('hidden') !== null;
-  });
-  if (separatorIndex < 0) return null;
-  const virtualizer = children[separatorIndex + 1];
-  const list = virtualizer && virtualizer.children && virtualizer.children[0];
-  const slot = list && list.children && list.children[0];
-  if (!virtualizer || !virtualizer.style || !virtualizer.style.height || !slot) return null;
-  const pending = children.slice(0, separatorIndex).some(function(el) {
-    return el.getAttribute('role') === 'status' || !!el.querySelector('[role="status"]');
-  });
-  const first = modernMessageSections(root)[0];
-  const firstInSlot = modernMessageSections(slot)[0];
-  const atFirstSlot = !!first && first === firstInSlot && list.style && slot.style &&
-    list.style.marginTop === '0px' && slot.style.marginTop === '0px';
-  return {
-    pending: pending,
-    // The status is a history-availability indicator, including while idle.
-    // Allow the existing edge re-arm to nudge it after two quiet rounds.
-    loading: false,
-    count: modernMessageSections(root).length,
-    complete: !pending && atFirstSlot && conversationScrollTop(container) <= 1,
-  };
-}
-
-function extractModernMessage(section, discoveryIndex) {
-  const role = modernMessageRole(section);
-  const turnId = getSectionTurnId(section);
-  if (!role || !turnId) return null;
-  let markdown;
-  if (role === 'user') {
-    const bubble = section.querySelector('[data-user-message-bubble]');
-    // The outer bubble also contains the translated "Show more" control.
-    markdown = Array.from(bubble.querySelectorAll('.whitespace-pre-wrap'))
-      .map(function(node) { return node.textContent.trim(); }).filter(Boolean).join('\n\n');
-    const attachments = extractAttachments(section).concat(extractImages(section));
-    if (attachments.length) markdown += (markdown ? '\n\n' : '') + attachments.join('\n\n');
-  } else {
-    const message = section.querySelector('[data-chatgpt-selection-message-id]');
-    markdown = Array.from(message.querySelectorAll('[data-markdown-text-style]'))
-      .filter(function(node) {
-        return !node.parentElement || !node.parentElement.closest('[data-markdown-text-style]');
-      })
-      .map(function(node) { return nodeToMarkdown(node).trim(); }).filter(Boolean).join('\n\n');
-    // Do not duplicate inline images/links already converted by nodeToMarkdown.
-    for (const extra of extractAttachments(section).concat(extractImages(section))) {
-      if (!markdown.includes(extra)) markdown += (markdown ? '\n\n' : '') + extra;
-    }
-  }
-  if (!markdown) return null;
-  return createTurn(turnId, section, discoveryIndex, role, markdown.replace(/\n{3,}/g, '\n\n'));
-}
-
-function getSectionTurnId(section) {
-  if (typeof section.getAttribute === 'function') {
-    const legacy = section.getAttribute('data-turn-id') || section.turnId;
-    if (legacy) return legacy;
-    const unitKey = section.getAttribute('data-chatgpt-search-unit-key');
-    const holder = unitKey !== null && section.closest && section.closest('[data-turn-key]');
-    return holder ? JSON.stringify([holder.getAttribute('data-turn-key'), unitKey]) : null;
-  }
-  return section.turnId || null;
-}
-
-function getSectionRole(section) {
-  const directRole = section.getAttribute('data-turn');
-  if (directRole === 'user' || directRole === 'assistant') return directRole;
-  const message = section.querySelector('[data-message-author-role]');
-  if (!message) return null;
-  const childRole = message.getAttribute('data-message-author-role');
-  return childRole === 'user' || childRole === 'assistant' ? childRole : null;
-}
-
-function isExplicitlyUnsupportedTurn(section) {
-  if (typeof section.getAttribute !== 'function') {
-    return Boolean(section.role && section.role !== 'user' && section.role !== 'assistant');
-  }
-  const directRole = section.getAttribute('data-turn');
-  if (directRole) return directRole !== 'user' && directRole !== 'assistant';
-  const message = section.querySelector('[data-message-author-role]');
-  if (!message) return false;
-  const childRole = message.getAttribute('data-message-author-role');
-  return Boolean(childRole && childRole !== 'user' && childRole !== 'assistant');
-}
-
-function extractTurn(section, discoveryIndex) {
-  if (section.getAttribute && section.getAttribute('data-chatgpt-search-unit-key') !== null) {
-    return extractModernMessage(section, discoveryIndex);
-  }
-  const turnId = getSectionTurnId(section);
-  const role = getSectionRole(section);
-  if (!turnId) return null;
-
-  if (role === 'user') {
-    const message = section.querySelector('[data-message-author-role="user"]');
-    const bubble = message && (
-      message.querySelector('.whitespace-pre-wrap') || message.querySelector('[dir="auto"]') || message
-    );
-    const text = bubble ? bubble.textContent.trim() : '';
-    // Capture user-uploaded images that textContent would miss
-    const userImages = extractImages(section);
-    const userAttachments = extractAttachments(section);
-    if (!text && !userImages.length && !userAttachments.length) return null;
-    const parts = [];
-    if (text) parts.push(text);
-    if (userAttachments.length) parts.push(userAttachments.join('\n\n'));
-    if (userImages.length) parts.push(userImages.join('\n\n'));
-    return createTurn(turnId, section, discoveryIndex, role, parts.join('\n\n'));
-  }
-
-  if (role === 'assistant') {
-    const pieces = extractAttachments(section).concat(extractImages(section));
-    const fragments = [];
-    const messages = section.querySelectorAll('[data-message-author-role="assistant"]');
-    for (const message of messages) {
-      const markdownRoot = message.querySelector('.markdown') ||
-        message.querySelector('[class*="prose"]') || message;
-      const markdown = nodeToMarkdown(markdownRoot).trim().replace(/\n{3,}/g, '\n\n');
-      if (markdown) fragments.push(markdown);
-    }
-    // Some assistant turns carry no [data-message-author-role] wrapper at all —
-    // measured on a 570-turn conversation, 12 of 285 answers were shaped this
-    // way and were silently dropped, up to 3106 characters each. The prose is
-    // present; only the attribute is missing, so address the .markdown/.prose
-    // container directly.
-    //
-    // Deliberately NOT a fallback to the whole section: doing that harvests the
-    // "Thinking…" chrome of a re-mounting turn and appends it as a duplicate
-    // answer. Only a real prose container counts.
-    if (!fragments.length) {
-      const orphanRoots = section.querySelectorAll('.markdown, [class*="prose"]');
-      for (const root of orphanRoots) {
-        // Skip nested matches: .markdown inside an already-scanned .prose.
-        if (root.parentElement && root.parentElement.closest('.markdown, [class*="prose"]')) continue;
-        const markdown = nodeToMarkdown(root).trim().replace(/\n{3,}/g, '\n\n');
-        if (markdown) fragments.push(markdown);
-      }
-    }
-    if (fragments.length) pieces.push(fragments.join('\n\n'));
-    if (!pieces.length) return null;
-    return createTurn(turnId, section, discoveryIndex, role, pieces.join('\n\n'));
-  }
-
-  return null;
-}
-
-function createTurn(turnId, section, discoveryIndex, role, markdown) {
-  return {
-    turnId: turnId,
-    order: parseTurnOrder(section.getAttribute('data-testid')),
-    discoveryIndex: discoveryIndex,
-    role: role,
-    markdown: markdown,
-  };
-}
-
-function findScrollContainer(startElement) {
-  let current = startElement ? startElement.parentElement : null;
-  while (current) {
-    const style = getComputedStyle(current);
-    if (/(auto|scroll|overlay)/.test(style.overflowY) &&
-        current.scrollHeight > current.clientHeight + 1) {
-      return current;
-    }
-    current = current.parentElement;
-  }
-  if (typeof document === 'undefined') return null;
-  return document.scrollingElement || document.documentElement;
-}
-
-// ChatGPT's app shell uses column-reverse: native scrollTop is 0 at the
-// bottom and negative at the start. Keep the scanner's coordinates increasing
-// from the start on both layouts. Measured on 2026-09-27: 6951px content in
-// an 802px viewport, native bottom 0 and native start about -6149px.
-function reverseConversationScroll(target) {
-  const view = target.ownerDocument && target.ownerDocument.defaultView;
-  const style = view && view.getComputedStyle
-    ? view.getComputedStyle(target)
-    : (typeof getComputedStyle === 'function' ? getComputedStyle(target) : null);
-  return !!style && style.flexDirection === 'column-reverse';
-}
-
-function conversationScrollMax(target) {
-  return Math.max(0, target.scrollHeight - target.clientHeight);
-}
-
-function conversationScrollTop(target) {
-  return reverseConversationScroll(target)
-    ? target.scrollTop + conversationScrollMax(target)
-    : target.scrollTop;
-}
-
-function nativeConversationScrollTop(target, top) {
-  const maxTop = conversationScrollMax(target);
-  const logicalTop = Math.max(0, Math.min(top, maxTop));
-  return reverseConversationScroll(target) ? logicalTop - maxTop : logicalTop;
-}
-
-function waitForScrollPosition(target, requestedTop, behavior, timeoutMs) {
-  if (typeof requestAnimationFrame !== 'function') return Promise.resolve();
-  return new Promise(function(resolve, reject) {
-    const startedAt = Date.now();
-    let stableFrames = 0;
-    let previousTop = target.scrollTop;
-    let lastReachableTop = nativeConversationScrollTop(target, requestedTop);
-    function check() {
-      const reachableTop = nativeConversationScrollTop(target, requestedTop);
-      const targetChanged = Math.abs(reachableTop - lastReachableTop) >= 1;
-      if (targetChanged) {
-        lastReachableTop = reachableTop;
-        target.scrollTo({ top: reachableTop, behavior: behavior });
-      }
-      const currentTop = target.scrollTop;
-      // Only reset stability when scrollTop is actively moving, not when
-      // scrollHeight merely grows (content still loading — images, lazy renders).
-      const topMoved = Math.abs(currentTop - previousTop) >= 1;
-      if (!topMoved) {
-        stableFrames += 1;
-      } else {
-        stableFrames = 0;
-      }
-      if (Math.abs(currentTop - reachableTop) < 2 && stableFrames >= 2) return resolve();
-      if (Date.now() - startedAt >= timeoutMs) {
-        return reject(new Error('Conversation scroll did not settle before timeout.'));
-      }
-      previousTop = currentTop;
-      requestAnimationFrame(check);
-    }
-    requestAnimationFrame(check);
-  });
-}
-
-async function scrollToConversationPosition(target, top, behavior) {
-  const expectedTop = nativeConversationScrollTop(target, top);
-  target.scrollTo({ top: expectedTop, behavior: behavior });
-  try {
-    await waitForScrollPosition(target, top, behavior, 8000);
-  } catch (_e) {
-    // Smooth scroll didn't settle — force instant jump to target so we
-    // don't start scanning from mid-conversation. Then wait for the DOM.
-    target.scrollTo({ top: nativeConversationScrollTop(target, top), behavior: 'auto' });
-    await new Promise(function(r) { return setTimeout(r, 1500); });
-  }
-}
-
-/**
- * Drive the conversation to its true beginning, and report whether it arrived.
- *
- * A single scroll to 0 does not reach the top of a virtualized conversation that
- * loads its history in chunks. Measured on a live thread: `scrollTo(0,'smooth')`
- * settled at 2850 of 0 while `scrollHeight` SHRANK 6900 -> 5750 mid-flight (the
- * virtualizer unmounted the turns above), and the scan then walked down from the
- * middle. The export carried 26KB of a 126KB conversation, with only the last
- * turn's attachment, and the top of the thread — where the files were offered —
- * was never mounted once.
- *
- * The document does not merely settle, it GROWS: across one measured run the
- * height went 6900 -> 53335 -> 55775, roughly 8x, as older messages arrived.
- * Each arrival moves the position again, which is why one jump plus a fixed wait
- * cannot work. Two other strategies were measured on the same page and failed:
- * smooth-then-jump ended at 46368, and climbing a screen at a time at 48988.
- * Repeated jumps to 0 arrived in 4 steps and held.
- *
- * Arrival needs BOTH conditions, because either alone lies: position 0 on a
- * thread that is still prepending history is not the beginning, and a steady
- * first turn while the page sits at 40000 is just a stalled scroll.
- *
- * THE DEFECT THAT BOTH OF THOSE STILL ALLOWED, and what replaced them
- * (measured 2026-09-14 by running this very function against a simulated
- * virtualized page, so the network delay is exact rather than incidental):
- *
- *     delay of the history fetch   turns lost, silently
- *       1000 ms                      0
- *       1200 ms                      0
- *       1300 ms                     12       <- threshold
- *       1700 ms                    132 of 142
- *
- * The threshold is not a coincidence, it is this function's own arithmetic:
- * stableRounds(3) x settleMs(400) = 1200 ms. A history fetch slower than that
- * looks EXACTLY like the end of the conversation — the first turn id does not
- * change because the next page has not arrived yet, and scrollTop is already 0
- * because ChatGPT holds the viewport still while prepending. Both "arrival"
- * conditions are satisfied by a page that is merely waiting for the network.
- * A user on a slow link lost 299 lines (11%) of a real conversation this way,
- * with no partial notice, because silence was read as completion.
- *
- * So arrival is no longer inferred from silence. It is a POSITIVE FACT:
- *
- *     the first mounted turn sits in the container the page itself marks as
- *     the root of pagination — data-turn-id-container="paginated-root:<id>"
- *
- * Absence of that fact means "keep climbing", however long the silence lasts,
- * which is precisely what a slow connection needs. The timing constants remain
- * only as the fallback for a page that never exposes the marker (a layout
- * change, an A/B variant), and that fallback is reported separately so it can
- * never be mistaken for a confirmed arrival.
- */
-async function scrollToConversationStart(container, options) {
-  const opts = options || {};
-  const sleep = opts.sleep || function(ms) {
-    return new Promise(function(r) { return setTimeout(r, ms); });
-  };
-  const scrollTo = opts.scrollTo || scrollToConversationPosition;
-  const readFirstTurn = opts.readFirstTurn || function(target) {
-    return target.querySelector ? target.querySelector('[data-turn-id]') : null;
-  };
-  const readFirstTurnId = opts.readFirstTurnId || function(target) {
-    const first = readFirstTurn(target);
-    return first && first.getAttribute ? first.getAttribute('data-turn-id') : null;
-  };
-  // Live measurement: paging stalled at 71 and 91 containers while the
-  // sentinel stayed visible. Leaving the viewport and returning loaded ten
-  // more each time. At the actual beginning (221 containers), the sentinel
-  // disappeared. Mounted sections and their relative test indices are NOT a
-  // history count: empty height-preserving containers represent unmounted turns.
-  const readPagination = opts.readPagination || function(target) {
-    if (!target.querySelector || !target.querySelectorAll) return null;
-    const candidate = target.querySelector('[data-testid="conversation-pagination-sentinel"]');
-    const sentinel = candidate && candidate.getAttribute &&
-      candidate.getAttribute('data-testid') === 'conversation-pagination-sentinel' ? candidate : null;
-    const root = target.querySelector('[data-turn-id-container="client-created-root"]');
-    const paginatedRoot = target.querySelector('div[data-turn-id-container^="paginated-root:"]');
-    // A freshly navigated page used client-created-root; the same conversation
-    // after export used an EMPTY paginated-root sibling. Neither root has to
-    // contain the first turn. The first real holder below it must do so.
-    const knownLayout = (root && root.getAttribute &&
-      root.getAttribute('data-turn-id-container') === 'client-created-root') ||
-      (paginatedRoot && paginatedRoot.tagName === 'DIV' &&
-       paginatedRoot.getAttribute('data-turn-id-container').indexOf('paginated-root:') === 0 &&
-       !paginatedRoot.querySelector('[data-turn-id]'));
-    if (!sentinel && !knownLayout) return null;
-    const holders = Array.from(target.querySelectorAll('div[data-turn-id-container]')).filter(function(el) {
-      const id = el.getAttribute('data-turn-id-container');
-      return id && id !== 'client-created-root' && id.indexOf('paginated-root') !== 0;
-    });
-    const first = readFirstTurn(target);
-    const held = holders[0] && holders[0].querySelector('[data-turn-id]');
-    const atFirstHolder = !!first && !!held && (held === first ||
-      (!!held.getAttribute('data-turn-id') &&
-       held.getAttribute('data-turn-id') === first.getAttribute('data-turn-id')));
-    return {
-      pending: !!sentinel,
-      loading: !!(sentinel && sentinel.querySelector('svg')),
-      count: holders.length,
-      complete: !sentinel && !!knownLayout && atFirstHolder && conversationScrollTop(target) <= 1,
-    };
-  };
-  // The page's own marker for "nothing exists above this". Measured on a live
-  // conversation: exactly one such container among 150, its suffix being the
-  // conversation id. Note it is present in the DOM even while scrolled to the
-  // bottom, so its EXISTENCE proves nothing — what proves arrival is that the
-  // FIRST MOUNTED TURN is the one inside it.
-  //
-  // The attribute sits on an ANCESTOR of the turn, not on the turn itself.
-  // Measured from the live DOM (2026-09-14), the shape is:
-  //
-  //   <div data-turn-id-container="paginated-root:<conversation id>">
-  //     ...
-  //     <section data-turn-id="bbb21ebf-…" data-turn-id-container="bbb21ebf-…">
-  //
-  // Reading it off the `[data-turn-id]` element returns that element's OWN id,
-  // never the marker — so the first version of this check could not return true
-  // on any real page, and every climb silently fell through to the timing
-  // fallback it was written to replace. Worse, the same change had stopped that
-  // fallback from flagging a partial export, so a 82%-truncated conversation
-  // came out with no notice at all. Walk up instead.
-  const markerFromAncestors = function(node) {
-    let el = node;
-    for (let depth = 0; el && depth < 12; depth += 1) {
-      const value = el.getAttribute ? el.getAttribute('data-turn-id-container') : null;
-      if (typeof value === 'string' && value.indexOf('paginated-root') === 0) return value;
-      el = el.parentElement || null;
-    }
-    return null;
-  };
-  const readsAtStart = opts.readsAtStart || function(target) {
-    const first = readFirstTurn(target);
-    if (!first) return false;
-    if (markerFromAncestors(first)) return true;
-    // The marker may also be a SIBLING container rather than an ancestor: the
-    // measured page carried it on a separate div placed before the first turn.
-    // Accept it only when the first mounted turn is genuinely the one it marks,
-    // which is what `closest`-style walking above cannot see.
-    if (!target.querySelector) return false;
-    const marked = target.querySelector('[data-turn-id-container^="paginated-root"]');
-    if (!marked) return false;
-    const inside = marked.querySelector ? marked.querySelector('[data-turn-id]') : null;
-    if (!inside) return false;
-    // Same NODE is the strongest answer and needs no attribute at all; falling
-    // back to the id covers a re-rendered turn. Comparing ids alone would call
-    // two attribute-less nodes equal on their shared `null`.
-    if (inside === first) return true;
-    const a = inside.getAttribute ? inside.getAttribute('data-turn-id') : null;
-    const b = first.getAttribute ? first.getAttribute('data-turn-id') : null;
-    return !!a && a === b;
-  };
-  // Whether this page uses the marker mechanism AT ALL. A turn that carries the
-  // attribute with some other value is a page where the marker is meaningful and
-  // simply has not been reached; a turn with no such attribute is a layout that
-  // does not publish one, and no amount of climbing will change that.
-  const publishesMarker = opts.publishesMarker || function(target) {
-    // Asked of the DOCUMENT, not of the first turn: the marker container exists
-    // in the page whether or not the climb has reached it, and that is exactly
-    // the question here — "does this layout have the mechanism at all".
-    if (target.querySelector &&
-        target.querySelector('[data-turn-id-container^="paginated-root"]')) {
-      return true;
-    }
-    const first = readFirstTurn(target);
-    if (!first || !first.getAttribute) return false;
-    return typeof first.getAttribute('data-turn-id-container') === 'string';
-  };
-  const settleMs = opts.settleMs === undefined ? 400 : opts.settleMs;
-  const stableRounds = opts.stableRounds === undefined ? 3 : opts.stableRounds;
-  // A FIXED ceiling is a length limit on the conversation wearing a disguise.
-  // Measured on the simulator: the climb needs almost exactly one round per
-  // three turns (142 -> 45, 600 -> 200), so any constant silently caps the
-  // thread it can reach. At a fixed 300 a 1200-turn conversation stopped 290
-  // turns short — and 1146 turns is a real size, measured on this operator's
-  // own thread. So the budget is DERIVED from the work to be done, and
-  // `noProgressRounds` below is what actually ends a hopeless climb.
-  //
-  // TWO budgets, because "no marker yet" and "no marker ever" are different
-  // situations and charging the same wait for both is what made every scan on a
-  // marker-less page pay 16.4 seconds for nothing (measured: 41 rounds x 400ms).
-  //   - a page that HAS shown the marker shape at least once, or is still
-  //     producing history, gets the full patience;
-  //   - a page whose first turn never carries the attribute at all is a layout
-  //     the marker does not exist in. Waiting cannot make it appear.
-  const noProgressRounds = opts.noProgressRounds === undefined ? 40 : opts.noProgressRounds;
-  const noMarkerRounds = opts.noMarkerRounds === undefined ? 6 : opts.noMarkerRounds;
-  const maxRounds = opts.maxRounds === undefined ? 0 : opts.maxRounds;
-  // An UNBOUNDED loop, which is what removing the fixed round ceiling created.
-  // Found by mutation testing: a page whose first turn id changes every round
-  // while the marker never matches resets the patience budget forever, and the
-  // climb never returns — the tab is held open with no export and no error.
-  // That is not a contrived shape; a re-rendering list produces it.
-  //
-  // So the ceiling comes back, but measured in TIME rather than in rounds,
-  // because rounds are a length limit on the conversation and seconds are not.
-  // The climb spends ~400 ms per round and needs about one round per three
-  // turns, so 10 minutes covers roughly 4500 turns — well past the longest
-  // thread measured here (1146) and past the 3000-turn simulator run, which
-  // completes in 1000 rounds. A climb still making progress at that point is
-  // pathological, and stopping it yields a FLAGGED partial export rather than
-  // a tab that never answers.
-  const maxClimbMs = opts.maxClimbMs === undefined ? 600000 : opts.maxClimbMs;
-  const clock = opts.now || (typeof Date !== 'undefined' ? Date.now : function() { return 0; });
-  const startedAt = clock();
-
-  const countTurns = opts.countTurns || function(target) {
-    const all = target.querySelectorAll ? target.querySelectorAll('[data-turn-id]') : [];
-    return all.length || 0;
-  };
-
-  let steady = 0;
-  let previousFirstId = null;
-  let rounds = 0;
-  let confirmed = false;
-  let confirmedByPagination = false;
-  let sawPagination = false;
-  // Progress is measured by the climb producing NEW history, not by time.
-  let sinceProgress = 0;
-  let bestFirstId = null;
-  let seenTurnIds = 0;
-  let ranOutOfTime = false;
-  for (let i = 0; maxRounds === 0 || i < maxRounds; i += 1) {
-    rounds = i + 1;
-    await scrollTo(container, 0, 'auto');
-    await sleep(settleMs);
-
-    const pagination = readPagination(container);
-    if (pagination) sawPagination = true;
-    if (pagination && pagination.complete) {
-      confirmed = true;
-      confirmedByPagination = true;
-      break;
-    }
-    // A live pagination sentinel takes precedence over legacy root markers.
-    if (!(pagination && pagination.pending) && readsAtStart(container)) { confirmed = true; break; }
-
-    const firstId = readFirstTurnId(container);
-    const mounted = pagination ? pagination.count : countTurns(container);
-    // A new first turn, or more turns mounted, means history is still arriving:
-    // the climb is working and must not be cut off, however long it takes.
-    if (firstId !== bestFirstId || mounted > seenTurnIds) {
-      sinceProgress = 0;
-      bestFirstId = firstId;
-      if (mounted > seenTurnIds) seenTurnIds = mounted;
-    } else {
-      sinceProgress += 1;
-    }
-
-    const atTop = conversationScrollTop(container) <= 1;
-    steady = atTop && firstId === previousFirstId ? steady + 1 : 0;
-    previousFirstId = firstId;
-    // The silence fallback no longer ENDS the climb — it only records that the
-    // old conditions were met. Stopping here is what lost 132 turns of 142.
-    //
-    // What DOES end it is a climb that stopped producing history entirely.
-    // At the default 400 ms settle the full budget is 16 seconds of no new turn
-    // and no new first id, an order of magnitude over the slowest fetch measured
-    // (8 s, which the climb survived with zero loss). A page that publishes no
-    // marker at all settles for far less: there is nothing to wait for.
-    const budget = sawPagination || publishesMarker(container) ? noProgressRounds : noMarkerRounds;
-    if (sinceProgress >= budget) break;
-    // The backstop. Deliberately checked LAST, so a climb that would finish on
-    // its own always does; this only catches the loop that never would.
-    if (maxClimbMs > 0 && clock() - startedAt >= maxClimbMs) {
-      ranOutOfTime = true;
-      break;
-    }
-    // Re-arm an edge-triggered sentinel instead of repeatedly assigning the
-    // same top position. Do not disturb an in-flight request. Two viewport
-    // heights clear the sentinel; the next round re-enters it. This movement
-    // never resets the no-progress or elapsed-time budgets.
-    if (pagination && pagination.pending && !pagination.loading &&
-        sinceProgress >= 2 && atTop) {
-      await scrollTo(container, Math.min(container.clientHeight * 2,
-        conversationScrollMax(container)), 'auto');
-      await sleep(settleMs);
-    }
-  }
-
-  // Reported rather than thrown: a scan that starts below the beginning is still
-  // worth running, and the coverage-gap check turns it into a visible partial
-  // export. Failing here would trade a flagged partial for nothing at all.
-  //
-  // `confirmed` is the marker; `quiet` is the old timing guess. They are kept
-  // apart on purpose — collapsing them is exactly how a wait for the network
-  // came to be reported as a complete conversation.
-  return {
-    reachedTop: confirmed,
-    confirmedByMarker: confirmed && !confirmedByPagination,
-    confirmedByPagination: confirmedByPagination,
-    quietedWithoutMarker: !confirmed && steady >= stableRounds,
-    // Whether the page has the marker mechanism at all. Only a page WITHOUT one
-    // may treat a quiet climb as good enough; a page that has one and did not
-    // reach it is a truncated export and must say so.
-    // A climb cut off by the clock is ALWAYS incomplete, whatever the page's
-    // markup does — so it must never qualify for the marker-less exemption.
-    markerAbsentFromPage: !ranOutOfTime && !sawPagination && !publishesMarker(container),
-    ranOutOfTime: ranOutOfTime,
-    rounds: rounds,
-  };
-}
-
-function waitForRenderQuiet(target) {
-  if (typeof MutationObserver === 'undefined') return Promise.resolve();
-  return new Promise(function(resolve) {
-    let quietTimer;
-    const finish = function() {
-      clearTimeout(quietTimer);
-      clearTimeout(maxTimer);
-      observer.disconnect();
-      resolve();
-    };
-    const schedule = function() {
-      clearTimeout(quietTimer);
-      quietTimer = setTimeout(finish, 120);
-    };
-    const observer = new MutationObserver(schedule);
-    const maxTimer = setTimeout(finish, 2000);
-    observer.observe(target, { childList: true, subtree: true, attributes: true });
-    schedule();
-  });
-}
-
-function createScanSettings(options) {
-  const supplied = options || {};
-  return {
-    readSections: supplied.readSections || function(target) {
-      return target.querySelectorAll('[data-turn-id]');
-    },
-    extractTurn: supplied.extractTurn || extractTurn,
-    // Called at every scroll position the scan holds, after the turns there
-    // have mounted. Used to read per-turn artefact rows while their turn
-    // exists — they are unmounted again as soon as the scan moves on.
-    onMounted: supplied.onMounted || null,
-    settle: supplied.settle || waitForRenderQuiet,
-    scrollTo: supplied.scrollTo || scrollToConversationPosition,
-    // Injectable so a fixture can drive the arrival-detection directly.
-    scrollToStart: supplied.scrollToStart || function(target) {
-      return scrollToConversationStart(target, { scrollTo: supplied.scrollTo });
-    },
-    now: supplied.now || function() { return Date.now(); },
-    stablePasses: supplied.stablePasses || 3,
-    // How many times a turn may mount empty before it stops blocking the scan.
-    emptyTurnRetries: supplied.emptyTurnRetries || 3,
-    // The ONLY limit on a scan: consecutive steps that neither surface a new
-    // turn nor move down the document. See scanTurns.
-    noProgressSteps: supplied.noProgressSteps || 60,
-    // How long the scan holds position waiting for outstanding turns to paint
-    // before writing them off and moving on. Must be well below
-    // noProgressSteps, or the hold itself trips the stall guard.
-    holdReleaseSteps: supplied.holdReleaseSteps || 20,
-    // Optional operator cancellation. Returning true aborts at the next step
-    // boundary; the scan is never cut off by anything else.
-    isCancelled: supplied.isCancelled || function() { return false; },
-    scanMeta: supplied.scanMeta || null,
-    // Optional progress reporting, so a long scan is visibly alive.
-    onProgress: supplied.onProgress || null,
-    // Test-only escape hatch. Production never sets this: a step ceiling is a
-    // length limit on the conversation, not a safety property.
-    maxSteps: supplied.maxSteps || 0,
-  };
-}
-
-// Chrome a re-mounted turn shows while its real content is still coming back.
-// These are not answers, however long they run.
-var PLACEHOLDER_MARKDOWN = /^(thinking|reasoning|searching|analyzing|analysing|gathering|expanding|loading|generating|working)\b|^(думаю|размышляю|ищу|загружаю|генерирую)\b/i;
-
-function looksLikePlaceholder(markdown) {
-  return PLACEHOLDER_MARKDOWN.test(markdown.trim());
-}
-
-/**
- * Decide whether a re-mounted capture should replace the one already held.
- *
- * Length alone is not a correctness rule: a turn re-mounting with placeholder
- * chrome ("Thinking… gathering sources…") can be LONGER than the real prose, and
- * taking the longer string silently corrupts the export. Prefer real content
- * over a placeholder; only then fall back to preferring the longer text, which
- * still rescues a capture truncated mid-stream.
- */
-function shouldReplaceCapture(previousMarkdown, candidateMarkdown) {
-  const previousIsPlaceholder = looksLikePlaceholder(previousMarkdown);
-  const candidateIsPlaceholder = looksLikePlaceholder(candidateMarkdown);
-  if (previousIsPlaceholder !== candidateIsPlaceholder) return previousIsPlaceholder;
-  return candidateMarkdown.length > previousMarkdown.length;
-}
-
-function captureMountedTurns(sections, settings, seen, state) {
-  let newIds = 0;
-  // The height of the band the virtualizer actually mounted. Measured the same
-  // way the sidebar walk measures its rows, and for the same reason: a band
-  // narrower than the viewport means a viewport-sized scroll step jumps over
-  // turns that were never in the DOM to be read. See `nextScrollTop`.
-  let bandTop = Infinity;
-  let bandBottom = -Infinity;
-  for (const section of sections) {
-    if (typeof section.getBoundingClientRect === 'function') {
-      try {
-        const rect = section.getBoundingClientRect();
-        if (rect && typeof rect.top === 'number' && typeof rect.bottom === 'number') {
-          if (rect.top < bandTop) bandTop = rect.top;
-          if (rect.bottom > bandBottom) bandBottom = rect.bottom;
-        }
-      } catch (_e) {
-        // An element that refuses measurement is simply not measured; the band
-        // falls back to the viewport, which is the pre-measurement behaviour.
-      }
-    }
-    if (isExplicitlyUnsupportedTurn(section)) continue;
-    const rawTurnId = getSectionTurnId(section);
-    if (rawTurnId && !state.observedIds.has(rawTurnId)) {
-      state.observedIds.add(rawTurnId);
-      newIds += 1;
-    }
-    const candidate = settings.extractTurn(section, state.discoveryIndex);
-    if (!candidate) {
-      // A turn can mount before its content paints — ChatGPT's virtualizer
-      // recycles bubbles and briefly renders them empty. Give it a bounded
-      // number of chances, then stop letting it block the scan: one such turn
-      // used to pin `unresolved` above zero forever, which froze the scroll
-      // target at the current position and burned the whole budget in place.
-      if (rawTurnId) {
-        const attempts = (state.emptyAttempts.get(rawTurnId) ?? 0) + 1;
-        state.emptyAttempts.set(rawTurnId, attempts);
-        if (attempts >= settings.emptyTurnRetries) state.skipped.add(rawTurnId);
-      }
-      continue;
-    }
-    if (rawTurnId) {
-      // It resolved after all — drop any strike against it.
-      state.emptyAttempts.delete(rawTurnId);
-      state.skipped.delete(rawTurnId);
-    }
-    const previous = seen.get(candidate.turnId);
-    if (!previous) {
-      candidate.discoveryIndex = state.discoveryIndex;
-      state.discoveryIndex += 1;
-    }
-    if (!previous || shouldReplaceCapture(previous.markdown, candidate.markdown)) {
-      seen.set(candidate.turnId, previous
-        ? Object.assign({}, candidate, { discoveryIndex: previous.discoveryIndex })
-        : candidate);
-    }
-  }
-  // Set difference, not a size subtraction: sizes can coincide while a real id
-  // is missing, which would report "nothing outstanding" over a genuine gap.
-  let unresolved = 0;
-  for (const id of state.observedIds) {
-    if (!seen.has(id) && !state.skipped.has(id)) unresolved += 1;
-  }
-  const mountedBand = bandBottom > bandTop ? bandBottom - bandTop : 0;
-  return { newIds: newIds, unresolved: unresolved, mountedBand: mountedBand };
-}
-
-/** Where to scroll next, never further than the turns that were actually mounted.
- *
- *  A fixed fraction of the VIEWPORT was the defect: with a 400px mounted band in
- *  an 800px viewport the scan captured 30 of 60 turns — every second one — and
- *  reported a complete export, because each step advanced 600px past turns the
- *  virtualizer had never rendered. The sidebar walk already capped its step at
- *  the observed band; this is the same rule for the conversation.
- *
- *  `mountedBand` of 0 means nothing could be measured, and the step falls back
- *  to the viewport — the previous behaviour, not a wider guess.
- *
- *  The `min(band, viewport)` cap is deliberately NOT claimed to be load-bearing.
- *  A mutant that removes it survives, and no geometry — including bands three
- *  viewports tall, weighted above or below the scroll position — could be built
- *  where it changes the outcome: turns in a band taller than the viewport are
- *  already in the DOM and are read in the same round. It is kept as a
- *  conservative bound on a number that comes from ChatGPT's virtualizer rather
- *  than from us, and it is recorded here as unproven so nobody later mistakes it
- *  for a checked invariant.
- */
-function nextScrollTop(container, atBottom, mountedBand) {
-  if (atBottom) return conversationScrollTop(container);
-  const reach = mountedBand > 0
-    ? Math.min(mountedBand, container.clientHeight || mountedBand)
-    : (container.clientHeight || 0);
-  const increment = Math.max(1, Math.floor(reach * 0.75));
-  return Math.min(conversationScrollTop(container) + increment, conversationScrollMax(container));
-}
-
-/** The widest stretch between two read positions that neither of them covered.
- *
- *  Each entry is `[scrollTop, mountedBandHeight]` — where the scan read, and how
- *  tall a band of turns was mounted there. Coverage is only credited where turns
- *  actually mounted, and only the stretch BEFORE the last such position is
- *  judged: everything past the final turn is the document's bottom padding, and
- *  counting it as a hole reported a false "partial export" on a complete one.
- *
- *  Two failure modes this catches, both measured:
- *
- *   - the scan advanced further than it mounted, so a stretch between two
- *     positions was stepped over unseen;
- *   - a position mounted nothing at all in the middle of the conversation.
- *
- *  Reaching the bottom is not a coverage proof — this is what turns "I arrived"
- *  into "I saw".
- */
-function largestCoverageGap(bands, viewportHeight, documentHeight) {
-  if (!bands || bands.length === 0) return { width: 0, at: 0 };
-  const sorted = bands.slice().sort(function(a, b) { return a[0] - b[0]; });
-
-  // Everything after the last position that mounted a turn is bottom padding.
-  let lastProductive = -1;
-  let firstProductive = -1;
-  for (let i = 0; i < sorted.length; i += 1) {
-    if (sorted[i][1] > 0) {
-      if (firstProductive < 0) firstProductive = i;
-      lastProductive = i;
-    }
-  }
-  if (lastProductive < 0) return { width: 0, at: 0 };
-
-  let reach = sorted[firstProductive][0] + sorted[firstProductive][1];
-  let widest = 0;
-  let at = 0;
-  for (let i = firstProductive + 1; i <= lastProductive; i += 1) {
-    const start = sorted[i][0];
-    // A 1px tolerance: scroll positions are fractional in a zoomed or high-DPI
-    // viewport, and a sub-pixel seam is not a missing turn.
-    if (start > reach + 1) {
-      const width = start - reach;
-      if (width > widest) { widest = width; at = reach; }
-    }
-    const end = sorted[i][0] + sorted[i][1];
-    if (end > reach) reach = end;
-  }
-
-  // The tail case the band-to-band comparison above cannot see: when turns
-  // mounted at only a few early positions, there IS no later band to leave a
-  // hole against, yet the scan still travelled the rest of the document blind.
-  // Measured on a fixture whose band was narrower than the gap between turns:
-  // 1 of 40 turns captured, reported complete.
-  //
-  // The threshold is one viewport, and it is measured rather than tuned. Across
-  // every geometry that captured every turn the blind tail was at most 300px
-  // (0.38 viewports) — the scan always runs a little past the final turn, which
-  // is ordinary. The failing geometry's tail was 11 860px, or 14.8 viewports.
-  // Three orders of magnitude separate the two populations, so one viewport sits
-  // in empty space between them rather than on a boundary either could cross.
-  const traversedTo = sorted[sorted.length - 1][0];
-  const seenTo = sorted[lastProductive][0] + sorted[lastProductive][1];
-  const blind = traversedTo - seenTo;
-  if (viewportHeight > 0 && blind > viewportHeight) {
-    if (blind > widest) { widest = blind; at = seenTo; }
-  }
-
-  // The case both comparisons above are blind to: the scan STOPPED at the last
-  // turn it read, so there is neither a later band to leave a hole against nor
-  // any travelled-but-unseen tail. `blind` is then zero or negative and the
-  // check above can never fire.
-  //
-  // That is exactly what a virtualized list produces. While the scan is near the
-  // top, ChatGPT has not mounted the turns below, so `scrollHeight` is short;
-  // the scan reaches the bottom OF THAT HEIGHT, sees three stable passes and
-  // stops — at the last turn it read. Measured on the export that prompted this:
-  // 4 of 8 turns, `blind` = -800px, reported complete with no notice.
-  //
-  // This function cannot see the defect on its own: `bands` says where the scan
-  // looked, never how tall the document turned out to be. The caller compares
-  // the two and passes `documentHeight`; without it the tail check is unchanged,
-  // which keeps every existing caller and test honest.
-  if (viewportHeight > 0 && documentHeight > 0) {
-    const unreached = documentHeight - traversedTo - viewportHeight;
-    if (unreached > viewportHeight && unreached > widest) {
-      widest = unreached;
-      at = traversedTo;
-    }
-  }
-  return { width: widest, at: at };
-}
-
-/** Record that a scan ended before reaching a stable bottom. */
-function markPartialScan(settings, reason) {
-  if (settings.scanMeta) {
-    settings.scanMeta.partial = true;
-    // Keep the FIRST reason. A scan that never reached the start also tends to
-    // stall later, and overwriting would report the symptom while hiding the
-    // cause — the user reads this reason in the artifact itself.
-    if (!settings.scanMeta.reason) settings.scanMeta.reason = reason;
-  }
-}
-
-/** Prefix markdown with a visible partial-export notice — must live in the artifact itself. */
-function prefixPartialNotice(md, reason) {
-  if (reason === 'history start unverified for this page layout') {
-    return '> **Partial export** — history start is unverified for this page layout; earlier messages may be missing.\n\n' + md;
-  }
-  var detail = reason === 'cancelled'
-    ? 'scan was stopped before reaching the end'
-    : 'scan did not reach the end (' + reason + ')';
-  return '> **Partial export** — ' + detail + '.\n\n' + md;
-}
-
-async function scanTurns(container, options) {
-  const settings = createScanSettings(options);
-  const originalNativeScrollTop = container.scrollTop;
-  const seen = new Map();
-  const state = {
-    discoveryIndex: 0,
-    observedIds: new Set(),
-    // Turns that mounted but never yielded content, and how many tries each got.
-    emptyAttempts: new Map(),
-    skipped: new Set(),
-  };
-  let stablePasses = 0;
-  let lastHeight = -1;
-  // Where the scan actually READ, and how tall a band it read there. Reaching
-  // the bottom proves coverage only if these bands, joined together, leave no
-  // gap: a scan that advances further than it mounts crawls to the end past
-  // turns that were never in the DOM, and "I arrived" is not "I saw". Same
-  // reasoning the sidebar walk applies to its rows — quiescence is not a
-  // coverage proof.
-  const readBands = [];
-  const startedAt = settings.now();
-  // Progress is measured in work done, not time elapsed. A scan that keeps
-  // surfacing turns or keeps moving down the document is healthy however long
-  // it runs — a 100-hour conversation is a long job, not a failure. The only
-  // way a scan ends unsuccessfully is by genuinely stalling, or by the operator
-  // cancelling it. There is deliberately no deadline and no step ceiling: both
-  // are limits on conversation LENGTH wearing the costume of a safety check,
-  // and raising the constant only moves the wall further out.
-  let stepsSinceProgress = 0;
-  let lastProgressTop = -1;
-
-  try {
-    // Reach the actual beginning before walking down, or everything above the
-    // landing position is lost silently. See scrollToConversationStart.
-    const start = await settings.scrollToStart(container);
-    // Three outcomes, and collapsing any two of them is a defect that has
-    // already shipped in one direction or the other:
-    //   - confirmed by the page's own start marker -> complete, say nothing;
-    //   - no marker on this page, but the climb went quiet at the top -> the
-    //     old criterion, which is all such a layout can offer. Flagging it
-    //     partial would put a "your data is untrustworthy" notice on every
-    //     export the moment ChatGPT renames an attribute — a false warning is
-    //     a real cost, not a safe default;
-    //   - still moving, or never at the top -> genuinely partial.
-    //
-    // The exemption is ONLY for a page with no marker mechanism at all. Scoping
-    // it to `quietedWithoutMarker` alone was a defect of its own: a page that
-    // does publish a marker the climb failed to reach also quiets down, so an
-    // export missing 82% of its conversation came out unflagged. Silence about
-    // a real hole is far worse than a needless warning — the user cannot even
-    // know to re-run.
-    if (!start.reachedTop &&
-        !(start.quietedWithoutMarker && start.markerAbsentFromPage)) {
-      markPartialScan(settings, 'never reached the start');
-    }
-    await settings.settle(container);
-    for (let step = 0; settings.maxSteps === 0 || step < settings.maxSteps; step += 1) {
-      if (settings.isCancelled()) {
-        markPartialScan(settings, 'cancelled');
-        return orderCapturedTurns(seen);
-      }
-      const observation = captureMountedTurns(settings.readSections(container), settings, seen, state);
-      const logicalTop = conversationScrollTop(container);
-      const atBottom = logicalTop >= conversationScrollMax(container) - 1;
-      // Record every position and what it mounted there. Positions that mounted
-      // nothing are kept: below the last turn that is legitimate, but between two
-      // turns it is the signature of a stretch the virtualizer never rendered
-      // while the scan was looking at it.
-      readBands.push([logicalTop, observation.mountedBand]);
-      // Read anything that lives inside a turn BEFORE the scan scrolls away and
-      // the virtualizer unmounts it. Guarded: a throwing collector must not end
-      // a scan that has already captured turns.
-      if (settings.onMounted) {
-        try { settings.onMounted(container); } catch (_e) { /* collector failed */ }
-      }
-
-      const movedDown = Math.abs(logicalTop - lastProgressTop) >= 1;
-      if (observation.newIds > 0 || movedDown) {
-        stepsSinceProgress = 0;
-        lastProgressTop = logicalTop;
-      } else {
-        stepsSinceProgress += 1;
-        // Waiting for a turn to paint is work, so it must not be mistaken for a
-        // stall — but it must not be unbounded either. A single turn that never
-        // resolves froze the scroll target ("hold position until unresolved
-        // clears"), which stopped the page moving, which then read as a stall
-        // and cost the remaining turns: 1 bad turn lost 70 good ones. Give up
-        // on the stragglers instead of giving up on the conversation.
-        if (stepsSinceProgress >= settings.holdReleaseSteps && observation.unresolved > 0) {
-          for (const id of state.observedIds) {
-            if (!seen.has(id)) state.skipped.add(id);
-          }
-          observation.unresolved = 0;
-          stepsSinceProgress = 0;
-        }
-        if (stepsSinceProgress >= settings.noProgressSteps && !atBottom) {
-          markPartialScan(settings, 'stall');
-          return orderCapturedTurns(seen);
-        }
-      }
-
-      if (settings.onProgress) {
-        // Report captured/observed rather than a percentage of a budget: there
-        // is no budget to be a percentage of, and the honest signal is that the
-        // count keeps climbing.
-        settings.onProgress({
-          captured: seen.size,
-          observed: state.observedIds.size,
-          elapsedMs: settings.now() - startedAt,
-          scrollTop: logicalTop,
-          scrollHeight: container.scrollHeight,
-        });
-      }
-
-      stablePasses = atBottom && observation.newIds === 0 && observation.unresolved === 0 &&
-        lastHeight === container.scrollHeight
-        ? stablePasses + 1 : 0;
-      if (stablePasses >= settings.stablePasses) {
-        // `scrollHeight` is read HERE, at the end of the scan, when the
-        // virtualizer has mounted everything it is going to mount. Comparing it
-        // against the furthest position the scan actually visited is what
-        // catches a scan that stopped at a bottom which later grew.
-        const gap = largestCoverageGap(
-          readBands, container.clientHeight || 0, container.scrollHeight || 0);
-        // A gap wider than the band that should have covered it means turns
-        // existed in a stretch of the document the scan never mounted. Say so in
-        // the artifact rather than presenting a hole as a complete conversation.
-        if (gap.width > 0) markPartialScan(settings, 'coverage gap');
-        return orderCapturedTurns(seen);
-      }
-      lastHeight = container.scrollHeight;
-      const target = observation.unresolved > 0
-        ? logicalTop : nextScrollTop(container, atBottom, observation.mountedBand);
-      await settings.scrollTo(container, target, 'auto');
-      await settings.settle(container);
-    }
-    // Only reachable when a test supplies maxSteps; production leaves it 0 and
-    // the loop above is bounded solely by stability, stall, or cancellation.
-    if (seen.size > 0) {
-      markPartialScan(settings, 'step limit');
-      return orderCapturedTurns(seen);
-    }
-    throw new Error('Conversation scan exceeded its step limit before reaching a stable bottom.');
-  } finally {
-    // Restore the native offset so a conversation whose height grew during the
-    // walk returns to the same viewport edge (especially native zero/bottom in
-    // the reverse layout), rather than to its old distance from the start.
-    const restoreTop = reverseConversationScroll(container)
-      ? originalNativeScrollTop + conversationScrollMax(container)
-      : originalNativeScrollTop;
-    await settings.scrollTo(container, restoreTop, 'auto');
-  }
-}
-
-/** Extract clean Markdown from the current ChatGPT page. */
-function extractConversation() {
-  const sections = document.querySelectorAll('[data-turn-id]');
-  if (!sections.length) return extractConversationLegacy();
-  const turns = Array.from(sections)
-    .map(function(section, index) { return extractTurn(section, index); })
-    .filter(Boolean);
-  return buildConversationMarkdown(orderCapturedTurns(turns));
-}
-
-/** Append the artefacts that render no chip anywhere in the message stream.
- *
- *  Generated (code-interpreter) files live in a separate panel with no href, no
- *  testid and no download attribute, outside the message tree — so the per-turn
- *  scan above cannot see them and `parseArtifactRefs` in the popup has nothing to
- *  find. Measured on production: a conversation with five PDF/DOCX files yielded
- *  ZERO matches for every shipped attachment selector.
- *
- *  Returns the markdown UNCHANGED when there is nothing to add, and appends a
- *  visible note when artefacts exist but could not be resolved — a silent drop
- *  would present a partial export as a complete one.
- */
-/** Collect generated files that the answer text offers as `sandbox:` links.
- *
- *  Two shapes reach the markdown, and both must be read:
- *    - the note nodeToMarkdown writes for a chip or <a>:
- *        > **Code Interpreter file:** `sandbox:/mnt/data/report.zip` (label)
- *    - a raw link, when the export came from a path that did not rewrite it:
- *        [label](sandbox:/mnt/data/report.zip)
- *
- *  The path is taken verbatim. `/mnt/data/` is where most interpreter output
- *  lands, but not all of it — a file written to `/mnt/data/outputs/` resolves
- *  only if the subdirectory survives, which is why this never rebuilds a path
- *  from the file name the way the panel reader has to. */
-function sandboxFilesFromMarkdown(markdown) {
-  const text = String(markdown || '');
-  const files = [];
-  const seen = new Set();
-  // Stop at whitespace, a closing paren or a backtick: the path sits inside
-  // either `…` or (…), and a Cyrillic label may follow immediately after.
-  const pattern = /sandbox:(\/[^\s`)"'\\]+)/g;
-  let match;
-  while ((match = pattern.exec(text)) !== null) {
-    const sandboxPath = match[1];
-    if (seen.has(sandboxPath)) continue;
-    seen.add(sandboxPath);
-    const name = sandboxPath.split('/').pop();
-    if (!name) continue;
-    files.push({ name: name, sandboxPath: sandboxPath, fromBody: true });
-  }
-  return files;
-}
-
-/* ------------------------------------------------------------------------- *
- * Files offered only as a BUTTON WITH A HANDLER.
- *
- *  Measured on a production conversation (2026-09-10), after four exports in a
- *  row named a .zip without ever fetching it. The page offered it like this:
- *
- *    <button class="behavior-btn …" type="button">
- *      Скачать готовый Canon Consilium Prompt Bundle v1
- *    </button>
- *
- *  Every other path in this file misses it, and each for its own reason:
- *    - no `href`      -> the attachment-chip selectors match nothing;
- *    - no `sandbox:`  -> `sandboxFilesFromMarkdown` returns [] (measured: 0);
- *    - no panel row   -> a .zip has no built-in viewer, so the panel lists only
- *                        the .md/.txt siblings (measured: 4 rows, no archive);
- *    - no data-*      -> nothing carries a file id (measured: dataAttrs {} on
- *                        all 8 buttons), so the id cannot be read and resolved.
- *
- *  The label is PROSE, not a file name ("Скачать готовый …", no extension), so
- *  it cannot be turned into a path either. The real URL exists only after the
- *  page's own handler runs and asks the backend to sign one:
- *
- *    /backend-api/estuary/content?id=file_…&fn=<real name>&<signature>&ts=…
- *
- *  So the file is reachable only by CLICKING, and the click must be intercepted
- *  rather than allowed to proceed: an unintercepted click downloads through the
- *  PAGE, which never passes a `filename`, so Chrome drops the file in the root
- *  of Downloads instead of beside its conversation. Interception hands the URL
- *  to chrome.downloads, which is the same road every other artefact takes.
- * ------------------------------------------------------------------------- */
-
-/** Buttons that offer a file download and carry no link of their own.
- *
- *  Matched by shape, not by wording alone: the class is ChatGPT's, while the
- *  label is user-facing text that is translated ("Скачать …" / "Download …")
- *  and would break the moment the UI language changes. A button that already
- *  sits inside an <a> is skipped — that one has an href and the existing
- *  attachment path already handles it. */
-/** Formats ChatGPT cannot preview, so its button downloads instead of opening.
- *
- *  MEASURED, after clicking on the label alone made the export WORSE (2026-09-10):
- *  a "Скачать …" button for a .md opened the Library viewer instead of
- *  downloading, the viewer covered the artefact panel, and the next export
- *  produced ONE file where the previous one produced four. The label does not
- *  decide the action — the format does. ChatGPT previews what it can render
- *  (.md, .txt, images, video, PDF) and only downloads what it cannot. */
-var UNPREVIEWABLE_FORMATS = /(^|[^a-z0-9])(zip|diff|patch|tar|gz|tgz|bz2|xz|7z|rar|whl|jar|exe|dmg|pkg|bin|iso|sqlite|db|parquet|pickle|pkl)([^a-z0-9]|$)/i;
-
-/** Fold a name or label to a comparable form: lowercase, and every run of
- *  separators collapsed to one space.
- *
- *  A raw substring test cannot match a file name against the prose that offers
- *  it. Measured on the conversation this was built for:
- *
- *    panel/API name   canon-consilium-prompt-bundle-v1.zip
- *    button label     Скачать готовый Canon Consilium Prompt Bundle v1
- *
- *  The stem is spelled with hyphens and the label with spaces, so
- *  `indexOf(stem)` is -1 and the button reads as "not in the panel". Before this
- *  fix the archive would have been fetched by the API AND clicked — downloading
- *  the same bytes twice and re-opening the exact viewer-over-panel regression
- *  that the exclusion exists to prevent. */
-function foldForNameMatching(value) {
-  return String(value || '').toLowerCase().replace(/[\s_\-.]+/g, ' ').trim();
-}
-
-/** Folded, extension-stripped stems of the names already resolved elsewhere. */
-function panelStemsForMatching(panelNames) {
-  const stems = [];
-  for (const name of Array.from(panelNames || [])) {
-    const stem = foldForNameMatching(
-      String(name || '').replace(/\.[A-Za-z0-9]{1,8}$/, ''));
-    if (stem) stems.push(stem);
-  }
-  return stems;
-}
-
-/** Whether a button label names a file some other source already resolved. */
-function labelMatchesAnyStem(label, stems) {
-  const folded = foldForNameMatching(label);
-  if (!folded) return false;
-  for (const stem of Array.from(stems || [])) {
-    if (stem && folded.indexOf(stem) !== -1) return true;
-  }
-  return false;
-}
-
-/** Buttons that offer a file download and carry no link of their own.
- *
- *  Three conditions, all required — the first alone is what broke the export:
- *    1. the label offers a download ("Скачать …" / "Download …");
- *    2. the label names a format ChatGPT cannot preview, so the click really
- *       downloads instead of opening a viewer over the artefact panel;
- *    3. the file is not one the panel already lists, since the panel resolves
- *       it without a click and clicking it is what opens the viewer.
- *
- *  `panelNames` carries what the panel already found. Passing it is how the
- *  regression is prevented, so it is required by the callers that ship. */
-function downloadButtonsInPage(doc, panelNames) {
-  const root = doc || (typeof document !== 'undefined' ? document : null);
-  if (!root || !root.querySelectorAll) return [];
-  let nodes;
-  try {
-    nodes = root.querySelectorAll('button.behavior-btn, .behavior-btn, [data-file-reference="true"]');
-  } catch (_e) {
-    return [];
-  }
-  // Stems of the names already resolved without a click, so "Скачать готовый
-  // Canon Consilium Prompt Bundle v1" matches
-  // "canon-consilium-prompt-bundle-v1.zip". Extension-stripped because the
-  // label never carries one, and separator-folded because the name spells with
-  // hyphens what the label spells with spaces.
-  const known = panelStemsForMatching(panelNames);
-
-  const out = [];
-  for (const node of Array.from(nodes)) {
-    if (!node) continue;
-    const modernName = node.getAttribute && node.getAttribute('data-file-reference') === 'true'
-      ? node.getAttribute('data-markdown-copy-text') : null;
-    if (modernName) {
-      if (!labelMatchesAnyStem(modernName, known)) {
-        out.push({ button: node, label: modernName, archive: UNPREVIEWABLE_FORMATS.test(modernName) });
-      }
-      continue;
-    }
-    if (node.tagName !== 'BUTTON') continue;
-    if (typeof node.closest === 'function' && node.closest('a')) continue;
-    const label = (node.textContent || '').trim();
-    if (!label || label.length > 200) continue;
-    // "Скачать …" / "Download …" / "Загрузить …". The other behavior-btn labels
-    // in the same conversation ("Открыть полное ТЗ", "Посмотреть полный diff")
-    // open a viewer instead of downloading, and clicking those would navigate
-    // the page out from under a running export.
-    // The boundary is whitespace or end-of-string, NEVER `\b`: that is an ASCII
-    // word boundary, so `/^скачать\b/i` is false for "Скачать архив" and true
-    // for "Download the bundle" — the check would have passed every English
-    // label and rejected every Russian one, which is exactly the conversation
-    // this was built for. Measured on the failing fixture before the fix.
-    if (!/^\s*(скачать|download|загрузить|télécharger|herunterladen|descargar)(\s|$)/i.test(label)) {
-      continue;
-    }
-    // Already resolved without a click — the panel supplies it for free, and
-    // clicking it is what opened the viewer over the panel in the first place.
-    if (labelMatchesAnyStem(label, known)) continue;
-    out.push({ button: node, label: label, archive: UNPREVIEWABLE_FORMATS.test(label) });
-  }
-  // MEASURED (2026-09-10, probe 7): the markup cannot tell a download button
-  // from a viewer button. Both carry the same class, the SAME <svg> icon and
-  // the same data-start/data-end — only the prose label differs, and it lies in
-  // both directions: the archive's label names no format at all ("Скачать
-  // готовый Canon Consilium Prompt Bundle v1") while a VIEWER button says
-  // "Посмотреть полный diff". So the format cannot gate the click.
-  //
-  // Clicking anyway is safe now, and only now: the same probe measured a click
-  // on a .md button producing no URL (it opened the Library viewer), the close
-  // control being found and pressed, and the panel reading again afterwards. A
-  // wrong click therefore costs one dismissal instead of every artefact behind
-  // the viewer — which is what the earlier label-only version cost.
-  //
-  // Ordering still matters: archives first, so the files that can ONLY be had
-  // by clicking are fetched before any viewer has a chance to interfere.
-  out.sort(function(a, b) { return (b.archive ? 1 : 0) - (a.archive ? 1 : 0); });
-  return out;
-}
-
-/** Click each download button with the page's own download routes intercepted,
- *  and return the signed URLs the handlers produced.
- *
- *  The interception replaces three routes and restores all of them in a
- *  `finally`: leaving a patched `click()` behind would break the page for the
- *  user after the export, which is worse than missing a file.
- *
- *    - HTMLAnchorElement.prototype.click — the usual `<a download>` road;
- *    - window.open — used when the handler opens the URL instead;
- *    - URL.createObjectURL — a blob built in the page, which has no address
- *      the popup could fetch later, so its bytes are read here instead.
- *
- *  Each URL is recorded and the underlying action suppressed, so nothing lands
- *  in the Downloads root while the export is running.
- *
- *  Returns [{name, url, label, blob}] — `name` from the URL's `fn=` parameter
- *  when present, because the button's label is prose and not a file name. */
-/** Close a viewer a click opened, so it stops covering the artefact panel.
- *
- *  Tried in order of reliability: the viewer's own close control, then Escape.
- *  Both are attempted rather than one, because the close button is identified
- *  by a translated aria-label ("Close" / "Закрыть") that a UI language change
- *  breaks, while Escape is a keyboard convention that survives it. Failing to
- *  close is not an error — the export continues either way and the panel read
- *  reports what it can see. */
-/** An Escape keydown, falling back to a plain object where KeyboardEvent does
- *  not exist (Node, and any environment running these functions outside a page).
- *  Without the fallback the Escape route is unreachable off-browser, which makes
- *  it untestable — and an untestable guard is one nobody can prove works. */
-function escapeKeydownEvent(win) {
-  const Ctor = (win && win.KeyboardEvent) ||
-    (typeof KeyboardEvent !== 'undefined' ? KeyboardEvent : null);
-  const init = { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true };
-  if (Ctor) {
-    try { return new Ctor('keydown', init); } catch (_e) { /* fall through */ }
-  }
-  return Object.assign({ type: 'keydown' }, init);
-}
-
-function dismissViewerOverlay(doc, win, options) {
-  const root = doc || (typeof document !== 'undefined' ? document : null);
-  if (!root) return false;
-  const opts = options || {};
-  let closed = false;
-  if (opts.escapeOnly) {
-    // Second pass: the close control already had its turn and cannot report
-    // whether the viewer actually went away, so Escape follows unconditionally.
+    let step = "request";
     try {
-      const target = root.body || root;
-      if (target && typeof target.dispatchEvent === 'function') {
-        target.dispatchEvent(escapeKeydownEvent(win));
+      const response = await doFetch(url, {
+        credentials: "include",
+        headers: { accept: "application/json", authorization: "Bearer " + token }
+      });
+      if (!response || !response.ok)
+        return fail("http-error");
+      step = "json";
+      const body = await response.json();
+      const resolved = body && (body.download_url || body.url);
+      if (typeof resolved !== "string" || !resolved)
+        return fail("missing-url");
+      if (!isConversationFileUrl(resolved)) {
+        let host = "";
+        try {
+          host = new URL(resolved).hostname;
+        } catch (_e) {}
+        return fail("rejected-url", host);
+      }
+      return {
+        url: resolved,
+        fileName: body && body.file_name || null,
+        mimeType: body && body.mime_type || null,
+        size: body && typeof body.file_size_bytes === "number" ? body.file_size_bytes : null
+      };
+    } catch (_e) {
+      return fail(step === "json" ? "unreadable-json" : "request-error");
+    }
+  }
+  async function resolveArtifactPanelFiles(conversationId, options) {
+    const opts = options || {};
+    const files = opts.files || listArtifactPanelFiles(opts.doc);
+    if (!files.length)
+      return [];
+    const doFetch = opts.fetchImpl || (typeof fetch === "function" ? fetch : null);
+    const token = opts.token !== undefined ? opts.token : await fetchSessionToken(doFetch);
+    if (!token)
+      return files.map((f) => ({ file: f, resolved: null }));
+    const messageIds = Array.from(new Set(opts.messageIds || []));
+    let workingId = opts.messageId || null;
+    const out = [];
+    for (const file of files) {
+      let resolved = null;
+      const candidates = file.messageId ? [file.messageId] : Array.from(new Set([workingId].concat(messageIds).filter(Boolean)));
+      if (file.kind === "attachment") {
+        resolved = await resolveUploadedDownloadUrl(conversationId, file.fileId, {
+          fetchImpl: doFetch,
+          token,
+          onFailure: opts.onFailure
+        });
+      }
+      for (const candidate of file.kind === "attachment" ? [] : candidates) {
+        const attempt = await resolveSandboxDownloadUrl(conversationId, candidate, file.sandboxPath, {
+          fetchImpl: doFetch,
+          token,
+          onFailure: opts.onFailure
+        });
+        if (attempt) {
+          workingId = candidate;
+          resolved = attempt;
+          break;
+        }
+      }
+      const entry = { file, resolved };
+      out.push(entry);
+      if (typeof opts.onResolved === "function")
+        opts.onResolved(entry);
+    }
+    return out;
+  }
+  async function waitForArtifactPanel(doc, options) {
+    const opts = options || {};
+    const root = doc || (typeof document !== "undefined" ? document : null);
+    const budgetMs = opts.panelWaitMs === undefined ? 15000 : opts.panelWaitMs;
+    const stepMs = opts.panelPollMs === undefined ? 500 : opts.panelPollMs;
+    const stablePolls = opts.panelStablePolls === undefined ? 2 : opts.panelStablePolls;
+    const sleep = opts.sleep || function(ms) {
+      return new Promise(function(resolve) {
+        setTimeout(resolve, ms);
+      });
+    };
+    const now = opts.now || function() {
+      return Date.now();
+    };
+    const deadline = now() + budgetMs;
+    let files = listArtifactPanelFiles(root);
+    while (!files.length && now() < deadline) {
+      await sleep(stepMs);
+      files = listArtifactPanelFiles(root);
+    }
+    if (!files.length)
+      return files;
+    const byName = new Map;
+    for (const file of files)
+      byName.set(file.name, file);
+    let steady = 0;
+    while (steady < stablePolls && now() < deadline) {
+      await sleep(stepMs);
+      let added = 0;
+      for (const file of listArtifactPanelFiles(root)) {
+        if (byName.has(file.name))
+          continue;
+        byName.set(file.name, file);
+        added += 1;
+      }
+      steady = added > 0 ? 0 : steady + 1;
+    }
+    return Array.from(byName.values());
+  }
+  function listArtifactPanelFiles(doc) {
+    const root = doc || (typeof document !== "undefined" ? document : null);
+    if (!root || !root.querySelectorAll)
+      return [];
+    let buttons;
+    try {
+      buttons = root.querySelectorAll('button[class*="open-file"], [class*="artifact-row"] button');
+    } catch (_e) {
+      return [];
+    }
+    const files = [];
+    const seen = new Set;
+    for (const button of buttons) {
+      const label = button.getAttribute ? button.getAttribute("aria-label") || "" : "";
+      if (!/\.[A-Za-z0-9]{1,8}$/.test(label) || seen.has(label))
+        continue;
+      seen.add(label);
+      files.push({ name: label, sandboxPath: "/mnt/data/" + label });
+    }
+    return files;
+  }
+
+  // src/content/turns.mjs
+  function orderCapturedTurns(turns) {
+    const ordered = turns instanceof Map ? Array.from(turns.values()) : Array.from(turns);
+    const hasCompleteNumericOrder = ordered.every(function(turn) {
+      return turn.order !== null && turn.order !== undefined;
+    });
+    return ordered.sort(function(a, b) {
+      if (hasCompleteNumericOrder && a.order !== b.order)
+        return a.order - b.order;
+      return a.discoveryIndex - b.discoveryIndex;
+    });
+  }
+  function parseTurnOrder(testId) {
+    const match = String(testId || "").match(/^conversation-turn-(\d+)$/);
+    return match ? Number(match[1]) : null;
+  }
+  function buildConversationMarkdown(turns) {
+    const parts = [];
+    for (const turn of turns) {
+      if (!turn.markdown)
+        continue;
+      if (turn.role === "user")
+        parts.push(`#### You said:
+
+` + turn.markdown);
+      if (turn.role === "assistant")
+        parts.push(`#### ChatGPT said:
+
+` + turn.markdown);
+    }
+    return parts.length ? parts.join(`
+
+---
+
+`) : null;
+  }
+  function modernMessageRole(section) {
+    if (!section.getAttribute || section.getAttribute("data-chatgpt-search-unit-key") === null)
+      return null;
+    if (section.querySelector("[data-user-message-bubble]"))
+      return "user";
+    if (section.querySelector("[data-conversation-role]") && section.querySelector("[data-chatgpt-selection-message-id]"))
+      return "assistant";
+    return null;
+  }
+  function modernMessageSections(root) {
+    if (!root || !root.querySelectorAll)
+      return [];
+    return Array.from(root.querySelectorAll("[data-chatgpt-search-unit-key]")).filter(function(unit) {
+      return unit.closest && unit.closest("[data-turn-key]");
+    });
+  }
+  function readModernPagination(container) {
+    const root = container.querySelector && container.querySelector('[data-thread-find-target="conversation"]');
+    if (!root || root.getAttribute("data-chatgpt-conversation-selection-target") !== "true")
+      return null;
+    const children = Array.from(root.children || []);
+    const separatorIndex = children.findIndex(function(el) {
+      return el.tagName === "SPAN" && el.getAttribute("hidden") !== null;
+    });
+    if (separatorIndex < 0)
+      return null;
+    const virtualizer = children[separatorIndex + 1];
+    const list = virtualizer && virtualizer.children && virtualizer.children[0];
+    const slot = list && list.children && list.children[0];
+    if (!virtualizer || !virtualizer.style || !virtualizer.style.height || !slot)
+      return null;
+    const pending = children.slice(0, separatorIndex).some(function(el) {
+      return el.getAttribute("role") === "status" || !!el.querySelector('[role="status"]');
+    });
+    const first = modernMessageSections(root)[0];
+    const firstInSlot = modernMessageSections(slot)[0];
+    const atFirstSlot = !!first && first === firstInSlot && list.style && slot.style && list.style.marginTop === "0px" && slot.style.marginTop === "0px";
+    return {
+      pending,
+      loading: false,
+      count: modernMessageSections(root).length,
+      complete: !pending && atFirstSlot && conversationScrollTop(container) <= 1
+    };
+  }
+  function extractModernMessage(section, discoveryIndex) {
+    const role = modernMessageRole(section);
+    const turnId = getSectionTurnId(section);
+    if (!role || !turnId)
+      return null;
+    let markdown;
+    if (role === "user") {
+      const bubble = section.querySelector("[data-user-message-bubble]");
+      markdown = Array.from(bubble.querySelectorAll(".whitespace-pre-wrap")).map(function(node) {
+        return node.textContent.trim();
+      }).filter(Boolean).join(`
+
+`);
+      const attachments = extractAttachments(section).concat(extractImages(section));
+      if (attachments.length)
+        markdown += (markdown ? `
+
+` : "") + attachments.join(`
+
+`);
+    } else {
+      const message = section.querySelector("[data-chatgpt-selection-message-id]");
+      markdown = Array.from(message.querySelectorAll("[data-markdown-text-style]")).filter(function(node) {
+        return !node.parentElement || !node.parentElement.closest("[data-markdown-text-style]");
+      }).map(function(node) {
+        return nodeToMarkdown(node).trim();
+      }).filter(Boolean).join(`
+
+`);
+      for (const extra of extractAttachments(section).concat(extractImages(section))) {
+        if (!markdown.includes(extra))
+          markdown += (markdown ? `
+
+` : "") + extra;
+      }
+    }
+    if (!markdown)
+      return null;
+    return createTurn(turnId, section, discoveryIndex, role, markdown.replace(/\n{3,}/g, `
+
+`));
+  }
+  function getSectionTurnId(section) {
+    if (typeof section.getAttribute === "function") {
+      const legacy = section.getAttribute("data-turn-id") || section.turnId;
+      if (legacy)
+        return legacy;
+      const unitKey = section.getAttribute("data-chatgpt-search-unit-key");
+      const holder = unitKey !== null && section.closest && section.closest("[data-turn-key]");
+      return holder ? JSON.stringify([holder.getAttribute("data-turn-key"), unitKey]) : null;
+    }
+    return section.turnId || null;
+  }
+  function getSectionRole(section) {
+    const directRole = section.getAttribute("data-turn");
+    if (directRole === "user" || directRole === "assistant")
+      return directRole;
+    const message = section.querySelector("[data-message-author-role]");
+    if (!message)
+      return null;
+    const childRole = message.getAttribute("data-message-author-role");
+    return childRole === "user" || childRole === "assistant" ? childRole : null;
+  }
+  function isExplicitlyUnsupportedTurn(section) {
+    if (typeof section.getAttribute !== "function") {
+      return Boolean(section.role && section.role !== "user" && section.role !== "assistant");
+    }
+    const directRole = section.getAttribute("data-turn");
+    if (directRole)
+      return directRole !== "user" && directRole !== "assistant";
+    const message = section.querySelector("[data-message-author-role]");
+    if (!message)
+      return false;
+    const childRole = message.getAttribute("data-message-author-role");
+    return Boolean(childRole && childRole !== "user" && childRole !== "assistant");
+  }
+  function extractTurn(section, discoveryIndex) {
+    if (section.getAttribute && section.getAttribute("data-chatgpt-search-unit-key") !== null) {
+      return extractModernMessage(section, discoveryIndex);
+    }
+    const turnId = getSectionTurnId(section);
+    const role = getSectionRole(section);
+    if (!turnId)
+      return null;
+    if (role === "user") {
+      const message = section.querySelector('[data-message-author-role="user"]');
+      const bubble = message && (message.querySelector(".whitespace-pre-wrap") || message.querySelector('[dir="auto"]') || message);
+      const text = bubble ? bubble.textContent.trim() : "";
+      const userImages = extractImages(section);
+      const userAttachments = extractAttachments(section);
+      if (!text && !userImages.length && !userAttachments.length)
+        return null;
+      const parts = [];
+      if (text)
+        parts.push(text);
+      if (userAttachments.length)
+        parts.push(userAttachments.join(`
+
+`));
+      if (userImages.length)
+        parts.push(userImages.join(`
+
+`));
+      return createTurn(turnId, section, discoveryIndex, role, parts.join(`
+
+`));
+    }
+    if (role === "assistant") {
+      const pieces = extractAttachments(section).concat(extractImages(section));
+      const fragments = [];
+      const messages = section.querySelectorAll('[data-message-author-role="assistant"]');
+      for (const message of messages) {
+        const markdownRoot = message.querySelector(".markdown") || message.querySelector('[class*="prose"]') || message;
+        const markdown = nodeToMarkdown(markdownRoot).trim().replace(/\n{3,}/g, `
+
+`);
+        if (markdown)
+          fragments.push(markdown);
+      }
+      if (!fragments.length) {
+        const orphanRoots = section.querySelectorAll('.markdown, [class*="prose"]');
+        for (const root of orphanRoots) {
+          if (root.parentElement && root.parentElement.closest('.markdown, [class*="prose"]'))
+            continue;
+          const markdown = nodeToMarkdown(root).trim().replace(/\n{3,}/g, `
+
+`);
+          if (markdown)
+            fragments.push(markdown);
+        }
+      }
+      if (fragments.length)
+        pieces.push(fragments.join(`
+
+`));
+      if (!pieces.length)
+        return null;
+      return createTurn(turnId, section, discoveryIndex, role, pieces.join(`
+
+`));
+    }
+    return null;
+  }
+  function createTurn(turnId, section, discoveryIndex, role, markdown) {
+    return {
+      turnId,
+      order: parseTurnOrder(section.getAttribute("data-testid")),
+      discoveryIndex,
+      role,
+      markdown
+    };
+  }
+
+  // src/content/scroll.mjs
+  function findScrollContainer(startElement) {
+    let current = startElement ? startElement.parentElement : null;
+    while (current) {
+      const style = getComputedStyle(current);
+      if (/(auto|scroll|overlay)/.test(style.overflowY) && current.scrollHeight > current.clientHeight + 1) {
+        return current;
+      }
+      current = current.parentElement;
+    }
+    if (typeof document === "undefined")
+      return null;
+    return document.scrollingElement || document.documentElement;
+  }
+  function reverseConversationScroll(target) {
+    const view = target.ownerDocument && target.ownerDocument.defaultView;
+    const style = view && view.getComputedStyle ? view.getComputedStyle(target) : typeof getComputedStyle === "function" ? getComputedStyle(target) : null;
+    return !!style && style.flexDirection === "column-reverse";
+  }
+  function conversationScrollMax(target) {
+    return Math.max(0, target.scrollHeight - target.clientHeight);
+  }
+  function conversationScrollTop(target) {
+    return reverseConversationScroll(target) ? target.scrollTop + conversationScrollMax(target) : target.scrollTop;
+  }
+  function nativeConversationScrollTop(target, top) {
+    const maxTop = conversationScrollMax(target);
+    const logicalTop = Math.max(0, Math.min(top, maxTop));
+    return reverseConversationScroll(target) ? logicalTop - maxTop : logicalTop;
+  }
+  function waitForScrollPosition(target, requestedTop, behavior, timeoutMs) {
+    if (typeof requestAnimationFrame !== "function")
+      return Promise.resolve();
+    return new Promise(function(resolve, reject) {
+      const startedAt = Date.now();
+      let stableFrames = 0;
+      let previousTop = target.scrollTop;
+      let lastReachableTop = nativeConversationScrollTop(target, requestedTop);
+      function check() {
+        const reachableTop = nativeConversationScrollTop(target, requestedTop);
+        const targetChanged = Math.abs(reachableTop - lastReachableTop) >= 1;
+        if (targetChanged) {
+          lastReachableTop = reachableTop;
+          target.scrollTo({ top: reachableTop, behavior });
+        }
+        const currentTop = target.scrollTop;
+        const topMoved = Math.abs(currentTop - previousTop) >= 1;
+        if (!topMoved) {
+          stableFrames += 1;
+        } else {
+          stableFrames = 0;
+        }
+        if (Math.abs(currentTop - reachableTop) < 2 && stableFrames >= 2)
+          return resolve();
+        if (Date.now() - startedAt >= timeoutMs) {
+          return reject(new Error("Conversation scroll did not settle before timeout."));
+        }
+        previousTop = currentTop;
+        requestAnimationFrame(check);
+      }
+      requestAnimationFrame(check);
+    });
+  }
+  async function scrollToConversationPosition(target, top, behavior) {
+    const expectedTop = nativeConversationScrollTop(target, top);
+    target.scrollTo({ top: expectedTop, behavior });
+    try {
+      await waitForScrollPosition(target, top, behavior, 8000);
+    } catch (_e) {
+      target.scrollTo({ top: nativeConversationScrollTop(target, top), behavior: "auto" });
+      await new Promise(function(r) {
+        return setTimeout(r, 1500);
+      });
+    }
+  }
+  async function scrollToConversationStart(container, options) {
+    const opts = options || {};
+    const sleep = opts.sleep || function(ms) {
+      return new Promise(function(r) {
+        return setTimeout(r, ms);
+      });
+    };
+    const scrollTo = opts.scrollTo || scrollToConversationPosition;
+    const readFirstTurn = opts.readFirstTurn || function(target) {
+      return target.querySelector ? target.querySelector("[data-turn-id]") : null;
+    };
+    const readFirstTurnId = opts.readFirstTurnId || function(target) {
+      const first = readFirstTurn(target);
+      return first && first.getAttribute ? first.getAttribute("data-turn-id") : null;
+    };
+    const readPagination = opts.readPagination || function(target) {
+      if (!target.querySelector || !target.querySelectorAll)
+        return null;
+      const candidate = target.querySelector('[data-testid="conversation-pagination-sentinel"]');
+      const sentinel = candidate && candidate.getAttribute && candidate.getAttribute("data-testid") === "conversation-pagination-sentinel" ? candidate : null;
+      const root = target.querySelector('[data-turn-id-container="client-created-root"]');
+      const paginatedRoot = target.querySelector('div[data-turn-id-container^="paginated-root:"]');
+      const knownLayout = root && root.getAttribute && root.getAttribute("data-turn-id-container") === "client-created-root" || paginatedRoot && paginatedRoot.tagName === "DIV" && paginatedRoot.getAttribute("data-turn-id-container").indexOf("paginated-root:") === 0 && !paginatedRoot.querySelector("[data-turn-id]");
+      if (!sentinel && !knownLayout)
+        return null;
+      const holders = Array.from(target.querySelectorAll("div[data-turn-id-container]")).filter(function(el) {
+        const id = el.getAttribute("data-turn-id-container");
+        return id && id !== "client-created-root" && id.indexOf("paginated-root") !== 0;
+      });
+      const first = readFirstTurn(target);
+      const held = holders[0] && holders[0].querySelector("[data-turn-id]");
+      const atFirstHolder = !!first && !!held && (held === first || !!held.getAttribute("data-turn-id") && held.getAttribute("data-turn-id") === first.getAttribute("data-turn-id"));
+      return {
+        pending: !!sentinel,
+        loading: !!(sentinel && sentinel.querySelector("svg")),
+        count: holders.length,
+        complete: !sentinel && !!knownLayout && atFirstHolder && conversationScrollTop(target) <= 1
+      };
+    };
+    const markerFromAncestors = function(node) {
+      let el = node;
+      for (let depth = 0;el && depth < 12; depth += 1) {
+        const value = el.getAttribute ? el.getAttribute("data-turn-id-container") : null;
+        if (typeof value === "string" && value.indexOf("paginated-root") === 0)
+          return value;
+        el = el.parentElement || null;
+      }
+      return null;
+    };
+    const readsAtStart = opts.readsAtStart || function(target) {
+      const first = readFirstTurn(target);
+      if (!first)
+        return false;
+      if (markerFromAncestors(first))
+        return true;
+      if (!target.querySelector)
+        return false;
+      const marked = target.querySelector('[data-turn-id-container^="paginated-root"]');
+      if (!marked)
+        return false;
+      const inside = marked.querySelector ? marked.querySelector("[data-turn-id]") : null;
+      if (!inside)
+        return false;
+      if (inside === first)
+        return true;
+      const a = inside.getAttribute ? inside.getAttribute("data-turn-id") : null;
+      const b = first.getAttribute ? first.getAttribute("data-turn-id") : null;
+      return !!a && a === b;
+    };
+    const publishesMarker = opts.publishesMarker || function(target) {
+      if (target.querySelector && target.querySelector('[data-turn-id-container^="paginated-root"]')) {
         return true;
       }
-    } catch (_e) { /* dispatch refused */ }
+      const first = readFirstTurn(target);
+      if (!first || !first.getAttribute)
+        return false;
+      return typeof first.getAttribute("data-turn-id-container") === "string";
+    };
+    const settleMs = opts.settleMs === undefined ? 400 : opts.settleMs;
+    const stableRounds = opts.stableRounds === undefined ? 3 : opts.stableRounds;
+    const noProgressRounds = opts.noProgressRounds === undefined ? 40 : opts.noProgressRounds;
+    const noMarkerRounds = opts.noMarkerRounds === undefined ? 6 : opts.noMarkerRounds;
+    const maxRounds = opts.maxRounds === undefined ? 0 : opts.maxRounds;
+    const maxClimbMs = opts.maxClimbMs === undefined ? 600000 : opts.maxClimbMs;
+    const clock = opts.now || (typeof Date !== "undefined" ? Date.now : function() {
+      return 0;
+    });
+    const startedAt = clock();
+    const countTurns = opts.countTurns || function(target) {
+      const all = target.querySelectorAll ? target.querySelectorAll("[data-turn-id]") : [];
+      return all.length || 0;
+    };
+    let steady = 0;
+    let previousFirstId = null;
+    let rounds = 0;
+    let confirmed = false;
+    let confirmedByPagination = false;
+    let sawPagination = false;
+    let sinceProgress = 0;
+    let bestFirstId = null;
+    let seenTurnIds = 0;
+    let ranOutOfTime = false;
+    for (let i = 0;maxRounds === 0 || i < maxRounds; i += 1) {
+      rounds = i + 1;
+      await scrollTo(container, 0, "auto");
+      await sleep(settleMs);
+      const pagination = readPagination(container);
+      if (pagination)
+        sawPagination = true;
+      if (pagination && pagination.complete) {
+        confirmed = true;
+        confirmedByPagination = true;
+        break;
+      }
+      if (!(pagination && pagination.pending) && readsAtStart(container)) {
+        confirmed = true;
+        break;
+      }
+      const firstId = readFirstTurnId(container);
+      const mounted = pagination ? pagination.count : countTurns(container);
+      if (firstId !== bestFirstId || mounted > seenTurnIds) {
+        sinceProgress = 0;
+        bestFirstId = firstId;
+        if (mounted > seenTurnIds)
+          seenTurnIds = mounted;
+      } else {
+        sinceProgress += 1;
+      }
+      const atTop = conversationScrollTop(container) <= 1;
+      steady = atTop && firstId === previousFirstId ? steady + 1 : 0;
+      previousFirstId = firstId;
+      const budget = sawPagination || publishesMarker(container) ? noProgressRounds : noMarkerRounds;
+      if (sinceProgress >= budget)
+        break;
+      if (maxClimbMs > 0 && clock() - startedAt >= maxClimbMs) {
+        ranOutOfTime = true;
+        break;
+      }
+      if (pagination && pagination.pending && !pagination.loading && sinceProgress >= 2 && atTop) {
+        await scrollTo(container, Math.min(container.clientHeight * 2, conversationScrollMax(container)), "auto");
+        await sleep(settleMs);
+      }
+    }
+    return {
+      reachedTop: confirmed,
+      confirmedByMarker: confirmed && !confirmedByPagination,
+      confirmedByPagination,
+      quietedWithoutMarker: !confirmed && steady >= stableRounds,
+      markerAbsentFromPage: !ranOutOfTime && !sawPagination && !publishesMarker(container),
+      ranOutOfTime,
+      rounds
+    };
+  }
+  function waitForRenderQuiet(target) {
+    if (typeof MutationObserver === "undefined")
+      return Promise.resolve();
+    return new Promise(function(resolve) {
+      let quietTimer;
+      const finish = function() {
+        clearTimeout(quietTimer);
+        clearTimeout(maxTimer);
+        observer.disconnect();
+        resolve();
+      };
+      const schedule = function() {
+        clearTimeout(quietTimer);
+        quietTimer = setTimeout(finish, 120);
+      };
+      const observer = new MutationObserver(schedule);
+      const maxTimer = setTimeout(finish, 2000);
+      observer.observe(target, { childList: true, subtree: true, attributes: true });
+      schedule();
+    });
+  }
+  function createScanSettings(options) {
+    const supplied = options || {};
+    return {
+      readSections: supplied.readSections || function(target) {
+        return target.querySelectorAll("[data-turn-id]");
+      },
+      extractTurn: supplied.extractTurn || extractTurn,
+      onMounted: supplied.onMounted || null,
+      settle: supplied.settle || waitForRenderQuiet,
+      scrollTo: supplied.scrollTo || scrollToConversationPosition,
+      scrollToStart: supplied.scrollToStart || function(target) {
+        return scrollToConversationStart(target, { scrollTo: supplied.scrollTo });
+      },
+      now: supplied.now || function() {
+        return Date.now();
+      },
+      stablePasses: supplied.stablePasses || 3,
+      emptyTurnRetries: supplied.emptyTurnRetries || 3,
+      noProgressSteps: supplied.noProgressSteps || 60,
+      holdReleaseSteps: supplied.holdReleaseSteps || 20,
+      isCancelled: supplied.isCancelled || function() {
+        return false;
+      },
+      scanMeta: supplied.scanMeta || null,
+      onProgress: supplied.onProgress || null,
+      maxSteps: supplied.maxSteps || 0
+    };
+  }
+
+  // src/content/button-discovery.mjs
+  var UNPREVIEWABLE_FORMATS = /(^|[^a-z0-9])(zip|diff|patch|tar|gz|tgz|bz2|xz|7z|rar|whl|jar|exe|dmg|pkg|bin|iso|sqlite|db|parquet|pickle|pkl)([^a-z0-9]|$)/i;
+  function foldForNameMatching(value) {
+    return String(value || "").toLowerCase().replace(/[\s_\-.]+/g, " ").trim();
+  }
+  function panelStemsForMatching(panelNames) {
+    const stems = [];
+    for (const name of Array.from(panelNames || [])) {
+      const stem = foldForNameMatching(String(name || "").replace(/\.[A-Za-z0-9]{1,8}$/, ""));
+      if (stem)
+        stems.push(stem);
+    }
+    return stems;
+  }
+  function labelMatchesAnyStem(label, stems) {
+    const folded = foldForNameMatching(label);
+    if (!folded)
+      return false;
+    for (const stem of Array.from(stems || [])) {
+      if (stem && folded.indexOf(stem) !== -1)
+        return true;
+    }
     return false;
   }
-  try {
-    const candidates = root.querySelectorAll(
-      '[role="dialog"] button[aria-label], [data-testid*="close"], button[aria-label]');
-    for (const node of Array.from(candidates || [])) {
-      const label = (node.getAttribute && node.getAttribute('aria-label')) || '';
-      if (!/^(close|закрыть|schließen|fermer|cerrar)$/i.test(label.trim())) continue;
-      if (typeof node.click === 'function') { node.click(); closed = true; break; }
-    }
-  } catch (_e) { /* selector unsupported in a shim */ }
-
-  if (!closed) {
+  function downloadButtonsInPage(doc, panelNames) {
+    const root = doc || (typeof document !== "undefined" ? document : null);
+    if (!root || !root.querySelectorAll)
+      return [];
+    let nodes;
     try {
-      const target = root.body || root;
-      if (target && typeof target.dispatchEvent === 'function') {
-        target.dispatchEvent(escapeKeydownEvent(win));
-        closed = true;
-      }
-    } catch (_e) { /* dispatch refused */ }
-  }
-  return closed;
-}
-
-/** Find download buttons by scrolling the conversation, mounting them as it goes.
- *
- *  Required because this pass runs after `scanTurns` has restored the original
- *  scroll position: the virtualizer keeps only the visible band mounted, so a
- *  static query sees the buttons of one screen and misses the rest. Collects
- *  across the whole conversation, de-duplicated by label, and leaves the
- *  scroller where it found it. */
-/**
- * Drop buttons whose file the panel already resolved, and re-apply the ordering.
- *
- * Split out because the two facts arrive at different times now: the buttons are
- * found during the scan's walk, while the panel's names are only complete after
- * the merge that follows it. Clicking a file the panel already listed is what
- * opened the Library viewer over the panel and cut an export from four files to
- * one, so the exclusion has to happen — just later than the collection.
- */
-function filterButtonsAgainstPanel(buttons, panelNames) {
-  const known = panelStemsForMatching(panelNames);
-  const out = [];
-  for (const entry of Array.from(buttons || [])) {
-    if (!entry || !entry.label) continue;
-    if (!labelMatchesAnyStem(entry.label, known)) out.push(entry);
-  }
-  // Archives first: the files that can ONLY be had by clicking are fetched
-  // before any viewer has a chance to interfere. Same rule as the selector.
-  out.sort(function(a, b) { return (b.archive ? 1 : 0) - (a.archive ? 1 : 0); });
-  return out;
-}
-
-async function findButtonsByScrolling(doc, win, options) {
-  const opts = options || {};
-  const root = doc || (typeof document !== 'undefined' ? document : null);
-  if (!root || !root.querySelectorAll) return [];
-  const sleep = opts.sleep || function(ms) {
-    return new Promise(function(resolve) { setTimeout(resolve, ms); });
-  };
-
-  let first = null;
-  try {
-    first = root.querySelector ? root.querySelector('[data-turn-id]') : null;
-  } catch (_e) { /* shim without querySelector */ }
-  const scroller = opts.scroller ||
-    (typeof findScrollContainer === 'function' && first ? findScrollContainer(first) : null);
-  if (!scroller) return downloadButtonsInPage(root, opts.panelNames);
-
-  const settleMs = opts.buttonScrollSettleMs === undefined ? 500 : opts.buttonScrollSettleMs;
-  const maxSteps = opts.buttonScrollMaxSteps === undefined ? 200 : opts.buttonScrollMaxSteps;
-  const originalTop = scroller.scrollTop;
-  const byLabel = new Map();
-
-  function harvest() {
-    for (const entry of downloadButtonsInPage(root, opts.panelNames)) {
-      if (!byLabel.has(entry.label)) byLabel.set(entry.label, entry);
+      nodes = root.querySelectorAll('button.behavior-btn, .behavior-btn, [data-file-reference="true"]');
+    } catch (_e) {
+      return [];
     }
+    const known = panelStemsForMatching(panelNames);
+    const out = [];
+    for (const node of Array.from(nodes)) {
+      if (!node)
+        continue;
+      const modernName = node.getAttribute && node.getAttribute("data-file-reference") === "true" ? node.getAttribute("data-markdown-copy-text") : null;
+      if (modernName) {
+        if (!labelMatchesAnyStem(modernName, known)) {
+          out.push({ button: node, label: modernName, archive: UNPREVIEWABLE_FORMATS.test(modernName) });
+        }
+        continue;
+      }
+      if (node.tagName !== "BUTTON")
+        continue;
+      if (typeof node.closest === "function" && node.closest("a"))
+        continue;
+      const label = (node.textContent || "").trim();
+      if (!label || label.length > 200)
+        continue;
+      if (!/^\s*(скачать|download|загрузить|télécharger|herunterladen|descargar)(\s|$)/i.test(label)) {
+        continue;
+      }
+      if (labelMatchesAnyStem(label, known))
+        continue;
+      out.push({ button: node, label, archive: UNPREVIEWABLE_FORMATS.test(label) });
+    }
+    out.sort(function(a, b) {
+      return (b.archive ? 1 : 0) - (a.archive ? 1 : 0);
+    });
+    return out;
   }
-
-  try {
-    scroller.scrollTop = 0;
-    await sleep(settleMs);
-    harvest();
-    const maxTop = function() {
-      return Math.max(0, (scroller.scrollHeight || 0) - (scroller.clientHeight || 0));
+  function escapeKeydownEvent(win) {
+    const Ctor = win && win.KeyboardEvent || (typeof KeyboardEvent !== "undefined" ? KeyboardEvent : null);
+    const init = { key: "Escape", code: "Escape", keyCode: 27, which: 27, bubbles: true };
+    if (Ctor) {
+      try {
+        return new Ctor("keydown", init);
+      } catch (_e) {}
+    }
+    return Object.assign({ type: "keydown" }, init);
+  }
+  function dismissViewerOverlay(doc, win, options) {
+    const root = doc || (typeof document !== "undefined" ? document : null);
+    if (!root)
+      return false;
+    const opts = options || {};
+    let closed = false;
+    if (opts.escapeOnly) {
+      try {
+        const target = root.body || root;
+        if (target && typeof target.dispatchEvent === "function") {
+          target.dispatchEvent(escapeKeydownEvent(win));
+          return true;
+        }
+      } catch (_e) {}
+      return false;
+    }
+    try {
+      const candidates = root.querySelectorAll('[role="dialog"] button[aria-label], [data-testid*="close"], button[aria-label]');
+      for (const node of Array.from(candidates || [])) {
+        const label = node.getAttribute && node.getAttribute("aria-label") || "";
+        if (!/^(close|закрыть|schließen|fermer|cerrar)$/i.test(label.trim()))
+          continue;
+        if (typeof node.click === "function") {
+          node.click();
+          closed = true;
+          break;
+        }
+      }
+    } catch (_e) {}
+    if (!closed) {
+      try {
+        const target = root.body || root;
+        if (target && typeof target.dispatchEvent === "function") {
+          target.dispatchEvent(escapeKeydownEvent(win));
+          closed = true;
+        }
+      } catch (_e) {}
+    }
+    return closed;
+  }
+  function filterButtonsAgainstPanel(buttons, panelNames) {
+    const known = panelStemsForMatching(panelNames);
+    const out = [];
+    for (const entry of Array.from(buttons || [])) {
+      if (!entry || !entry.label)
+        continue;
+      if (!labelMatchesAnyStem(entry.label, known))
+        out.push(entry);
+    }
+    out.sort(function(a, b) {
+      return (b.archive ? 1 : 0) - (a.archive ? 1 : 0);
+    });
+    return out;
+  }
+  async function findButtonsByScrolling(doc, win, options) {
+    const opts = options || {};
+    const root = doc || (typeof document !== "undefined" ? document : null);
+    if (!root || !root.querySelectorAll)
+      return [];
+    const sleep = opts.sleep || function(ms) {
+      return new Promise(function(resolve) {
+        setTimeout(resolve, ms);
+      });
     };
-    const step = Math.max(200, Math.floor((scroller.clientHeight || 800) * 0.7));
-    for (let i = 0; i < maxSteps; i += 1) {
-      const before = scroller.scrollTop;
-      scroller.scrollTop = Math.min(before + step, maxTop());
+    let first = null;
+    try {
+      first = root.querySelector ? root.querySelector("[data-turn-id]") : null;
+    } catch (_e) {}
+    const scroller = opts.scroller || (typeof findScrollContainer === "function" && first ? findScrollContainer(first) : null);
+    if (!scroller)
+      return downloadButtonsInPage(root, opts.panelNames);
+    const settleMs = opts.buttonScrollSettleMs === undefined ? 500 : opts.buttonScrollSettleMs;
+    const maxSteps = opts.buttonScrollMaxSteps === undefined ? 200 : opts.buttonScrollMaxSteps;
+    const originalTop = scroller.scrollTop;
+    const byLabel = new Map;
+    function harvest() {
+      for (const entry of downloadButtonsInPage(root, opts.panelNames)) {
+        if (!byLabel.has(entry.label))
+          byLabel.set(entry.label, entry);
+      }
+    }
+    try {
+      scroller.scrollTop = 0;
       await sleep(settleMs);
       harvest();
-      if (scroller.scrollTop >= maxTop() - 1 && before >= maxTop() - 1) break;
-    }
-  } finally {
-    // A button captured while scrolled away is still clickable: the click path
-    // calls scrollIntoView on it first. Restoring the position keeps the page
-    // where the user left it.
-    try { scroller.scrollTop = originalTop; } catch (_e) { /* detached */ }
-  }
-  return Array.from(byLabel.values());
-}
-
-async function collectButtonDownloads(options) {
-  const opts = options || {};
-  const doc = opts.doc || (typeof document !== 'undefined' ? document : null);
-  const win = opts.win || (typeof window !== 'undefined' ? window : null);
-  if (!doc || !win) return [];
-  // Reported so a test can assert the names really travelled: a mutation
-  // emptying them left the whole suite green, making the regression guard
-  // unverified wiring rather than a checked one.
-  if (typeof opts.onSelectButtons === 'function') opts.onSelectButtons(opts.panelNames || []);
-  // `!== undefined`, not `||`: an EMPTY supplied list means the caller's walk
-  // found no buttons, which is an answer. Treating it as "nothing supplied"
-  // would re-traverse the whole conversation to reach the same result.
-  const supplied = opts.buttons !== undefined;
-  let buttons = supplied ? opts.buttons : downloadButtonsInPage(doc, opts.panelNames);
-
-  // MEASURED (2026-09-10, 16:51 export): zero buttons found, no `## Files`
-  // section written at all, while the same conversation demonstrably carries
-  // eight of them. The reason is ordering — this runs AFTER scanTurns, whose
-  // `finally` restores the original scroll position, so ChatGPT's virtualizer
-  // has unmounted every turn outside the viewport. A probe measured 5 turns of
-  // 8 present in a static DOM for exactly this reason.
-  //
-  // So the buttons are searched for the way the probe found them: scroll the
-  // conversation and collect what mounts. Without this the feature is dead on a
-  // conversation longer than one screen, which is every conversation that
-  // generates files.
-  //
-  // This is now a FALLBACK, not the main path: the scan collects buttons on its
-  // own walk and passes them in, so a caller that supplies a list — empty or
-  // not — has already traversed. It stays for callers that do not, and because
-  // its own guard was itself the next defect:
-  //
-  //   if (!opts.buttons && !buttons.length && …)
-  //
-  // "only when nothing was found here" sounds safe and is not. Measured on a
-  // live thread: the landing position held 2 behavior-btn nodes, both editing
-  // suggestions ("Make the opening more concrete"), neither a download. Two was
-  // not zero, so the traversal never ran and all 5 download buttons — the .zip
-  // and the .diff among them — were never seen. A guard that reads "we found
-  // SOMETHING" cannot tell it apart from "we found the right thing".
-  if (!supplied && !buttons.length && opts.scrollForButtons !== false) {
-    buttons = await findButtonsByScrolling(doc, win, opts);
-  }
-  if (!buttons.length) return [];
-
-  const sleep = opts.sleep || function(ms) {
-    return new Promise(function(resolve) { setTimeout(resolve, ms); });
-  };
-  // How long one handler gets to produce a URL. It is a network round-trip to
-  // sign the link, so this is not instant; a button that never resolves must
-  // not stall the export either.
-  const settleMs = opts.clickSettleMs === undefined ? 2500 : opts.clickSettleMs;
-
-  const captured = [];
-  const anchorProto = win.HTMLAnchorElement && win.HTMLAnchorElement.prototype;
-  const originalAnchorClick = anchorProto ? anchorProto.click : null;
-  const originalOpen = win.open;
-  const originalCreateObjectURL = win.URL && win.URL.createObjectURL;
-
-  function record(url, blob) {
-    if (!url && !blob) return;
-    captured.push({ url: url || null, blob: blob || null });
-  }
-
-  try {
-    if (anchorProto && typeof originalAnchorClick === 'function') {
-      anchorProto.click = function() {
-        const href = this.getAttribute ? (this.getAttribute('href') || '') : '';
-        // Only swallow the click when it is a download; an ordinary in-page
-        // anchor clicked by unrelated code must still work.
-        if (href && (this.hasAttribute('download') || /^(https?:|blob:)/.test(href))) {
-          record(href, null);
-          return undefined;
-        }
-        return originalAnchorClick.apply(this, arguments);
+      const maxTop = function() {
+        return Math.max(0, (scroller.scrollHeight || 0) - (scroller.clientHeight || 0));
       };
-    }
-    win.open = function(url) {
-      if (url) { record(String(url), null); return null; }
-      return originalOpen ? originalOpen.apply(win, arguments) : null;
-    };
-    if (win.URL && typeof originalCreateObjectURL === 'function') {
-      win.URL.createObjectURL = function(obj) {
-        const url = originalCreateObjectURL.apply(win.URL, arguments);
-        // Keep the blob itself: a blob: URL minted in the page is not fetchable
-        // from the popup's context, so the bytes have to travel instead.
-        record(url, obj || null);
-        return url;
-      };
-    }
-
-    for (const entry of buttons) {
-      const before = captured.length;
+      const step = Math.max(200, Math.floor((scroller.clientHeight || 800) * 0.7));
+      for (let i = 0;i < maxSteps; i += 1) {
+        const before = scroller.scrollTop;
+        scroller.scrollTop = Math.min(before + step, maxTop());
+        await sleep(settleMs);
+        harvest();
+        if (scroller.scrollTop >= maxTop() - 1 && before >= maxTop() - 1)
+          break;
+      }
+    } finally {
       try {
-        if (typeof entry.button.scrollIntoView === 'function') {
-          entry.button.scrollIntoView({ block: 'center' });
+        scroller.scrollTop = originalTop;
+      } catch (_e) {}
+    }
+    return Array.from(byLabel.values());
+  }
+
+  // src/content/scan.mjs
+  var PLACEHOLDER_MARKDOWN = /^(thinking|reasoning|searching|analyzing|analysing|gathering|expanding|loading|generating|working)\b|^(думаю|размышляю|ищу|загружаю|генерирую)\b/i;
+  function looksLikePlaceholder(markdown) {
+    return PLACEHOLDER_MARKDOWN.test(markdown.trim());
+  }
+  function shouldReplaceCapture(previousMarkdown, candidateMarkdown) {
+    const previousIsPlaceholder = looksLikePlaceholder(previousMarkdown);
+    const candidateIsPlaceholder = looksLikePlaceholder(candidateMarkdown);
+    if (previousIsPlaceholder !== candidateIsPlaceholder)
+      return previousIsPlaceholder;
+    return candidateMarkdown.length > previousMarkdown.length;
+  }
+  function captureMountedTurns(sections, settings, seen, state) {
+    let newIds = 0;
+    let bandTop = Infinity;
+    let bandBottom = -Infinity;
+    for (const section of sections) {
+      if (typeof section.getBoundingClientRect === "function") {
+        try {
+          const rect = section.getBoundingClientRect();
+          if (rect && typeof rect.top === "number" && typeof rect.bottom === "number") {
+            if (rect.top < bandTop)
+              bandTop = rect.top;
+            if (rect.bottom > bandBottom)
+              bandBottom = rect.bottom;
+          }
+        } catch (_e) {}
+      }
+      if (isExplicitlyUnsupportedTurn(section))
+        continue;
+      const rawTurnId = getSectionTurnId(section);
+      if (rawTurnId && !state.observedIds.has(rawTurnId)) {
+        state.observedIds.add(rawTurnId);
+        newIds += 1;
+      }
+      const candidate = settings.extractTurn(section, state.discoveryIndex);
+      if (!candidate) {
+        if (rawTurnId) {
+          const attempts = (state.emptyAttempts.get(rawTurnId) ?? 0) + 1;
+          state.emptyAttempts.set(rawTurnId, attempts);
+          if (attempts >= settings.emptyTurnRetries)
+            state.skipped.add(rawTurnId);
         }
-        entry.button.click();
-      } catch (_e) {
         continue;
       }
-      // Wait for the handler's round-trip, but stop as soon as it delivers.
-      // Bounded by POLL COUNT, not by the wall clock: a supplied `sleep` that
-      // returns immediately (tests, or a page throttling timers) turns a
-      // clock-bounded loop into a busy-wait that still burns the full budget —
-      // 2.5s per button, 20s over the eight buttons a real conversation
-      // carries. Counting polls keeps the bound honest in both environments.
-      const pollMs = opts.clickPollMs === undefined ? 150 : opts.clickPollMs;
-      const maxPolls = Math.max(1, Math.ceil(settleMs / Math.max(1, pollMs)));
-      for (let poll = 0; poll < maxPolls && captured.length === before; poll += 1) {
-        await sleep(pollMs);
+      if (rawTurnId) {
+        state.emptyAttempts.delete(rawTurnId);
+        state.skipped.delete(rawTurnId);
       }
-      for (let i = before; i < captured.length; i += 1) {
-        captured[i].label = entry.label;
+      const previous = seen.get(candidate.turnId);
+      if (!previous) {
+        candidate.discoveryIndex = state.discoveryIndex;
+        state.discoveryIndex += 1;
       }
-      // A click that produced no URL opened a viewer instead of downloading —
-      // measured: the Library panel slid over the artefact panel and the next
-      // export read ONE file where the previous read four. Close it, or every
-      // artefact behind it is lost for the rest of the run.
-      if (captured.length === before) {
-        // Both routes, not the first that "worked": the close control reports
-        // nothing about whether the viewer actually went away, and a viewer
-        // left open costs every artefact behind it. Escape after it is cheap.
-        dismissViewerOverlay(doc, win);
-        await sleep(opts.dismissSettleMs === undefined ? 400 : opts.dismissSettleMs);
-        dismissViewerOverlay(doc, win, { escapeOnly: true });
+      if (!previous || shouldReplaceCapture(previous.markdown, candidate.markdown)) {
+        seen.set(candidate.turnId, previous ? Object.assign({}, candidate, { discoveryIndex: previous.discoveryIndex }) : candidate);
       }
     }
-  } finally {
-    if (anchorProto && typeof originalAnchorClick === 'function') {
-      anchorProto.click = originalAnchorClick;
+    let unresolved = 0;
+    for (const id of state.observedIds) {
+      if (!seen.has(id) && !state.skipped.has(id))
+        unresolved += 1;
     }
-    win.open = originalOpen;
-    if (win.URL && typeof originalCreateObjectURL === 'function') {
-      win.URL.createObjectURL = originalCreateObjectURL;
-    }
+    const mountedBand = bandBottom > bandTop ? bandBottom - bandTop : 0;
+    return { newIds, unresolved, mountedBand };
   }
-
-  const seen = new Set();
-  const files = [];
-  for (const item of captured) {
-    const key = item.url || (item.label + ':blob');
-    if (seen.has(key)) continue;
-    seen.add(key);
-    files.push({
-      name: downloadNameFromUrl(item.url, item.label),
-      url: item.url,
-      blob: item.blob,
-      label: item.label || null,
-      fromButton: true,
+  function nextScrollTop(container, atBottom, mountedBand) {
+    if (atBottom)
+      return conversationScrollTop(container);
+    const reach = mountedBand > 0 ? Math.min(mountedBand, container.clientHeight || mountedBand) : container.clientHeight || 0;
+    const increment = Math.max(1, Math.floor(reach * 0.75));
+    return Math.min(conversationScrollTop(container) + increment, conversationScrollMax(container));
+  }
+  function largestCoverageGap(bands, viewportHeight, documentHeight) {
+    if (!bands || bands.length === 0)
+      return { width: 0, at: 0 };
+    const sorted = bands.slice().sort(function(a, b) {
+      return a[0] - b[0];
     });
+    let lastProductive = -1;
+    let firstProductive = -1;
+    for (let i = 0;i < sorted.length; i += 1) {
+      if (sorted[i][1] > 0) {
+        if (firstProductive < 0)
+          firstProductive = i;
+        lastProductive = i;
+      }
+    }
+    if (lastProductive < 0)
+      return { width: 0, at: 0 };
+    let reach = sorted[firstProductive][0] + sorted[firstProductive][1];
+    let widest = 0;
+    let at = 0;
+    for (let i = firstProductive + 1;i <= lastProductive; i += 1) {
+      const start = sorted[i][0];
+      if (start > reach + 1) {
+        const width = start - reach;
+        if (width > widest) {
+          widest = width;
+          at = reach;
+        }
+      }
+      const end = sorted[i][0] + sorted[i][1];
+      if (end > reach)
+        reach = end;
+    }
+    const traversedTo = sorted[sorted.length - 1][0];
+    const seenTo = sorted[lastProductive][0] + sorted[lastProductive][1];
+    const blind = traversedTo - seenTo;
+    if (viewportHeight > 0 && blind > viewportHeight) {
+      if (blind > widest) {
+        widest = blind;
+        at = seenTo;
+      }
+    }
+    if (viewportHeight > 0 && documentHeight > 0) {
+      const unreached = documentHeight - traversedTo - viewportHeight;
+      if (unreached > viewportHeight && unreached > widest) {
+        widest = unreached;
+        at = traversedTo;
+      }
+    }
+    return { width: widest, at };
   }
-  return files;
-}
+  function markPartialScan(settings, reason) {
+    if (settings.scanMeta) {
+      settings.scanMeta.partial = true;
+      if (!settings.scanMeta.reason)
+        settings.scanMeta.reason = reason;
+    }
+  }
+  function prefixPartialNotice(md, reason) {
+    if (reason === "history start unverified for this page layout") {
+      return `> **Partial export** — history start is unverified for this page layout; earlier messages may be missing.
 
-/** The file's real name, which the button's prose label does not carry.
- *  `fn=` is what the signing endpoint puts there; the last path segment is the
- *  fallback, and the label is used only when the URL offers nothing usable. */
-function downloadNameFromUrl(url, label) {
-  const fallback = String(label || 'download').trim().replace(/[\\/:*?"<>|]+/g, '-');
-  if (!url) return fallback;
-  let parsed;
-  try {
-    parsed = new URL(url, typeof location !== 'undefined' ? location.href : undefined);
-  } catch (_e) {
+` + md;
+    }
+    var detail = reason === "cancelled" ? "scan was stopped before reaching the end" : "scan did not reach the end (" + reason + ")";
+    return "> **Partial export** — " + detail + `.
+
+` + md;
+  }
+  async function scanTurns(container, options) {
+    const settings = createScanSettings(options);
+    const originalNativeScrollTop = container.scrollTop;
+    const seen = new Map;
+    const state = {
+      discoveryIndex: 0,
+      observedIds: new Set,
+      emptyAttempts: new Map,
+      skipped: new Set
+    };
+    let stablePasses = 0;
+    let lastHeight = -1;
+    const readBands = [];
+    const startedAt = settings.now();
+    let stepsSinceProgress = 0;
+    let lastProgressTop = -1;
+    try {
+      const start = await settings.scrollToStart(container);
+      if (!start.reachedTop && !(start.quietedWithoutMarker && start.markerAbsentFromPage)) {
+        markPartialScan(settings, "never reached the start");
+      }
+      await settings.settle(container);
+      for (let step = 0;settings.maxSteps === 0 || step < settings.maxSteps; step += 1) {
+        if (settings.isCancelled()) {
+          markPartialScan(settings, "cancelled");
+          return orderCapturedTurns(seen);
+        }
+        const observation = captureMountedTurns(settings.readSections(container), settings, seen, state);
+        const logicalTop = conversationScrollTop(container);
+        const atBottom = logicalTop >= conversationScrollMax(container) - 1;
+        readBands.push([logicalTop, observation.mountedBand]);
+        if (settings.onMounted) {
+          try {
+            settings.onMounted(container);
+          } catch (_e) {}
+        }
+        const movedDown = Math.abs(logicalTop - lastProgressTop) >= 1;
+        if (observation.newIds > 0 || movedDown) {
+          stepsSinceProgress = 0;
+          lastProgressTop = logicalTop;
+        } else {
+          stepsSinceProgress += 1;
+          if (stepsSinceProgress >= settings.holdReleaseSteps && observation.unresolved > 0) {
+            for (const id of state.observedIds) {
+              if (!seen.has(id))
+                state.skipped.add(id);
+            }
+            observation.unresolved = 0;
+            stepsSinceProgress = 0;
+          }
+          if (stepsSinceProgress >= settings.noProgressSteps && !atBottom) {
+            markPartialScan(settings, "stall");
+            return orderCapturedTurns(seen);
+          }
+        }
+        if (settings.onProgress) {
+          settings.onProgress({
+            captured: seen.size,
+            observed: state.observedIds.size,
+            elapsedMs: settings.now() - startedAt,
+            scrollTop: logicalTop,
+            scrollHeight: container.scrollHeight
+          });
+        }
+        stablePasses = atBottom && observation.newIds === 0 && observation.unresolved === 0 && lastHeight === container.scrollHeight ? stablePasses + 1 : 0;
+        if (stablePasses >= settings.stablePasses) {
+          const gap = largestCoverageGap(readBands, container.clientHeight || 0, container.scrollHeight || 0);
+          if (gap.width > 0)
+            markPartialScan(settings, "coverage gap");
+          return orderCapturedTurns(seen);
+        }
+        lastHeight = container.scrollHeight;
+        const target = observation.unresolved > 0 ? logicalTop : nextScrollTop(container, atBottom, observation.mountedBand);
+        await settings.scrollTo(container, target, "auto");
+        await settings.settle(container);
+      }
+      if (seen.size > 0) {
+        markPartialScan(settings, "step limit");
+        return orderCapturedTurns(seen);
+      }
+      throw new Error("Conversation scan exceeded its step limit before reaching a stable bottom.");
+    } finally {
+      const restoreTop = reverseConversationScroll(container) ? originalNativeScrollTop + conversationScrollMax(container) : originalNativeScrollTop;
+      await settings.scrollTo(container, restoreTop, "auto");
+    }
+  }
+  function sandboxFilesFromMarkdown(markdown) {
+    const text = String(markdown || "");
+    const files = [];
+    const seen = new Set;
+    const pattern = /sandbox:(\/[^\s`)"'\\]+)/g;
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      const sandboxPath = match[1];
+      if (seen.has(sandboxPath))
+        continue;
+      seen.add(sandboxPath);
+      const name = sandboxPath.split("/").pop();
+      if (!name)
+        continue;
+      files.push({ name, sandboxPath, fromBody: true });
+    }
+    return files;
+  }
+
+  // src/content/button-fetch.mjs
+  async function collectButtonDownloads(options) {
+    const opts = options || {};
+    const doc = opts.doc || (typeof document !== "undefined" ? document : null);
+    const win = opts.win || (typeof window !== "undefined" ? window : null);
+    if (!doc || !win)
+      return [];
+    if (typeof opts.onSelectButtons === "function")
+      opts.onSelectButtons(opts.panelNames || []);
+    const supplied = opts.buttons !== undefined;
+    let buttons = supplied ? opts.buttons : downloadButtonsInPage(doc, opts.panelNames);
+    if (!supplied && !buttons.length && opts.scrollForButtons !== false) {
+      buttons = await findButtonsByScrolling(doc, win, opts);
+    }
+    if (!buttons.length)
+      return [];
+    const sleep = opts.sleep || function(ms) {
+      return new Promise(function(resolve) {
+        setTimeout(resolve, ms);
+      });
+    };
+    const settleMs = opts.clickSettleMs === undefined ? 2500 : opts.clickSettleMs;
+    const captured = [];
+    const anchorProto = win.HTMLAnchorElement && win.HTMLAnchorElement.prototype;
+    const originalAnchorClick = anchorProto ? anchorProto.click : null;
+    const originalOpen = win.open;
+    const originalCreateObjectURL = win.URL && win.URL.createObjectURL;
+    function record(url, blob) {
+      if (!url && !blob)
+        return;
+      captured.push({ url: url || null, blob: blob || null });
+    }
+    try {
+      if (anchorProto && typeof originalAnchorClick === "function") {
+        anchorProto.click = function() {
+          const href = this.getAttribute ? this.getAttribute("href") || "" : "";
+          if (href && (this.hasAttribute("download") || /^(https?:|blob:)/.test(href))) {
+            record(href, null);
+            return;
+          }
+          return originalAnchorClick.apply(this, arguments);
+        };
+      }
+      win.open = function(url) {
+        if (url) {
+          record(String(url), null);
+          return null;
+        }
+        return originalOpen ? originalOpen.apply(win, arguments) : null;
+      };
+      if (win.URL && typeof originalCreateObjectURL === "function") {
+        win.URL.createObjectURL = function(obj) {
+          const url = originalCreateObjectURL.apply(win.URL, arguments);
+          record(url, obj || null);
+          return url;
+        };
+      }
+      for (const entry of buttons) {
+        const before = captured.length;
+        try {
+          if (typeof entry.button.scrollIntoView === "function") {
+            entry.button.scrollIntoView({ block: "center" });
+          }
+          entry.button.click();
+        } catch (_e) {
+          continue;
+        }
+        const pollMs = opts.clickPollMs === undefined ? 150 : opts.clickPollMs;
+        const maxPolls = Math.max(1, Math.ceil(settleMs / Math.max(1, pollMs)));
+        for (let poll = 0;poll < maxPolls && captured.length === before; poll += 1) {
+          await sleep(pollMs);
+        }
+        for (let i = before;i < captured.length; i += 1) {
+          captured[i].label = entry.label;
+        }
+        if (captured.length === before) {
+          dismissViewerOverlay(doc, win);
+          await sleep(opts.dismissSettleMs === undefined ? 400 : opts.dismissSettleMs);
+          dismissViewerOverlay(doc, win, { escapeOnly: true });
+        }
+      }
+    } finally {
+      if (anchorProto && typeof originalAnchorClick === "function") {
+        anchorProto.click = originalAnchorClick;
+      }
+      win.open = originalOpen;
+      if (win.URL && typeof originalCreateObjectURL === "function") {
+        win.URL.createObjectURL = originalCreateObjectURL;
+      }
+    }
+    const seen = new Set;
+    const files = [];
+    for (const item of captured) {
+      const key = item.url || item.label + ":blob";
+      if (seen.has(key))
+        continue;
+      seen.add(key);
+      files.push({
+        name: downloadNameFromUrl(item.url, item.label),
+        url: item.url,
+        blob: item.blob,
+        label: item.label || null,
+        fromButton: true
+      });
+    }
+    return files;
+  }
+  function downloadNameFromUrl(url, label) {
+    const fallback = String(label || "download").trim().replace(/[\\/:*?"<>|]+/g, "-");
+    if (!url)
+      return fallback;
+    let parsed;
+    try {
+      parsed = new URL(url, typeof location !== "undefined" ? location.href : undefined);
+    } catch (_e) {
+      return fallback;
+    }
+    const fn = parsed.searchParams ? parsed.searchParams.get("fn") : null;
+    if (fn)
+      return fn;
+    const last = (parsed.pathname || "").split("/").filter(Boolean).pop();
+    if (last && /\.[A-Za-z0-9]{1,8}$/.test(last))
+      return last;
     return fallback;
   }
-  const fn = parsed.searchParams ? parsed.searchParams.get('fn') : null;
-  if (fn) return fn;
-  const last = (parsed.pathname || '').split('/').filter(Boolean).pop();
-  // A path segment is only a name when it looks like one: the estuary endpoint
-  // ends in `/content`, which is a route, not a file.
-  if (last && /\.[A-Za-z0-9]{1,8}$/.test(last)) return last;
-  return fallback;
-}
-
-async function appendPanelArtifacts(markdown, options) {
-  const opts = options || {};
-  const doc = opts.doc || (typeof document !== 'undefined' ? document : null);
-  // The panel mounts LATE. Measured on production: turns appeared at 9s and the
-  // artefact rows only at 12s after navigation, with no scrolling needed. A
-  // single-frame read at 11s found nothing, so a user who exports immediately
-  // after opening a conversation would silently lose every generated file. Wait
-  // for it, bounded — and treat "still absent" as absent, not as an error.
-  const conversationId = opts.conversationId ||
-    ((typeof location !== 'undefined' ? location.pathname : '')
-      .match(/\/c\/([A-Za-z0-9-]+)/) || [])[1] || null;
-  if (!conversationId) return markdown;
-
-  // Rows harvested during the scan, while each turn was mounted. They are the
-  // authoritative reading for a panel nested inside a turn — see the comment at
-  // the onMounted collector in getConversationMarkdown.
-  const scannedFiles = Array.isArray(opts.scannedPanelFiles) ? opts.scannedPanelFiles : [];
-
-  const artifacts = opts.artifacts !== undefined
-    ? opts.artifacts
-    : await fetchConversationArtifacts(conversationId, opts);
-
-  if (typeof opts.onInventory === 'function') opts.onInventory(artifacts);
-
-  // Ask the API FIRST, then decide whether waiting for the panel is worth it.
-  // Most conversations have no generated files, and paying the panel-wait budget
-  // on every one of them would slow every export for nothing. When the API says
-  // there is nothing to find, a single-frame read is enough; when it reports
-  // artefacts (or could not be read at all), wait for the panel to mount.
-  // Files offered as ordinary links in the answer text. Measured on the
-  // conversation that exposed this: ChatGPT wrote them as
-  //
-  //   [Скачать … bundle v1](sandbox:/mnt/data/canon-consilium-prompt-bundle-v1.zip)
-  //
-  // and four exports in a row named the file without ever fetching it. Neither
-  // existing path could reach it: `nodeToMarkdown` rewrites the link into a
-  // prose note, and the downloader only matches `[label](http…)`, so both the
-  // note and the original link give zero matches. The artefact panel does not
-  // rescue it either — a .zip has no built-in viewer, so it gets no panel row.
-  //
-  // This is also the only place a REAL sandbox path is available. The panel
-  // rebuilds one as '/mnt/data/' + label, which is a guess; a link carries the
-  // path the file actually has, subdirectory and all.
-  const bodyFiles = sandboxFilesFromMarkdown(markdown);
-
-  // Paths the API names in message text. This is the source that carries files
-  // with no panel row, no attachment and no link — measured: the .zip and the
-  // .diff of the conversation this was built for appear NOWHERE else.
-  const apiFiles = (artifacts || [])
-    .filter(function(a) { return a && a.sandboxPath; })
-    .map(function(a) {
-      return { name: a.name, sandboxPath: a.sandboxPath, fromApi: true,
-        priority: a.priority === undefined ? 1 : a.priority, messageId: a.messageId };
-    });
-
-  const uploadedFiles = (artifacts || []).filter(function(a) {
-    return a && a.kind === 'attachment' && a.name;
-  }).map(function(a) { return Object.assign({}, a, { priority: 0 }); });
-
-  let files = opts.files;
-  if (!files) {
-    // A sandbox link in the body is proof a generated file exists — better
-    // proof than the API, which reports neither uploads nor interpreter output
-    // for such a conversation. Wait for the panel when either source says so.
-    const mayHaveFiles = artifacts === null || artifacts.length > 0 ||
-      bodyFiles.length > 0 || scannedFiles.length > 0;
-    // A completed scan plus an explicit API link already supplies the file's
-    // real path. Do not spend half the lookup budget waiting for a viewer panel
-    // that archives do not render. Other layouts retain the late-panel wait.
-    const offeredAfterScan = Array.isArray(opts.scannedPanelFiles) &&
-      (uploadedFiles.length > 0 || apiFiles.some(function(file) { return file.priority === 0; }));
-    files = mayHaveFiles && !offeredAfterScan
-      ? await waitForArtifactPanel(doc, opts)
-      : listArtifactPanelFiles(doc);
-  }
-
-  // Merge, preferring the body's real path over the panel's reconstructed one.
-  const bySandboxPath = new Map();
-  // Scan-time rows first: they were read while their turn was mounted, which a
-  // post-scan read cannot reproduce for a panel nested inside a turn.
-  for (const file of scannedFiles) bySandboxPath.set(file.sandboxPath, file);
-  for (const file of files) bySandboxPath.set(file.sandboxPath, file);
-  for (const file of bodyFiles) bySandboxPath.set(file.sandboxPath, file);
-  // Last, so a path the API states verbatim wins over one the panel rebuilt
-  // from a row label. Both are keyed by path, so this adds the files that have
-  // no other source and overwrites nothing that disagrees.
-  for (const file of apiFiles) {
-    const visible = bySandboxPath.has(file.sandboxPath);
-    bySandboxPath.set(file.sandboxPath, visible ? Object.assign({}, file, { priority: 0 }) : file);
-  }
-  files = uploadedFiles.concat(Array.from(bySandboxPath.values())).sort(function(a, b) {
-    return (a.priority || 0) - (b.priority || 0);
-  });
-
-  // Files behind a button handler are gathered BEFORE the early return below:
-  // such a file has no sandbox path at all, so `files` is empty for a
-  // conversation whose only artefact is the archive — and returning here would
-  // drop it exactly the way four consecutive exports did.
-  // The panel's names are handed to the button selector so a file it already
-  // resolved is never clicked. That is the guard against the measured
-  // regression: clicking a .md the panel had already listed opened the Library
-  // viewer over the panel and cut the next export from four files to one.
-  const panelNames = files.map(function(f) { return f.name; });
-  // Buttons gathered on the scan's single walk, filtered HERE rather than
-  // there: the exclusion needs the panel's names, and the panel is only fully
-  // known once the merge above has run.
-  const scannedButtons = Array.isArray(opts.scannedButtons)
-    ? filterButtonsAgainstPanel(opts.scannedButtons, panelNames)
-    : null;
-  const buttonFiles = opts.clickDownloads === false
-    ? (opts.reportUnresolvedButtons
-      ? (scannedButtons || downloadButtonsInPage(doc, panelNames)).map(function(entry) {
-        return { name: entry.label, url: null };
-      })
-      : [])
-    : (opts.buttonFiles !== undefined
-      ? opts.buttonFiles
-      : await collectButtonDownloads(Object.assign({}, opts, {
-        panelNames: panelNames,
-        // Present but empty means the walk genuinely found none — do not fall
-        // back to a second traversal, which is what this replaces.
-        buttons: scannedButtons === null ? undefined : scannedButtons,
-      })));
-
-  // An unreadable inventory can hide uploads with no DOM download link.
-  // Preserve that uncertainty even if there are no visible candidates.
-  const inventoryUnavailable = artifacts === null;
-  if (!files.length && !buttonFiles.length && !inventoryUnavailable) return markdown;
-
-  // Candidate message ids for the download call. Measured: the endpoint requires
-  // a message_id but does NOT use it to select the file — 12 different ids
-  // resolved one sandbox_path to the same file id. So ANY id from the
-  // conversation works, and taking them only from messages that already showed
-  // an artefact is wrong: a conversation can hold a generated PDF while no
-  // message carries an attachment or asset_pointer, leaving nothing to try and
-  // the file unresolved.
-  //
-  // null artifacts means the API could not be read at all — kept distinct below
-  // rather than implying the conversation had no files.
-  let messageIds = opts.messageIds;
-  if (!messageIds) {
-    messageIds = artifacts
-      ? artifacts.map(function(a) { return a.messageId; }).filter(Boolean)
-      : [];
-    // Sandbox artefacts first: a `tool` message that produced a file is the id
-    // most likely to be accepted for it, and the loop in
-    // resolveArtifactPanelFiles keeps the first id that works.
-    messageIds.sort(function(a, b) {
-      const rank = function(id) {
-        for (const art of artifacts || []) {
-          if (art.messageId === id) return art.sandboxPath ? 0 : 1;
-        }
-        return 1;
+  async function appendPanelArtifacts(markdown, options) {
+    const opts = options || {};
+    const doc = opts.doc || (typeof document !== "undefined" ? document : null);
+    const conversationId = opts.conversationId || ((typeof location !== "undefined" ? location.pathname : "").match(/\/c\/([A-Za-z0-9-]+)/) || [])[1] || null;
+    if (!conversationId)
+      return markdown;
+    const scannedFiles = Array.isArray(opts.scannedPanelFiles) ? opts.scannedPanelFiles : [];
+    const artifacts = opts.artifacts !== undefined ? opts.artifacts : await fetchConversationArtifacts(conversationId, opts);
+    if (typeof opts.onInventory === "function")
+      opts.onInventory(artifacts);
+    const bodyFiles = sandboxFilesFromMarkdown(markdown);
+    const apiFiles = (artifacts || []).filter(function(a) {
+      return a && a.sandboxPath;
+    }).map(function(a) {
+      return {
+        name: a.name,
+        sandboxPath: a.sandboxPath,
+        fromApi: true,
+        priority: a.priority === undefined ? 1 : a.priority,
+        messageId: a.messageId
       };
-      return rank(a) - rank(b);
     });
-    if (!messageIds.length) {
-      // Fall back to the ids the DOM carries; the panel is outside the message
-      // tree but the turns themselves are still in the page.
-      const nodes = doc && doc.querySelectorAll
-        ? doc.querySelectorAll('[data-message-id]')
-        : [];
-      for (const node of Array.from(nodes)) {
-        const id = node.getAttribute ? node.getAttribute('data-message-id') : null;
-        if (id) messageIds.push(id);
+    const uploadedFiles = (artifacts || []).filter(function(a) {
+      return a && a.kind === "attachment" && a.name;
+    }).map(function(a) {
+      return Object.assign({}, a, { priority: 0 });
+    });
+    let files = opts.files;
+    if (!files) {
+      const mayHaveFiles = artifacts === null || artifacts.length > 0 || bodyFiles.length > 0 || scannedFiles.length > 0;
+      const offeredAfterScan = Array.isArray(opts.scannedPanelFiles) && (uploadedFiles.length > 0 || apiFiles.some(function(file) {
+        return file.priority === 0;
+      }));
+      files = mayHaveFiles && !offeredAfterScan ? await waitForArtifactPanel(doc, opts) : listArtifactPanelFiles(doc);
+    }
+    const bySandboxPath = new Map;
+    for (const file of scannedFiles)
+      bySandboxPath.set(file.sandboxPath, file);
+    for (const file of files)
+      bySandboxPath.set(file.sandboxPath, file);
+    for (const file of bodyFiles)
+      bySandboxPath.set(file.sandboxPath, file);
+    for (const file of apiFiles) {
+      const visible = bySandboxPath.has(file.sandboxPath);
+      bySandboxPath.set(file.sandboxPath, visible ? Object.assign({}, file, { priority: 0 }) : file);
+    }
+    files = uploadedFiles.concat(Array.from(bySandboxPath.values())).sort(function(a, b) {
+      return (a.priority || 0) - (b.priority || 0);
+    });
+    const panelNames = files.map(function(f) {
+      return f.name;
+    });
+    const scannedButtons = Array.isArray(opts.scannedButtons) ? filterButtonsAgainstPanel(opts.scannedButtons, panelNames) : null;
+    const buttonFiles = opts.clickDownloads === false ? opts.reportUnresolvedButtons ? (scannedButtons || downloadButtonsInPage(doc, panelNames)).map(function(entry) {
+      return { name: entry.label, url: null };
+    }) : [] : opts.buttonFiles !== undefined ? opts.buttonFiles : await collectButtonDownloads(Object.assign({}, opts, {
+      panelNames,
+      buttons: scannedButtons === null ? undefined : scannedButtons
+    }));
+    const inventoryUnavailable = artifacts === null;
+    if (!files.length && !buttonFiles.length && !inventoryUnavailable)
+      return markdown;
+    let messageIds = opts.messageIds;
+    if (!messageIds) {
+      messageIds = artifacts ? artifacts.map(function(a) {
+        return a.messageId;
+      }).filter(Boolean) : [];
+      messageIds.sort(function(a, b) {
+        const rank = function(id) {
+          for (const art of artifacts || []) {
+            if (art.messageId === id)
+              return art.sandboxPath ? 0 : 1;
+          }
+          return 1;
+        };
+        return rank(a) - rank(b);
+      });
+      if (!messageIds.length) {
+        const nodes = doc && doc.querySelectorAll ? doc.querySelectorAll("[data-message-id]") : [];
+        for (const node of Array.from(nodes)) {
+          const id = node.getAttribute ? node.getAttribute("data-message-id") : null;
+          if (id)
+            messageIds.push(id);
+        }
       }
     }
-  }
-
-  const resolvedList = await resolveArtifactPanelFiles(conversationId, {
-    files: files,
-    messageIds: messageIds,
-    fetchImpl: opts.fetchImpl,
-    token: opts.token,
-    onResolved: opts.onResolved,
-    onFailure: opts.onFailure,
-  });
-
-  const lines = [];
-  const unresolved = [];
-  for (const entry of resolvedList) {
-    if (entry.resolved && entry.resolved.url) {
-      lines.push(markdownLink(entry.file.name, entry.resolved.url));
-    } else {
-      unresolved.push(entry.file.name);
-    }
-  }
-
-  // Files that exist only behind a button handler. Collected LAST, and only
-  // when asked: clicking is a side effect on the page, so it must not happen
-  // during a plain "copy as Markdown". Names already resolved above are not
-  // clicked again — the panel and the body reach the same file more cheaply.
-  const alreadyNamed = new Set();
-  for (const entry of resolvedList) alreadyNamed.add(entry.file.name);
-  for (const file of buttonFiles) {
-    if (!file || alreadyNamed.has(file.name)) continue;
-    alreadyNamed.add(file.name);
-    if (file.url) {
-      lines.push(markdownLink(file.name, file.url));
-    } else {
-      unresolved.push(file.name);
-    }
-  }
-  // Deliberately overlapping with the `!files.length` early return above: that
-  // one avoids the network round-trips entirely, this one covers a resolver that
-  // returned no rows for files that DID exist. A mutation removing the earlier
-  // guard is therefore harmless to output and survives the suite — recorded in
-  // MUTATION-EVIDENCE.md as redundant-by-design rather than an untested branch,
-  // so it is not "fixed" by deleting one of the two.
-  if (!lines.length && !unresolved.length && !inventoryUnavailable) return markdown;
-
-  const block = ['## Files'];
-  if (lines.length) block.push(lines.join('\n'));
-  if (unresolved.length || inventoryUnavailable) {
-    if (typeof opts.onIncomplete === 'function') opts.onIncomplete();
-  }
-  if (inventoryUnavailable) {
-    block.push('> Could not enumerate attachments: the conversation API was unreachable. ' +
-      'Visible file links were preserved, but attachment completeness is unknown.');
-  }
-  if (unresolved.length) {
-    block.push('> Could not retrieve a download link for: ' +
-      unresolved.join(', ') +
-      (artifacts === null ? ' (the conversation API was unreachable)' : ''));
-  }
-  const body = block.join('\n\n');
-  return markdown ? markdown + '\n\n---\n\n' + body : body;
-}
-
-/** Fallback for older ChatGPT UI that doesn't use [data-turn-id]. */
-function extractConversationLegacy(root) {
-  const messages = (root || document).querySelectorAll('[data-message-author-role]');
-  if (!messages.length) return null;
-
-  const parts = [];
-  for (const msg of messages) {
-    const role = msg.getAttribute('data-message-author-role');
-    if (role === 'user') {
-      const bubble = msg.querySelector('.whitespace-pre-wrap') || msg.querySelector('[dir="auto"]') || msg;
-      const text = bubble.textContent.trim();
-      if (text) parts.push('#### You said:\n\n' + text);
-    } else if (role === 'assistant') {
-      const markdownDiv = msg.querySelector('.markdown') || msg.querySelector('[class*="prose"]') || msg;
-      let md = nodeToMarkdown(markdownDiv).trim();
-      md = md.replace(/\n{3,}/g, '\n\n');
-      if (md) parts.push('#### ChatGPT said:\n\n' + md);
-    }
-  }
-
-  return parts.length ? parts.join('\n\n---\n\n') : null;
-}
-
-/** Remove the accessibility suffix ChatGPT appends to a project row's label.
- *
- *  The suffix is a TRANSLATED UI string, so it cannot be matched by its words.
- *  Measured on production with the same account under two browser locales:
- *
- *    en-GB : "Перезапуск nginx, chat in project Aether"
- *    ru-RU : "Перезапуск nginx, чат в проекте Aether"
- *
- *  A regex for "chat in project" strips the first and misses the second, baking
- *  the project name into every folder name for a Russian-UI user. So the suffix
- *  is removed STRUCTURALLY instead: the row's own visible text is the bare
- *  title, and the label is that title followed by the localized description.
- *  Verified on all 10 sampled rows under ru-RU: aria-label always startsWith
- *  the visible text (suffix "" for global chats, ", чат в проекте X" inside a
- *  project). No language knowledge is involved. */
-function stripSidebarLabelSuffix(label, visibleTitle) {
-  const raw = String(label).trim();
-  const visible = String(visibleTitle == null ? '' : visibleTitle).trim();
-  if (visible && raw.startsWith(visible) && raw.length > visible.length) {
-    // Only a separator-led remainder is a suffix. A conversation whose title
-    // merely begins with a shorter row text keeps its full name.
-    const remainder = raw.slice(visible.length);
-    // Punctuation, not whitespace. A row truncates a long title with an ellipsis
-    // while aria-label keeps the full one ("Проектирование хранилища" against
-    // "Проектирование хранилища секретов"), so a space-led remainder is the REST
-    // OF THE TITLE and cutting there renames the folder after a clipped title.
-    if (/^\s*[,;:—–]/.test(remainder)) return visible;
-  }
-  return raw;
-}
-
-/** Read a sidebar conversation link's visible title.
- *  The visible text is preferred over aria-label because it carries the title
- *  WITHOUT the localized ", chat in project …" / ", чат в проекте …" suffix. */
-function titleFromSidebarLink(link) {
-  if (!link) return null;
-  const inner = link.querySelector ? link.querySelector('.truncate') : null;
-  const visible = inner
-    ? (inner.textContent || '').trim()
-    : (link.textContent || '').trim();
-  const label = (link.getAttribute('aria-label') || '').trim();
-  if (visible) return stripSidebarLabelSuffix(label || visible, visible);
-  return label ? stripSidebarLabelSuffix(label, '') : null;
-}
-
-/** Read the conversation title from the page.
- *  Primary source: the active sidebar entry for the current /c/{id} route
- *  (its aria-label and inner text both carry the title). Falls back to the
- *  document title with the site suffix stripped. */
-function extractConversationTitle(doc) {
-  const root = doc || (typeof document !== 'undefined' ? document : null);
-  if (!root) return null;
-
-  const idMatch = (typeof location !== 'undefined' ? location.pathname : '')
-    .match(/\/c\/([A-Za-z0-9-]+)/);
-
-  const candidates = [];
-  if (idMatch) {
-    candidates.push('a[href="/c/' + idMatch[1] + '"]');
-    // A conversation inside a Project is linked as
-    // /g/g-p-{projectId}/c/{convId}, so an exact `/c/{id}` match misses it and
-    // the lookup used to fall through to document.title — which carries the
-    // project name as a prefix. Verified on production.
-    candidates.push('a[href$="/c/' + idMatch[1] + '"]');
-  }
-  candidates.push('a[data-active][href^="/c/"]');
-  candidates.push('a[data-active][href*="/c/"]');
-
-  for (const selector of candidates) {
-    const link = root.querySelector(selector);
-    const title = titleFromSidebarLink(link);
-    if (title) return title;
-  }
-
-  const title = (root.title || '').trim();
-  if (!title) return null;
-  let cleaned = title.replace(/\s*[|-]\s*ChatGPT\s*$/i, '').trim();
-  // Last-resort source: on a project conversation the document title reads
-  // "Qoople - Перевод i18n JSON для сайта". Drop a leading "<project> - " when
-  // the project name is known, so the folder is not named after the project.
-  const projectName = knownProjectName(root);
-  if (projectName) {
-    const prefix = new RegExp('^' + escapeForRegExp(projectName) + '\\s*[-–—|]\\s*');
-    const withoutProject = cleaned.replace(prefix, '').trim();
-    if (withoutProject) cleaned = withoutProject;
-  }
-  return cleaned && cleaned.toLowerCase() !== 'chatgpt' ? cleaned : null;
-}
-
-function escapeForRegExp(text) {
-  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/** The current Project's display name, when the page is inside one.
- *
- *  Read from the sidebar's PROJECT SECTION rather than parsed out of the row's
- *  localized label. The previous version matched ", chat in project (.+)$",
- *  which returns null under a Russian UI (", чат в проекте Aether") — so the
- *  document.title fallback then kept the "<project> - " prefix and named the
- *  folder after the project. The project row is identified by its href, which
- *  no locale translates. */
-function knownProjectName(doc) {
-  const root = doc || (typeof document !== 'undefined' ? document : null);
-  if (!root || !root.querySelector) return null;
-  const path = typeof location !== 'undefined' ? location.pathname : '';
-  const idMatch = path.match(/\/c\/([A-Za-z0-9-]+)/);
-  if (!idMatch) return null;
-
-  // Inside a project the route itself carries the project id.
-  const routeProject = path.match(/\/g\/(g-p-[A-Za-z0-9]+)\//);
-  const link = root.querySelector('a[href$="/c/' + idMatch[1] + '"]');
-  const href = link ? link.getAttribute('href') || '' : '';
-  const projectId = (routeProject && routeProject[1])
-    || (href.match(/\/g\/(g-p-[A-Za-z0-9]+)\//) || [])[1]
-    || null;
-  if (!projectId) return null;
-
-  // A project has NO anchor of its own: measured on production, the sidebar
-  // renders projects as div[role="button"] and `nav a[href^="/g/"]` without a
-  // /c/ part returns []. So the name is taken from the project row that
-  // CONTAINS this conversation's row — found by structure, not by language.
-  if (!link) return null;
-  // Walk out to the project group and read its header row's visible text.
-  let cur = link.parentElement;
-  for (let depth = 0; depth < 12 && cur; depth++) {
-    const header = cur.querySelector
-      ? cur.querySelector('[role="button"] .truncate, button[data-sidebar-item] .truncate')
-      : null;
-    if (header) {
-      const name = (header.textContent || '').trim();
-      // A header that is itself a conversation row is not a project name.
-      const ownsRows = cur.querySelectorAll
-        ? cur.querySelectorAll('a[href*="/c/"]').length
-        : 0;
-      if (name && ownsRows > 0) return name;
-    }
-    cur = cur.parentElement;
-  }
-  return null;
-}
-
-/**
- * Enumerate the conversation links CURRENTLY MOUNTED in the sidebar.
- * Verified against production: matches both /c/{id} and the project-scoped
- * /g/g-p-{projectId}/c/{id} shape.
- *
- * This reads one frame only. The sidebar is virtualized, so on a long list this
- * returns a SUBSET. Callers exporting a whole Project must use
- * collectSidebarConversations(), which scrolls until the set stops growing and
- * reports whether the end was actually reached — a subset presented as the
- * complete Project is the failure this split exists to prevent.
- */
-function listSidebarConversations(doc) {
-  const root = doc || (typeof document !== 'undefined' ? document : null);
-  if (!root || !root.querySelectorAll) return [];
-
-  // Two href shapes, both real: a plain conversation is /c/{id}, and one that
-  // lives in a Project is /g/g-p-{projectId}/c/{id}. Matching only the first
-  // meant a batch started on a Project silently exported the global "Chats"
-  // list instead — a different set, not a subset. Verified on production.
-  const links = root.querySelectorAll('nav a[href*="/c/"]');
-  const seen = new Set();
-  const results = [];
-  for (const link of links) {
-    const href = link.getAttribute('href') || '';
-    // A query string or fragment may follow the id: production serves rows like
-    // `…/c/{id}?messageId=finalAgentTurnStart`, and anchoring at the id dropped
-    // exactly one real conversation from each project that had one.
-    const match = href.match(/^(?:\/g\/(g-p-[A-Za-z0-9]+))?\/c\/([A-Za-z0-9-]+)(?:[?#].*)?$/);
-    if (!match) continue;
-    const projectId = match[1] || null;
-    const id = match[2];
-    if (seen.has(id)) continue;
-    seen.add(id);
-    const title = titleFromSidebarLink(link);
-    results.push({
-      id: id,
-      // Navigate to the href the page itself uses: a project conversation
-      // reached through /c/{id} loses its project context.
-      href: href,
-      projectId: projectId,
-      title: title,
-      slug: slugifyTitle(title) || id,
+    const resolvedList = await resolveArtifactPanelFiles(conversationId, {
+      files,
+      messageIds,
+      fetchImpl: opts.fetchImpl,
+      token: opts.token,
+      onResolved: opts.onResolved,
+      onFailure: opts.onFailure
     });
-  }
-  return results;
-}
-
-/** Collapsed Project rows in the sidebar, which must be expanded before their
- *  conversations exist in the DOM at all.
- *
- *  Verified on production: a Project is a `div[role="button"]` inside a
- *  `group/project-unfurl-row` container, with NO href and NO data-testid, and it
- *  starts collapsed. Until it is clicked, none of its conversations are present —
- *  so a walk that only scrolls and paginates still sees zero of them, however
- *  thoroughly it verifies its coverage of what IS mounted. */
-/** The list item that holds a project row AND, once open, its conversations. */
-function projectRowContainer(row) {
-  let current = row;
-  for (let depth = 0; depth < 5 && current; depth++) {
-    const tag = current.tagName ? current.tagName.toLowerCase() : '';
-    if (tag === 'li') return current;
-    current = current.parentElement;
-  }
-  return row ? row.parentElement || row : null;
-}
-
-function findCollapsedProjectRows(doc) {
-  const root = doc || (typeof document !== 'undefined' ? document : null);
-  if (!root || !root.querySelectorAll) return [];
-  let rows;
-  try {
-    rows = root.querySelectorAll('[class*="project-unfurl-row"]');
-  } catch (_e) {
-    return [];
-  }
-  const found = [];
-  const seen = new Set();
-  for (const row of rows) {
-    if (!row || !row.querySelector) continue;
-    // Openness must be judged on the row's CONTAINER, not the row: verified on
-    // production, an expanded project renders its conversations as SIBLINGS of
-    // the unfurl row, so the row itself always holds zero links. Testing the row
-    // made every project look permanently collapsed, and re-clicking an open one
-    // closes it — the walk toggled projects shut instead of opening them.
-    const container = projectRowContainer(row);
-    let openLinks = 0;
-    try {
-      openLinks = container ? container.querySelectorAll('a[href*="/c/"]').length : 0;
-    } catch (_e) {
-      openLinks = 0;
+    const lines = [];
+    const unresolved = [];
+    for (const entry of resolvedList) {
+      if (entry.resolved && entry.resolved.url) {
+        lines.push(markdownLink(entry.file.name, entry.resolved.url));
+      } else {
+        unresolved.push(entry.file.name);
+      }
     }
-    if (openLinks) continue;
-    let control = null;
-    try {
-      control = row.getAttribute && row.getAttribute('role') === 'button'
-        ? row
-        : row.querySelector('[role="button"]');
-    } catch (_e) {
-      control = null;
+    const alreadyNamed = new Set;
+    for (const entry of resolvedList)
+      alreadyNamed.add(entry.file.name);
+    for (const file of buttonFiles) {
+      if (!file || alreadyNamed.has(file.name))
+        continue;
+      alreadyNamed.add(file.name);
+      if (file.url) {
+        lines.push(markdownLink(file.name, file.url));
+      } else {
+        unresolved.push(file.name);
+      }
     }
-    if (!control || typeof control.click !== 'function') continue;
-    const label = (row.textContent || '').trim().slice(0, 60);
-    // The same project renders more than one matching container; one click each.
-    if (!label || seen.has(label)) continue;
-    seen.add(label);
-    found.push({ control: control, label: label });
-  }
-  return found;
-}
+    if (!lines.length && !unresolved.length && !inventoryUnavailable)
+      return markdown;
+    const block = ["## Files"];
+    if (lines.length)
+      block.push(lines.join(`
+`));
+    if (unresolved.length || inventoryUnavailable) {
+      if (typeof opts.onIncomplete === "function")
+        opts.onIncomplete();
+    }
+    if (inventoryUnavailable) {
+      block.push("> Could not enumerate attachments: the conversation API was unreachable. " + "Visible file links were preserved, but attachment completeness is unknown.");
+    }
+    if (unresolved.length) {
+      block.push("> Could not retrieve a download link for: " + unresolved.join(", ") + (artifacts === null ? " (the conversation API was unreachable)" : ""));
+    }
+    const body = block.join(`
 
-/** Find the pagination ("Show more") control in the sidebar, if one is present.
- *
- *  A Project's conversation list is paginated by a CLICK, not by scrolling: the
- *  first rows render, then one more row reveals the rest (verified on
- *  production: one project went from 5 to 35 conversations). Scrolling alone can
- *  never reach past it, so a walk that only scrolls reports a confident subset.
- *
- *  The label is a TRANSLATED UI string and MUST NOT be matched by its words.
- *  Measured on the same account under two browser locales:
- *
- *    en-GB : "Show more"
- *    ru-RU : "Показать больше"
- *
- *  A /^show more$/i test finds the first and misses the second, so a Russian-UI
- *  user's projects silently paginate shut — and, worse, "no control standing"
- *  reads as "no pagination exists", which the completeness check then reports as
- *  a COMPLETE list. The control is therefore identified STRUCTURALLY, by what
- *  distinguishes it from every other sidebar item (measured under ru-RU):
- *
- *    - it is the LAST item of a nested <ul> …
- *    - … whose other children are conversation links (siblingConvLinks > 0)
- *    - it is not itself a link and holds no <a> (a conversation row would)
- *    - it carries no icon (svgCount 0, unlike the other sidebar buttons)
- *
- *  Text is used only as a corroborating hint, never as a requirement. */
-function isPaginationControl(button) {
-  if (!button || typeof button.click !== 'function') return false;
-  try {
-    if (button.getAttribute && button.getAttribute('href')) return false;
-    if (button.querySelector && button.querySelector('a[href]')) return false;
-    const li = button.closest ? button.closest('li') : null;
-    const ul = li ? li.parentElement : null;
-    if (!li || !ul || !ul.children) return false;
-    const kids = Array.from(ul.children);
-    if (kids.indexOf(li) !== kids.length - 1) return false;
-    const siblingConvLinks = ul.querySelectorAll
-      ? ul.querySelectorAll('a[href*="/c/"]').length
-      : 0;
-    if (!siblingConvLinks) return false;
-    // The row itself must not be a conversation.
-    if (li.querySelector && li.querySelector('a[href*="/c/"]')) return false;
-    return true;
-  } catch (_e) {
-    return false;
-  }
-}
+`);
+    return markdown ? markdown + `
 
-function findShowMoreControl(doc) {
-  const root = doc || (typeof document !== 'undefined' ? document : null);
-  if (!root || !root.querySelectorAll) return null;
-  let buttons;
-  try {
-    buttons = root.querySelectorAll(
-      'nav button[data-sidebar-item], nav button, nav [role="button"]'
-    );
-  } catch (_e) {
+---
+
+` + body : body;
+  }
+  function extractConversationLegacy(root) {
+    const messages = (root || document).querySelectorAll("[data-message-author-role]");
+    if (!messages.length)
+      return null;
+    const parts = [];
+    for (const msg of messages) {
+      const role = msg.getAttribute("data-message-author-role");
+      if (role === "user") {
+        const bubble = msg.querySelector(".whitespace-pre-wrap") || msg.querySelector('[dir="auto"]') || msg;
+        const text = bubble.textContent.trim();
+        if (text)
+          parts.push(`#### You said:
+
+` + text);
+      } else if (role === "assistant") {
+        const markdownDiv = msg.querySelector(".markdown") || msg.querySelector('[class*="prose"]') || msg;
+        let md = nodeToMarkdown(markdownDiv).trim();
+        md = md.replace(/\n{3,}/g, `
+
+`);
+        if (md)
+          parts.push(`#### ChatGPT said:
+
+` + md);
+      }
+    }
+    return parts.length ? parts.join(`
+
+---
+
+`) : null;
+  }
+
+  // src/content/sidebar-rows.mjs
+  function stripSidebarLabelSuffix(label, visibleTitle) {
+    const raw = String(label).trim();
+    const visible = String(visibleTitle == null ? "" : visibleTitle).trim();
+    if (visible && raw.startsWith(visible) && raw.length > visible.length) {
+      const remainder = raw.slice(visible.length);
+      if (/^\s*[,;:—–]/.test(remainder))
+        return visible;
+    }
+    return raw;
+  }
+  function titleFromSidebarLink(link) {
+    if (!link)
+      return null;
+    const inner = link.querySelector ? link.querySelector(".truncate") : null;
+    const visible = inner ? (inner.textContent || "").trim() : (link.textContent || "").trim();
+    const label = (link.getAttribute("aria-label") || "").trim();
+    if (visible)
+      return stripSidebarLabelSuffix(label || visible, visible);
+    return label ? stripSidebarLabelSuffix(label, "") : null;
+  }
+  function extractConversationTitle(doc) {
+    const root = doc || (typeof document !== "undefined" ? document : null);
+    if (!root)
+      return null;
+    const idMatch = (typeof location !== "undefined" ? location.pathname : "").match(/\/c\/([A-Za-z0-9-]+)/);
+    const candidates = [];
+    if (idMatch) {
+      candidates.push('a[href="/c/' + idMatch[1] + '"]');
+      candidates.push('a[href$="/c/' + idMatch[1] + '"]');
+    }
+    candidates.push('a[data-active][href^="/c/"]');
+    candidates.push('a[data-active][href*="/c/"]');
+    for (const selector of candidates) {
+      const link = root.querySelector(selector);
+      const title = titleFromSidebarLink(link);
+      if (title)
+        return title;
+    }
+    const title = (root.title || "").trim();
+    if (!title)
+      return null;
+    let cleaned = title.replace(/\s*[|-]\s*ChatGPT\s*$/i, "").trim();
+    const projectName = knownProjectName(root);
+    if (projectName) {
+      const prefix = new RegExp("^" + escapeForRegExp(projectName) + "\\s*[-–—|]\\s*");
+      const withoutProject = cleaned.replace(prefix, "").trim();
+      if (withoutProject)
+        cleaned = withoutProject;
+    }
+    return cleaned && cleaned.toLowerCase() !== "chatgpt" ? cleaned : null;
+  }
+  function escapeForRegExp(text) {
+    return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  function knownProjectName(doc) {
+    const root = doc || (typeof document !== "undefined" ? document : null);
+    if (!root || !root.querySelector)
+      return null;
+    const path = typeof location !== "undefined" ? location.pathname : "";
+    const idMatch = path.match(/\/c\/([A-Za-z0-9-]+)/);
+    if (!idMatch)
+      return null;
+    const routeProject = path.match(/\/g\/(g-p-[A-Za-z0-9]+)\//);
+    const link = root.querySelector('a[href$="/c/' + idMatch[1] + '"]');
+    const href = link ? link.getAttribute("href") || "" : "";
+    const projectId = routeProject && routeProject[1] || (href.match(/\/g\/(g-p-[A-Za-z0-9]+)\//) || [])[1] || null;
+    if (!projectId)
+      return null;
+    if (!link)
+      return null;
+    let cur = link.parentElement;
+    for (let depth = 0;depth < 12 && cur; depth++) {
+      const header = cur.querySelector ? cur.querySelector('[role="button"] .truncate, button[data-sidebar-item] .truncate') : null;
+      if (header) {
+        const name = (header.textContent || "").trim();
+        const ownsRows = cur.querySelectorAll ? cur.querySelectorAll('a[href*="/c/"]').length : 0;
+        if (name && ownsRows > 0)
+          return name;
+      }
+      cur = cur.parentElement;
+    }
     return null;
   }
-  for (const button of buttons) {
-    if (isPaginationControl(button)) return button;
-  }
-  return null;
-}
-
-/** Locate the scrollable sidebar element holding the conversation list. */
-function findSidebarScroller(doc) {
-  const root = doc || (typeof document !== 'undefined' ? document : null);
-  if (!root || !root.querySelector) return null;
-  const anchor = root.querySelector('nav a[href*="/c/"]');
-  if (!anchor) return null;
-  let current = anchor.parentElement;
-  while (current) {
-    let overflowY = '';
-    try {
-      overflowY = (typeof getComputedStyle === 'function'
-        ? (getComputedStyle(current).overflowY || '')
-        : '');
-    } catch (_e) {
-      overflowY = '';
-    }
-    const scrollable = /(auto|scroll|overlay)/.test(overflowY) ||
-      (current.scrollHeight || 0) > (current.clientHeight || 0) + 1;
-    if (scrollable && (current.scrollHeight || 0) > (current.clientHeight || 0) + 1) {
-      return current;
-    }
-    current = current.parentElement;
-  }
-  return null;
-}
-
-/**
- * Enumerate EVERY conversation in the sidebar, scrolling to force virtualized
- * rows to mount, and report whether the end of the list was reached.
- *
- * Returns { conversations, complete, reason }. `complete` is false when the
- * walk ran out of rounds while rows were still arriving, or when the list is
- * scrollable but no scroll container could be found — in both cases the caller
- * holds a SUBSET and must not present it as the whole Project. A subset that
- * silently reports success is unfalsifiable for the user: they have nothing to
- * compare the export against.
- */
-async function collectSidebarConversations(options) {
-  const supplied = options || {};
-  const doc = supplied.doc || (typeof document !== 'undefined' ? document : null);
-  const maxRounds = supplied.maxRounds || 200;
-  const settleMs = supplied.settleMs || 250;
-  // Consecutive rounds that must add nothing AND move nothing before the walk
-  // is judged finished. Only consulted once the viewport is already at the
-  // bottom, so this is what absorbs a lazy loader that appends after a pause.
-  const quietRounds = supplied.quietRounds || 3;
-  // Fraction of the viewport to advance per round. Below 1 on purpose: the
-  // overlap is what guarantees no band of rows is stepped over unobserved.
-  const scrollStepRatio = supplied.scrollStepRatio || 0.5;
-  // A bound on "Show more" expansions, so a control that reappears without ever
-  // revealing anything cannot spin the walk forever.
-  const maxShowMoreClicks = supplied.maxShowMoreClicks === undefined
-    ? 60
-    : supplied.maxShowMoreClicks;
-  // Revealing a page is a network round-trip; it needs longer than a scroll.
-  const showMoreSettleMs = supplied.showMoreSettleMs || 1200;
-  // Projects start collapsed; opening one is a click plus a fetch.
-  const expandProjects = supplied.expandProjects !== false;
-  const maxProjectExpansions = supplied.maxProjectExpansions === undefined
-    ? 40
-    : supplied.maxProjectExpansions;
-  const projectSettleMs = supplied.projectSettleMs || 1400;
-  // A final re-read pass: rows keep mounting behind the downward walk.
-  const finalSweep = supplied.finalSweep !== false;
-  const maxSweepPasses = supplied.maxSweepPasses === undefined ? 6 : supplied.maxSweepPasses;
-  const sleep = supplied.sleep || function(ms) {
-    return new Promise(function(resolve) { setTimeout(resolve, ms); });
-  };
-
-  const byId = new Map();
-  // Height of the band of rows actually MOUNTED in the last read, measured from
-  // the rows themselves. The step must never exceed this: stepping by the
-  // viewport when the virtualizer mounts a shorter band jumps over rows that
-  // were never in the DOM, and the walk still finishes at the bottom looking
-  // complete. Measured, not assumed.
-  let mountedBand = 0;
-  // Vertical spans, in DOCUMENT space, over which rows were actually observed.
-  // Completeness is then a measurable property — "the observed spans cover the
-  // scrollable range" — instead of an inference from the walk having gone quiet.
-  // Quiescence cannot distinguish "the list ended" from "I stopped looking".
-  const coveredSpans = [];
-  // Offsets the walk actually READ at. Coverage of the rows proves no band was
-  // stepped over; these prove the sweep reached both ends of the scroller.
-  let visitedTop = false;
-  let visitedBottom = false;
-  // Where the LIST begins and ends in document space, learned from the rows seen
-  // at the very top and the very bottom. The scroller's own 0..scrollHeight is the
-  // wrong reference: it includes the sidebar's header and trailing padding.
-  let listTop = Infinity;
-  let listBottom = -Infinity;
-  function recordCoverage(scrollTop) {
-    if (!doc || !doc.querySelectorAll) return 0;
-    let links;
-    try {
-      // Same shape as the enumerator: measuring only `/c/…` rows would ignore
-      // every project conversation and read their band as an unobserved gap.
-      links = doc.querySelectorAll('nav a[href*="/c/"]');
-    } catch (_e) {
-      return 0;
-    }
-    let top = Infinity;
-    let bottom = -Infinity;
-    let measured = 0;
-    for (const link of links) {
-      if (!link || typeof link.getBoundingClientRect !== 'function') continue;
-      let rect;
-      try {
-        rect = link.getBoundingClientRect();
-      } catch (_e) {
+  function projectTitleForConversationLink(link) {
+    var current = link;
+    var depth;
+    for (depth = 0;depth < 8 && current; depth++) {
+      current = current.parentElement;
+      if (!current || typeof current.querySelector !== "function")
         continue;
+      var row = null;
+      try {
+        row = current.querySelector('[class*="project-unfurl-row"]');
+      } catch (_e) {
+        row = null;
       }
-      if (!rect) continue;
-      const rTop = typeof rect.top === 'number' ? rect.top : 0;
-      const rBottom = typeof rect.bottom === 'number' ? rect.bottom : rTop;
-      if (rBottom <= rTop) continue;
-      top = Math.min(top, rTop);
-      bottom = Math.max(bottom, rBottom);
-      measured += 1;
+      if (!row)
+        continue;
+      var label = String(row.textContent || "").replace(/\s+/g, " ").trim();
+      if (!label)
+        continue;
+      return label.slice(0, 80);
     }
-    if (!measured || bottom <= top) return 0;
-    // Viewport-relative rects become document-relative by adding the offset the
-    // rows were read at.
-    coveredSpans.push([top + scrollTop, bottom + scrollTop]);
-    return bottom - top;
+    return null;
   }
-
-  /** True when no band BETWEEN observed rows went unobserved.
-   *
-   *  Interior holes only. The extremes are NOT checked here: every bound this
-   *  function could use (`listTop`, `listBottom`, row pitch) is derived from rows
-   *  that mounted, so a row which never mounted moves no bound and the comparison
-   *  becomes a tautology. Measured: `reach >= listBottom - 2` could not fail for
-   *  ANY mount budget, because at the terminal offset the deepest mounted row IS
-   *  the row defining `listBottom`. The tail is proven separately, by an
-   *  obligation the collected rows cannot discharge — see `tailIsProven`. */
-  function coverageIsContiguous() {
-    if (!coveredSpans.length) return false;
-    const spans = coveredSpans.slice().sort(function(a, b) { return a[0] - b[0]; });
-    // A hairline, never a mounted band: the band is exactly the distance a
-    // stepped-over row could hide in.
-    const slack = 2;
-    let reach = spans[0][1];
-    for (let i = 1; i < spans.length; i++) {
-      if (spans[i][0] > reach + slack) return false;
-      reach = Math.max(reach, spans[i][1]);
+  function listSidebarConversations(doc) {
+    const root = doc || (typeof document !== "undefined" ? document : null);
+    if (!root || !root.querySelectorAll)
+      return [];
+    const links = root.querySelectorAll('nav a[href*="/c/"]');
+    const seen = new Set;
+    const results = [];
+    for (const link of links) {
+      const href = link.getAttribute("href") || "";
+      const match = href.match(/^(?:\/g\/(g-p-[A-Za-z0-9]+))?\/c\/([A-Za-z0-9-]+)(?:[?#].*)?$/);
+      if (!match)
+        continue;
+      const projectId = match[1] || null;
+      const id = match[2];
+      if (seen.has(id))
+        continue;
+      seen.add(id);
+      const title = titleFromSidebarLink(link);
+      results.push({
+        id,
+        href,
+        projectId,
+        projectTitle: projectTitleForConversationLink(link),
+        title,
+        slug: slugifyTitle(title) || id
+      });
     }
-    return true;
+    return results;
   }
-
-  /** The list item containing a conversation row. */
-  function rowListItem(link) {
-    let current = link;
-    for (let depth = 0; depth < 6 && current; depth++) {
-      if (current.tagName && current.tagName.toUpperCase() === 'LI') return current;
+  function projectRowContainer(row) {
+    let current = row;
+    for (let depth = 0;depth < 5 && current; depth++) {
+      const tag = current.tagName ? current.tagName.toLowerCase() : "";
+      if (tag === "li")
+        return current;
+      current = current.parentElement;
+    }
+    return row ? row.parentElement || row : null;
+  }
+  function findCollapsedProjectRows(doc) {
+    const root = doc || (typeof document !== "undefined" ? document : null);
+    if (!root || !root.querySelectorAll)
+      return [];
+    let rows;
+    try {
+      rows = root.querySelectorAll('[class*="project-unfurl-row"]');
+    } catch (_e) {
+      return [];
+    }
+    const found = [];
+    const seen = new Set;
+    for (const row of rows) {
+      if (!row || !row.querySelector)
+        continue;
+      const container = projectRowContainer(row);
+      let openLinks = 0;
+      try {
+        openLinks = container ? container.querySelectorAll('a[href*="/c/"]').length : 0;
+      } catch (_e) {
+        openLinks = 0;
+      }
+      if (openLinks)
+        continue;
+      let control = null;
+      try {
+        control = row.getAttribute && row.getAttribute("role") === "button" ? row : row.querySelector('[role="button"]');
+      } catch (_e) {
+        control = null;
+      }
+      if (!control || typeof control.click !== "function")
+        continue;
+      const label = (row.textContent || "").trim().slice(0, 60);
+      if (!label || seen.has(label))
+        continue;
+      seen.add(label);
+      found.push({ control, label });
+    }
+    return found;
+  }
+  function isPaginationControl(button) {
+    if (!button || typeof button.click !== "function")
+      return false;
+    try {
+      if (button.getAttribute && button.getAttribute("href"))
+        return false;
+      if (button.querySelector && button.querySelector("a[href]"))
+        return false;
+      const li = button.closest ? button.closest("li") : null;
+      const ul = li ? li.parentElement : null;
+      if (!li || !ul || !ul.children)
+        return false;
+      const kids = Array.from(ul.children);
+      if (kids.indexOf(li) !== kids.length - 1)
+        return false;
+      const siblingConvLinks = ul.querySelectorAll ? ul.querySelectorAll('a[href*="/c/"]').length : 0;
+      if (!siblingConvLinks)
+        return false;
+      if (li.querySelector && li.querySelector('a[href*="/c/"]'))
+        return false;
+      return true;
+    } catch (_e) {
+      return false;
+    }
+  }
+  function findHistoryRetryControl(doc) {
+    const root = doc || (typeof document !== "undefined" ? document : null);
+    if (!root || !root.querySelectorAll)
+      return null;
+    let nodes;
+    try {
+      nodes = root.querySelectorAll('nav [role="status"]');
+    } catch (_e) {
+      return null;
+    }
+    for (const node of nodes) {
+      if (node.getAttribute && node.getAttribute("aria-busy") === "true")
+        continue;
+      const button = node.querySelector ? node.querySelector("button") : null;
+      if (!button || typeof button.click !== "function")
+        continue;
+      if (button.querySelector && button.querySelector('a[href*="/c/"]'))
+        continue;
+      return button;
+    }
+    return null;
+  }
+  function findShowMoreControl(doc) {
+    const root = doc || (typeof document !== "undefined" ? document : null);
+    if (!root || !root.querySelectorAll)
+      return null;
+    let buttons;
+    try {
+      buttons = root.querySelectorAll('nav button[data-sidebar-item], nav button, nav [role="button"]');
+    } catch (_e) {
+      return null;
+    }
+    for (const button of buttons) {
+      if (isPaginationControl(button))
+        return button;
+    }
+    return null;
+  }
+  function findSidebarScroller(doc) {
+    const root = doc || (typeof document !== "undefined" ? document : null);
+    if (!root || !root.querySelector)
+      return null;
+    const anchor = root.querySelector('nav a[href*="/c/"]');
+    if (!anchor)
+      return null;
+    let current = anchor.parentElement;
+    while (current) {
+      let overflowY = "";
+      try {
+        overflowY = typeof getComputedStyle === "function" ? getComputedStyle(current).overflowY || "" : "";
+      } catch (_e) {
+        overflowY = "";
+      }
+      const scrollable = /(auto|scroll|overlay)/.test(overflowY) || (current.scrollHeight || 0) > (current.clientHeight || 0) + 1;
+      if (scrollable && (current.scrollHeight || 0) > (current.clientHeight || 0) + 1) {
+        return current;
+      }
       current = current.parentElement;
     }
     return null;
   }
 
-  /** Is the deepest row we captured genuinely the LAST one in the list?
-   *
-   *  Answered by the DOM's own structure rather than by our observations: if the
-   *  deepest captured row's list item has a following sibling, a row exists past
-   *  everything we collected and the walk has NOT finished — no matter how neatly
-   *  its coverage adds up. This is an obligation the collected rows cannot
-   *  discharge themselves, which is precisely why it works where geometry did not.
-   *
-   *  Fails CLOSED on ambiguity: if the rows carry no list-item structure, a null
-   *  sibling means "cannot tell", not "proven", and completeness is refused.
-   *  Verified on production that the structure does persist (813 `nav li` against
-   *  803 mounted links), but a framework that virtualized the items away too would
-   *  otherwise turn "cannot tell" into a silent false success. */
-  /** Does the list keep `li` structure for rows the window has NOT mounted?
-   *
-   *  Measured, not assumed: more list items than mounted conversation rows means
-   *  the framework leaves the items in place, so a missing next sibling really
-   *  does mean "end of list". Production: 813 items against 803 links. When the
-   *  counts match, the structure is windowed exactly like the links and proves
-   *  nothing — the caller must then refuse to claim completeness. */
-  function structurePersistsPastWindow() {
+  // src/content/sidebar-walk.mjs
+  async function sleepUnlessRateLimitedCancelled(sleep, ms) {
+    let left = ms > 0 ? ms : 0;
+    while (left > 0) {
+      try {
+        if (typeof window !== "undefined" && window.__c2mScan && window.__c2mScan.cancelled)
+          return false;
+      } catch (_e) {}
+      const step = Math.min(left, 1000);
+      await sleep(step);
+      left -= step;
+    }
+    return true;
+  }
+  async function collectSidebarConversations(options) {
+    const supplied = options || {};
+    const doc = supplied.doc || (typeof document !== "undefined" ? document : null);
+    const maxRounds = supplied.maxRounds || 200;
+    const settleMs = supplied.settleMs || 250;
+    const quietRounds = supplied.quietRounds || 3;
+    const scrollStepRatio = supplied.scrollStepRatio || 0.5;
+    const maxShowMoreClicks = supplied.maxShowMoreClicks === undefined ? 60 : supplied.maxShowMoreClicks;
+    const showMoreSettleMs = supplied.showMoreSettleMs || 1200;
+    const rateLimitWaitMs = supplied.rateLimitWaitMs == null ? 60000 : supplied.rateLimitWaitMs;
+    const maxHistoryRetryClicks = supplied.maxHistoryRetryClicks == null ? 5 : supplied.maxHistoryRetryClicks;
+    const expandProjects = supplied.expandProjects !== false;
+    const maxProjectExpansions = supplied.maxProjectExpansions === undefined ? 40 : supplied.maxProjectExpansions;
+    const projectSettleMs = supplied.projectSettleMs || 1400;
+    const finalSweep = supplied.finalSweep !== false;
+    const maxSweepPasses = supplied.maxSweepPasses === undefined ? 6 : supplied.maxSweepPasses;
+    const sleep = supplied.sleep || function(ms) {
+      return new Promise(function(resolve) {
+        setTimeout(resolve, ms);
+      });
+    };
+    const byId = new Map;
+    let mountedBand = 0;
+    const coveredSpans = [];
+    let visitedTop = false;
+    let visitedBottom = false;
+    let listTop = Infinity;
+    let listBottom = -Infinity;
+    function recordCoverage(scrollTop) {
+      if (!doc || !doc.querySelectorAll)
+        return 0;
+      let links;
+      try {
+        links = doc.querySelectorAll('nav a[href*="/c/"]');
+      } catch (_e) {
+        return 0;
+      }
+      let top = Infinity;
+      let bottom = -Infinity;
+      let measured = 0;
+      for (const link of links) {
+        if (!link || typeof link.getBoundingClientRect !== "function")
+          continue;
+        let rect;
+        try {
+          rect = link.getBoundingClientRect();
+        } catch (_e) {
+          continue;
+        }
+        if (!rect)
+          continue;
+        const rTop = typeof rect.top === "number" ? rect.top : 0;
+        const rBottom = typeof rect.bottom === "number" ? rect.bottom : rTop;
+        if (rBottom <= rTop)
+          continue;
+        top = Math.min(top, rTop);
+        bottom = Math.max(bottom, rBottom);
+        measured += 1;
+      }
+      if (!measured || bottom <= top)
+        return 0;
+      coveredSpans.push([top + scrollTop, bottom + scrollTop]);
+      return bottom - top;
+    }
+    function coverageIsContiguous() {
+      if (!coveredSpans.length)
+        return false;
+      const spans = coveredSpans.slice().sort(function(a, b) {
+        return a[0] - b[0];
+      });
+      const slack = 2;
+      let reach = spans[0][1];
+      for (let i = 1;i < spans.length; i++) {
+        if (spans[i][0] > reach + slack)
+          return false;
+        reach = Math.max(reach, spans[i][1]);
+      }
+      return true;
+    }
+    function rowListItem(link) {
+      let current = link;
+      for (let depth = 0;depth < 6 && current; depth++) {
+        if (current.tagName && current.tagName.toUpperCase() === "LI")
+          return current;
+        current = current.parentElement;
+      }
+      return null;
+    }
+    function structurePersistsPastWindow() {
+      try {
+        const items = doc.querySelectorAll("nav li").length;
+        const rows = doc.querySelectorAll('nav a[href*="/c/"]').length;
+        return items > rows;
+      } catch (_e) {
+        return false;
+      }
+    }
+    function tailIsProven() {
+      if (!doc || !doc.querySelectorAll)
+        return { proven: false, reason: "no-document" };
+      let links;
+      try {
+        links = Array.from(doc.querySelectorAll('nav a[href*="/c/"]'));
+      } catch (_e) {
+        return { proven: false, reason: "query-failed" };
+      }
+      if (!links.length)
+        return { proven: false, reason: "no-rows-mounted" };
+      const items = links.map(rowListItem).filter(Boolean);
+      if (!items.length) {
+        return { proven: false, reason: "tail-unprovable" };
+      }
+      const deepest = items[items.length - 1];
+      const next = deepest.nextElementSibling;
+      if (!next) {
+        return structurePersistsPastWindow() ? { proven: true, reason: "deepest-row-is-last-sibling" } : { proven: false, reason: "tail-unprovable" };
+      }
+      let nextHasRow = false;
+      try {
+        nextHasRow = !!(next.querySelector && next.querySelector('a[href*="/c/"]'));
+      } catch (_e) {
+        nextHasRow = false;
+      }
+      return nextHasRow ? { proven: false, reason: "successor-exists-not-mounted" } : { proven: true, reason: "successor-is-not-a-conversation" };
+    }
+    const scroller = supplied.scroller || findSidebarScroller(doc);
+    function absorb() {
+      let added = 0;
+      const batch = listSidebarConversations(doc);
+      for (const conv of batch) {
+        if (byId.has(conv.id))
+          continue;
+        byId.set(conv.id, conv);
+        added += 1;
+      }
+      const at = scroller ? scroller.scrollTop || 0 : 0;
+      const spanCountBefore = coveredSpans.length;
+      mountedBand = recordCoverage(at);
+      const newSpan = coveredSpans.length > spanCountBefore ? coveredSpans[coveredSpans.length - 1] : null;
+      if (scroller) {
+        const maxTop = Math.max(0, (scroller.scrollHeight || 0) - (scroller.clientHeight || 0));
+        if (at <= 1) {
+          visitedTop = true;
+          if (newSpan)
+            listTop = Math.min(listTop, newSpan[0]);
+        }
+        if (at >= maxTop - 1) {
+          visitedBottom = true;
+          if (newSpan)
+            listBottom = Math.max(listBottom, newSpan[1]);
+        }
+      }
+      return added;
+    }
+    absorb();
+    let projectsExpanded = 0;
+    if (expandProjects) {
+      for (let attempt = 0;attempt < maxProjectExpansions; attempt++) {
+        const pending = findCollapsedProjectRows(doc);
+        if (!pending.length)
+          break;
+        let clickedAny = false;
+        for (const row of pending) {
+          if (projectsExpanded >= maxProjectExpansions)
+            break;
+          try {
+            row.control.click();
+            projectsExpanded += 1;
+            clickedAny = true;
+            await sleep(projectSettleMs);
+            absorb();
+          } catch (_e) {}
+        }
+        if (!clickedAny)
+          break;
+      }
+    }
+    let projectsExhausted = findCollapsedProjectRows(doc).length === 0;
+    if (!scroller) {
+      return {
+        conversations: Array.from(byId.values()),
+        complete: false,
+        reason: "no-scroll-container"
+      };
+    }
+    const startTop = scroller.scrollTop || 0;
+    let quiet = 0;
+    let rounds = 0;
+    let complete = false;
+    let blocked = false;
+    let reachedBottom = false;
+    let coverageVerified = false;
+    let showMoreClicks = 0;
+    let historyRetryClicks = 0;
+    let barrenShowMoreClicks = 0;
+    let showMoreExhausted = true;
+    let tailReason = null;
+    while (rounds < maxRounds) {
+      rounds += 1;
+      const maxTop = Math.max(0, (scroller.scrollHeight || 0) - (scroller.clientHeight || 0));
+      const before = scroller.scrollTop || 0;
+      const heightBefore = scroller.scrollHeight || 0;
+      const reach = mountedBand > 0 ? Math.min(mountedBand, scroller.clientHeight || mountedBand) : scroller.clientHeight || 0;
+      const step = Math.max(1, Math.floor(reach * scrollStepRatio));
+      const nextTop = Math.min(maxTop, before + step);
+      try {
+        scroller.scrollTop = nextTop;
+      } catch (_e) {
+        blocked = true;
+        break;
+      }
+      await sleep(settleMs);
+      let added = absorb();
+      barrenShowMoreClicks = 0;
+      while (showMoreClicks < maxShowMoreClicks) {
+        const control = findShowMoreControl(doc);
+        if (!control || typeof control.click !== "function")
+          break;
+        let clickFailed = false;
+        try {
+          control.click();
+          showMoreClicks += 1;
+        } catch (_e) {
+          clickFailed = true;
+        }
+        if (clickFailed)
+          break;
+        await sleep(showMoreSettleMs);
+        const revealed = absorb();
+        added += revealed;
+        barrenShowMoreClicks = revealed ? 0 : barrenShowMoreClicks + 1;
+        if (barrenShowMoreClicks >= 2)
+          break;
+      }
+      if (findShowMoreControl(doc))
+        showMoreExhausted = false;
+      const historyRetry = findHistoryRetryControl(doc);
+      if (historyRetry && historyRetryClicks < maxHistoryRetryClicks) {
+        const waited = await sleepUnlessRateLimitedCancelled(sleep, rateLimitWaitMs);
+        if (!waited) {
+          blocked = true;
+          break;
+        }
+        let clickFailed = false;
+        try {
+          historyRetry.click();
+          historyRetryClicks += 1;
+        } catch (_e) {
+          clickFailed = true;
+        }
+        if (!clickFailed) {
+          await sleep(settleMs);
+          added += absorb();
+          quiet = 0;
+        }
+      }
+      const nowTop = scroller.scrollTop || 0;
+      const nowMaxTop = Math.max(0, (scroller.scrollHeight || 0) - (scroller.clientHeight || 0));
+      const atBottom = nowTop >= nowMaxTop - 1;
+      const stillGrowing = (scroller.scrollHeight || 0) > heightBefore;
+      if (added > 0 || Math.abs(nowTop - before) >= 1) {
+        quiet = 0;
+      } else {
+        quiet += 1;
+      }
+      if (atBottom && added === 0 && !stillGrowing && quiet >= quietRounds) {
+        reachedBottom = true;
+        if (findShowMoreControl(doc)) {
+          showMoreExhausted = false;
+          complete = false;
+          break;
+        }
+        coverageVerified = coveredSpans.length > 0;
+        const tail = tailIsProven();
+        tailReason = tail.reason;
+        complete = (coverageVerified ? coverageIsContiguous() : true) && visitedTop && visitedBottom && tail.proven;
+        break;
+      }
+    }
+    if (finalSweep && !blocked) {
+      for (let pass = 0;pass < maxSweepPasses; pass++) {
+        const before = byId.size;
+        let position = 0;
+        const limit = Math.max(0, (scroller.scrollHeight || 0) - (scroller.clientHeight || 0));
+        const sweepStep = Math.max(1, Math.floor((scroller.clientHeight || 1) * scrollStepRatio));
+        let guard = 0;
+        while (position <= limit && guard < maxRounds) {
+          guard += 1;
+          try {
+            scroller.scrollTop = position;
+          } catch (_e) {
+            break;
+          }
+          await sleep(settleMs);
+          absorb();
+          if (findShowMoreControl(doc))
+            showMoreExhausted = false;
+          if (findCollapsedProjectRows(doc).length)
+            projectsExhausted = false;
+          position += sweepStep;
+        }
+        if (byId.size === before)
+          break;
+      }
+      if (coveredSpans.length) {
+        coverageVerified = true;
+        const sweptTail = tailIsProven();
+        tailReason = sweptTail.reason;
+        complete = coverageIsContiguous() && showMoreExhausted && visitedTop && visitedBottom && sweptTail.proven;
+      }
+    }
+    if (findShowMoreControl(doc))
+      showMoreExhausted = false;
+    if (findCollapsedProjectRows(doc).length)
+      projectsExhausted = false;
+    if (!showMoreExhausted || !projectsExhausted)
+      complete = false;
+    if (findHistoryRetryControl(doc)) {
+      complete = false;
+      tailReason = "history-rate-limited";
+    }
     try {
-      const items = doc.querySelectorAll('nav li').length;
-      const rows = doc.querySelectorAll('nav a[href*="/c/"]').length;
-      return items > rows;
+      scroller.scrollTop = startTop;
+    } catch (_e) {}
+    let reason;
+    if (complete) {
+      reason = "reached-end";
+    } else if (tailReason === "history-rate-limited") {
+      reason = tailReason;
+    } else if (blocked) {
+      reason = "scroll-blocked";
+    } else if (!showMoreExhausted) {
+      reason = "show-more-pending";
+    } else if (!projectsExhausted) {
+      reason = "project-expansion-pending";
+    } else if (tailReason === "successor-exists-not-mounted" || tailReason === "tail-unprovable") {
+      reason = tailReason;
+    } else if (reachedBottom) {
+      reason = "coverage-gap";
+    } else {
+      reason = "round-limit";
+    }
+    return {
+      conversations: Array.from(byId.values()),
+      complete,
+      reason,
+      coverageVerified,
+      showMoreClicks,
+      projectsExpanded,
+      tailReason
+    };
+  }
+
+  // src/content/export.mjs
+  function activeConversationRoot(doc) {
+    if (!doc || !doc.querySelectorAll)
+      return doc;
+    if (!doc.querySelector("[data-app-shell-active-page]"))
+      return doc;
+    const pages = Array.from(doc.querySelectorAll("[data-app-shell-active-page]"));
+    if (!pages.length)
+      return doc;
+    const active = pages.filter(function(page) {
+      return page.getAttribute("data-app-shell-active-page") === "true";
+    });
+    return active.length === 1 ? active[0] : null;
+  }
+  function conversationHasMessages(root) {
+    if (!root || !root.querySelector)
+      return false;
+    if (root.querySelector("[data-turn-id]") || root.querySelector("[data-message-author-role]"))
+      return true;
+    return modernMessageSections(root).some(function(unit) {
+      return !!modernMessageRole(unit);
+    });
+  }
+  function retryButtonText(button) {
+    return String(button && button.textContent || "").replace(/\s+/g, " ").trim();
+  }
+  function loneActionButton(container) {
+    if (!container || !container.querySelectorAll)
+      return null;
+    let buttons;
+    try {
+      buttons = Array.from(container.querySelectorAll("button"));
+    } catch (_e) {
+      return null;
+    }
+    const usable = buttons.filter(function(button) {
+      if (!button || typeof button.click !== "function")
+        return false;
+      if (button.disabled)
+        return false;
+      if (button.getAttribute && button.getAttribute("aria-disabled") === "true")
+        return false;
+      if (button.querySelector && button.querySelector('a[href*="/c/"]'))
+        return false;
+      return retryButtonText(button).length > 0;
+    });
+    return usable.length === 1 ? usable[0] : null;
+  }
+  function findConversationRetryControl(doc) {
+    const root = doc || (typeof document !== "undefined" ? document : null);
+    if (!root || !root.querySelector)
+      return null;
+    const page = activeConversationRoot(root);
+    if (!page || !page.querySelector)
+      return null;
+    if (conversationHasMessages(page))
+      return null;
+    const focus = page.querySelector('[data-app-shell-focus-area="main"]');
+    const fromFocus = loneActionButton(focus);
+    if (fromFocus)
+      return fromFocus;
+    const main = page.querySelector("main") || page;
+    if (!main.querySelectorAll)
+      return null;
+    let buttons;
+    try {
+      buttons = Array.from(main.querySelectorAll("button"));
+    } catch (_e) {
+      return null;
+    }
+    const labeled = buttons.filter(function(button) {
+      return retryButtonText(button) === "Retry" && typeof button.click === "function" && !button.disabled;
+    });
+    return labeled.length === 1 ? labeled[0] : null;
+  }
+  function clickConversationRetry() {
+    const button = findConversationRetryControl(typeof document !== "undefined" ? document : null);
+    if (!button)
+      return false;
+    try {
+      button.click();
+      return true;
     } catch (_e) {
       return false;
     }
   }
-
-  function tailIsProven() {
-    if (!doc || !doc.querySelectorAll) return { proven: false, reason: 'no-document' };
-    let links;
-    try {
-      links = Array.from(doc.querySelectorAll('nav a[href*="/c/"]'));
-    } catch (_e) {
-      return { proven: false, reason: 'query-failed' };
-    }
-    if (!links.length) return { proven: false, reason: 'no-rows-mounted' };
-
-    const items = links.map(rowListItem).filter(Boolean);
-    if (!items.length) {
-      // No structural anchor to reason about — refuse rather than assume.
-      return { proven: false, reason: 'tail-unprovable' };
-    }
-    const deepest = items[items.length - 1];
-    const next = deepest.nextElementSibling;
-    if (!next) {
-      // No successor. That proves the tail ONLY if the list keeps structure for
-      // rows beyond the mounted window — otherwise "no next sibling" means "the
-      // window ends here", which is exactly what an unread tail also looks like.
-      // Production keeps it (813 `nav li` against 803 mounted links), but a
-      // framework that virtualized the items away too would turn "cannot tell"
-      // into a silent success, so the ambiguous case is refused.
-      return structurePersistsPastWindow()
-        ? { proven: true, reason: 'deepest-row-is-last-sibling' }
-        : { proven: false, reason: 'tail-unprovable' };
-    }
-    let nextHasRow = false;
-    try {
-      nextHasRow = !!(next.querySelector && next.querySelector('a[href*="/c/"]'));
-    } catch (_e) {
-      nextHasRow = false;
-    }
-    // A following item that holds no conversation row is list chrome (a section
-    // heading, the "Show more" row), not an unread conversation.
-    return nextHasRow
-      ? { proven: false, reason: 'successor-exists-not-mounted' }
-      : { proven: true, reason: 'successor-is-not-a-conversation' };
+  var RATE_LIMIT_PAGE_ERROR = "ChatGPT rate limit: the conversation page asked to retry.";
+  function rateLimitPageError(doc) {
+    if (!findConversationRetryControl(doc || (typeof document !== "undefined" ? document : null)))
+      return null;
+    return { ok: false, error: RATE_LIMIT_PAGE_ERROR, rateLimited: true };
   }
-
-
-  const scroller = supplied.scroller || findSidebarScroller(doc);
-
-  function absorb() {
-    let added = 0;
-    const batch = listSidebarConversations(doc);
-    for (const conv of batch) {
-      if (byId.has(conv.id)) continue;
-      byId.set(conv.id, conv);
-      added += 1;
-    }
-    const at = scroller ? (scroller.scrollTop || 0) : 0;
-    const spanCountBefore = coveredSpans.length;
-    mountedBand = recordCoverage(at);
-    const newSpan = coveredSpans.length > spanCountBefore
-      ? coveredSpans[coveredSpans.length - 1]
-      : null;
-    if (scroller) {
-      const maxTop = Math.max(0, (scroller.scrollHeight || 0) - (scroller.clientHeight || 0));
-      if (at <= 1) {
-        visitedTop = true;
-        if (newSpan) listTop = Math.min(listTop, newSpan[0]);
-      }
-      if (at >= maxTop - 1) {
-        visitedBottom = true;
-        if (newSpan) listBottom = Math.max(listBottom, newSpan[1]);
-      }
-    }
-    return added;
-  }
-
-  absorb();
-
-  // Expand collapsed Projects FIRST. Their conversations do not exist in the DOM
-  // until the row is clicked, so scrolling and paginating a sidebar that still
-  // has them closed verifies coverage of a list they were never part of.
-  let projectsExpanded = 0;
-  if (expandProjects) {
-    for (let attempt = 0; attempt < maxProjectExpansions; attempt++) {
-      const pending = findCollapsedProjectRows(doc);
-      if (!pending.length) break;
-      let clickedAny = false;
-      for (const row of pending) {
-        if (projectsExpanded >= maxProjectExpansions) break;
-        try {
-          row.control.click();
-          projectsExpanded += 1;
-          clickedAny = true;
-          await sleep(projectSettleMs);
-          absorb();
-        } catch (_e) {
-          /* a row that refuses to open is skipped; the walk still runs */
-        }
-      }
-      if (!clickedAny) break;
-    }
-  }
-
-  if (!scroller) {
-    // Nothing to scroll. Either the whole list already fits, or the container
-    // moved and we cannot tell how much is missing — say which.
-    return {
-      conversations: Array.from(byId.values()),
-      complete: true,
-      reason: 'no-scroll-container',
-    };
-  }
-
-  const startTop = scroller.scrollTop || 0;
-  let quiet = 0;
-  let rounds = 0;
-  let complete = false;
-  let blocked = false;
-  let reachedBottom = false;
-  // True when the completeness verdict rests on measured coverage rather than on
-  // quiescence. Surfaced so a caller can tell a proof from a best guess.
-  let coverageVerified = false;
-  let showMoreClicks = 0;
-  let barrenShowMoreClicks = 0;
-  // False when a "Show more" control was still standing at the end of the walk:
-  // rows exist that were never listed.
-  let showMoreExhausted = true;
-  let tailReason = null;
-
-  while (rounds < maxRounds) {
-    rounds += 1;
-    const maxTop = Math.max(0, (scroller.scrollHeight || 0) - (scroller.clientHeight || 0));
-    const before = scroller.scrollTop || 0;
-    const heightBefore = scroller.scrollHeight || 0;
-    // Step a FRACTION of what was actually observed. Two rules, both learned the
-    // hard way: never step further than the band of rows currently mounted (a
-    // virtualizer may mount less than a viewport, and the excess is stepped over
-    // unseen), and always keep overlap so a partially-visible row at the seam is
-    // read by the next round too. When the rows cannot be measured, fall back to
-    // the viewport — the pre-measurement behaviour, not a wider guess.
-    const reach = mountedBand > 0
-      ? Math.min(mountedBand, scroller.clientHeight || mountedBand)
-      : (scroller.clientHeight || 0);
-    const step = Math.max(1, Math.floor(reach * scrollStepRatio));
-    const nextTop = Math.min(maxTop, before + step);
-    try {
-      scroller.scrollTop = nextTop;
-    } catch (_e) {
-      // A scroller whose scrollTop refuses writes cannot be walked. Stop with a
-      // reason of its own instead of letting the injected function reject — the
-      // caller would otherwise surface "no conversations found — open a Project
-      // page", which blames the wrong thing.
-      blocked = true;
-      break;
-    }
-    await sleep(settleMs);
-
-    let added = absorb();
-
-    // A "Show more" row means the list is paginated by a click. Scrolling can
-    // never reach past it, so a walk that only scrolls stops at a confident
-    // subset. Expand it here and count what it reveals as progress.
-    // Drain every pending control in this round, not one per round: a long
-    // project needs many pages, and the walk otherwise reaches the bottom and
-    // stops while pages it never asked for are still hidden. Measured on
-    // production: one-per-round found 158 of Aether's 235 conversations.
-    // Reset per round: the counter is a guard against one wedged control, not a
-    // budget for the whole walk. Left cumulative, two barren clicks anywhere
-    // silenced every later "Show more" — which is how a run with five projects
-    // expanded only the first one's pages.
-    barrenShowMoreClicks = 0;
-    while (showMoreClicks < maxShowMoreClicks) {
-      const control = findShowMoreControl(doc);
-      if (!control || typeof control.click !== 'function') break;
-      let clickFailed = false;
-      try {
-        control.click();
-        showMoreClicks += 1;
-      } catch (_e) {
-        clickFailed = true;
-      }
-      if (clickFailed) break;
-      await sleep(showMoreSettleMs);
-      const revealed = absorb();
-      added += revealed;
-      // A control that keeps reappearing while revealing nothing would spin
-      // until the budget ran out. Two barren clicks in a row end the drain; the
-      // `maxShowMoreClicks` ceiling remains the outer backstop.
-      barrenShowMoreClicks = revealed ? 0 : barrenShowMoreClicks + 1;
-      if (barrenShowMoreClicks >= 2) break;
-    }
-
-    const nowTop = scroller.scrollTop || 0;
-    const nowMaxTop = Math.max(0, (scroller.scrollHeight || 0) - (scroller.clientHeight || 0));
-    const atBottom = nowTop >= nowMaxTop - 1;
-    // A list still getting TALLER is still loading, even when this round read no
-    // new row: the rows exist but have not mounted yet.
-    const stillGrowing = (scroller.scrollHeight || 0) > heightBefore;
-
-    // Progress means a NEW id or the viewport actually moving. scrollHeight
-    // merely growing is not progress toward the end — the same lesson the
-    // message scanner learned — but it IS evidence the list has not ended,
-    // which is why it blocks the completeness verdict below.
-    if (added > 0 || Math.abs(nowTop - before) >= 1) {
-      quiet = 0;
-    } else {
-      quiet += 1;
-    }
-
-    if (atBottom && added === 0 && !stillGrowing && quiet >= quietRounds) {
-      // Quiescence alone is not a coverage proof. When row geometry was
-      // measurable, require the observed spans to leave no gap; a gap means rows
-      // were stepped over and never mounted, which is precisely the silent
-      // subset. Without geometry there is nothing to verify against, so the
-      // quiescent verdict stands — the honest limit of what can be known.
-      reachedBottom = true;
-      // An unexpanded "Show more" still standing means rows exist that were
-      // never listed. Reaching the bottom is not reaching the end.
-      if (findShowMoreControl(doc)) {
-        showMoreExhausted = false;
-        complete = false;
-        break;
-      }
-      // With geometry, completeness is VERIFIED: the observed spans must leave
-      // no gap across the scrollable range. Without geometry there is nothing to
-      // verify against and the verdict falls back to quiescence — which cannot
-      // tell "the list ended" from "the loader had not answered yet". That
-      // fallback is the known limit of this walk, not a proof.
-      coverageVerified = coveredSpans.length > 0;
-      // Three independent conditions, none derived from the others: no interior
-      // hole, both ends actually visited, and the tail proven by DOM structure.
-      const tail = tailIsProven();
-      tailReason = tail.reason;
-      complete = (coverageVerified ? coverageIsContiguous() : true) &&
-        visitedTop && visitedBottom && tail.proven;
-      break;
-    }
-  }
-
-  // One final sweep from the top before concluding. Rows keep mounting behind the
-  // walk as the virtualizer settles, and measured on production 28 conversations
-  // existed in the DOM that the downward pass never saw. This is a re-read of
-  // what is already there, not another expansion pass.
-  if (finalSweep && !blocked) {
-    // Sweep until a pass adds nothing. A fixed number of passes cannot be right:
-    // measured on production the sidebar was still mounting rows after the walk
-    // finished (691 in the DOM against 455 listed), so the stopping condition has
-    // to be "a full pass found nothing new", not a count chosen in advance.
-    for (let pass = 0; pass < maxSweepPasses; pass++) {
-      const before = byId.size;
-      let position = 0;
-      const limit = Math.max(0, (scroller.scrollHeight || 0) - (scroller.clientHeight || 0));
-      const sweepStep = Math.max(1, Math.floor((scroller.clientHeight || 1) * scrollStepRatio));
-      let guard = 0;
-      while (position <= limit && guard < maxRounds) {
-        guard += 1;
-        try {
-          scroller.scrollTop = position;
-        } catch (_e) {
-          break;
-        }
-        await sleep(settleMs);
-        absorb();
-        position += sweepStep;
-      }
-      if (byId.size === before) break;
-    }
-    // Coverage was re-measured across the whole range, so re-decide on it.
-    if (coveredSpans.length) {
-      coverageVerified = true;
-      const sweptTail = tailIsProven();
-      tailReason = sweptTail.reason;
-      complete = coverageIsContiguous() && showMoreExhausted &&
-        visitedTop && visitedBottom && sweptTail.proven;
-    }
-  }
-
-  // Put the sidebar back where the user left it.
-  try {
-    scroller.scrollTop = startTop;
-  } catch (_e) {
-    /* restoring the view is best-effort; never fail the walk over it */
-  }
-
-  let reason;
-  if (complete) {
-    reason = 'reached-end';
-  } else if (blocked) {
-    reason = 'scroll-blocked';
-  } else if (!showMoreExhausted) {
-    reason = 'show-more-pending';
-  } else if (tailReason === 'successor-exists-not-mounted' ||
-             tailReason === 'tail-unprovable') {
-    // A row exists past everything captured, or the list carries no structure to
-    // prove otherwise. Either way the tail is unread, not merely unmeasured.
-    reason = tailReason;
-  } else if (reachedBottom) {
-    // Went quiet at the bottom, but the observed spans had a hole in them: some
-    // rows were never mounted where the walk looked.
-    reason = 'coverage-gap';
-  } else {
-    reason = 'round-limit';
-  }
-
-  return {
-    conversations: Array.from(byId.values()),
-    complete: complete,
-    reason: reason,
-    coverageVerified: coverageVerified,
-    showMoreClicks: showMoreClicks,
-    projectsExpanded: projectsExpanded,
-    tailReason: tailReason,
-  };
-}
-
-/** ChatGPT retains inactive conversations in the app shell. Measured on
- * 2026-10-02: two main surfaces, one under active-page=false (display:none),
- * sharing fallback turn keys. Never combine their text or attachment rows.
- * Older layouts have no app-shell markers and retain the document fallback.
- */
-function activeConversationRoot(doc) {
-  if (!doc || !doc.querySelectorAll) return doc;
-  if (!doc.querySelector('[data-app-shell-active-page]')) return doc;
-  const pages = Array.from(doc.querySelectorAll('[data-app-shell-active-page]'));
-  if (!pages.length) return doc;
-  const active = pages.filter(function(page) {
-    return page.getAttribute('data-app-shell-active-page') === 'true';
-  });
-  return active.length === 1 ? active[0] : null;
-}
-
-/** Wait until a navigated conversation page has mountable message content. */
-function waitForConversationReady(options) {
-  const supplied = options || {};
-  const timeoutMs = supplied.timeoutMs || 30000;
-  const pollMs = supplied.pollMs || 300;
-  const conversationId = supplied.conversationId || null;
-
-  return new Promise(function(resolve) {
-    const startedAt = Date.now();
-    function check() {
-      if (conversationId) {
-        const pathMatch = (typeof location !== 'undefined' ? location.pathname : '')
-          .match(/\/c\/([A-Za-z0-9-]+)/);
-        if (!pathMatch || pathMatch[1] !== conversationId) {
-          if (Date.now() - startedAt >= timeoutMs) {
-            return resolve({ ready: false, error: 'Navigation did not reach the conversation.' });
+  function waitForConversationReady(options) {
+    const supplied = options || {};
+    const timeoutMs = supplied.timeoutMs == null ? 30000 : supplied.timeoutMs;
+    const pollMs = supplied.pollMs || 300;
+    const conversationId = supplied.conversationId || null;
+    return new Promise(function(resolve) {
+      const startedAt = Date.now();
+      function check() {
+        if (conversationId) {
+          const pathMatch = (typeof location !== "undefined" ? location.pathname : "").match(/\/c\/([A-Za-z0-9-]+)/);
+          if (!pathMatch || pathMatch[1] !== conversationId) {
+            if (Date.now() - startedAt >= timeoutMs) {
+              return resolve({ ready: false, error: "Navigation did not reach the conversation." });
+            }
+            return setTimeout(check, pollMs);
           }
-          return setTimeout(check, pollMs);
         }
+        const root = typeof document !== "undefined" ? activeConversationRoot(document) : null;
+        if (conversationHasMessages(root))
+          return resolve({ ready: true });
+        if (findConversationRetryControl(typeof document !== "undefined" ? document : null)) {
+          return resolve({ ready: false, rateLimited: true, error: RATE_LIMIT_PAGE_ERROR });
+        }
+        if (Date.now() - startedAt >= timeoutMs) {
+          return resolve({ ready: false, error: "Conversation content did not load." });
+        }
+        setTimeout(check, pollMs);
       }
-      const root = typeof document !== 'undefined' ? activeConversationRoot(document) : null;
-      if (root &&
-          (root.querySelector('[data-turn-id]') ||
-           root.querySelector('[data-message-author-role]') ||
-           modernMessageSections(root).some(function(unit) { return !!modernMessageRole(unit); }))) {
-        return resolve({ ready: true });
-      }
-      if (Date.now() - startedAt >= timeoutMs) {
-        return resolve({ ready: false, error: 'Conversation content did not load.' });
-      }
-      setTimeout(check, pollMs);
-    }
-    check();
-  });
-}
-
-/** Turn a conversation title into a filesystem-safe slug.
- *  Keeps Unicode letters (Cyrillic titles stay readable), collapses the rest
- *  to single hyphens, and caps the length so the download path stays sane. */
-function slugifyTitle(title, maxLength) {
-  const limit = maxLength || 60;
-  if (!title) return null;
-  const slug = String(title)
-    .normalize('NFC')
-    // Characters Chrome refuses in a download filename even though they are
-    // legal in a title. Measured on production: a conversation titled
-    // "Обзор репозитория \u{7FFFF}" (a Private Use Area codepoint) produced a
-    // slug Chrome rejected with "Invalid filename", so the whole conversation
-    // failed to save while the run reported progress. Covers C0/C1 controls, the
-    // BMP Private Use Area, both Private Use planes, unpaired surrogates, and
-    // the non-characters at the end of each plane.
-    .replace(/[\u0000-\u001F\u007F-\u009F\uE000-\uF8FF\uFDD0-\uFDEF\uFFF0-\uFFFF]/g, ' ')
-    .replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, function(pair) {
+      check();
+    });
+  }
+  function slugifyTitle(title, maxLength) {
+    const limit = maxLength || 60;
+    if (!title)
+      return null;
+    const slug = String(title).normalize("NFC").replace(/[\u0000-\u001F\u007F-\u009F\uE000-\uF8FF\uFDD0-\uFDEF\uFFF0-\uFFFF]/g, " ").replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, function(pair) {
       const code = pair.codePointAt(0);
-      const inPrivatePlane = code >= 0xF0000 && code <= 0x10FFFD;
-      const isNonCharacter = (code & 0xFFFE) === 0xFFFE;
-      return (inPrivatePlane || isNonCharacter) ? ' ' : pair;
-    })
-    // A LONE surrogate only: the pair rule above already ran and returned valid
-    // pairs untouched, so sweeping the whole D800-DFFF range here would split
-    // every emoji into two spaces. Verified: "План 🚀 запуска" kept its emoji
-    // before this change and lost it after, until the range was narrowed.
-    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, ' ')
-    .replace(/[\\/:*?"<>|]+/g, ' ')
-    // `~` is reserved as the marker that introduces a conversation id in an export
-    // filename. Excluding it here is what makes the two name formats
-    // non-overlapping: a title can otherwise contain anything a separator or an id
-    // can contain, and a name written by an older version could then be read as a
-    // current one belonging to a different conversation. Removing the character from
-    // titles is cheap; the ambiguity it prevents cost a conversation.
-    .replace(/~+/g, '-')
-    .replace(/[\s_]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, limit)
-    .replace(/-+$/g, '');
-  // This slug becomes a DIRECTORY name — in a batch the project slug does too —
-  // so a dot-only result is a relative-path segment, not a name. Chrome rejects
-  // any downloads.download() filename containing a `..` back-reference, so a
-  // conversation titled ".." made every write in the run fail. Returning null
-  // hands the caller its own fallback name instead.
-  if (/^\.+$/.test(slug)) return null;
-  return slug || null;
-}
-
-/** Called by popup via chrome.scripting.executeScript — returns text, does NOT write clipboard. */
-async function getConversationMarkdown(settings) {
-  // Retrieving generated artefacts requires calling ChatGPT's own conversation
-  // API. PRIVACY.md states that saving files is the ONLY mode in which the
-  // extension makes network requests, so that lookup is opt-in and off by
-  // default: a plain "copy as Markdown" stays a pure DOM read.
-  const wantFiles = !!(settings && settings.downloadFiles);
-  try {
-    const root = activeConversationRoot(document);
-    if (!root) return { ok: false, error: 'Could not identify the active conversation. Try again after it loads.' };
-    const startPath = typeof location !== 'undefined' ? location.pathname : '';
-    const conversationId = (startPath.match(/\/c\/([A-Za-z0-9-]+)/) || [])[1] || null;
-    function assertSameConversation() {
-      if ((typeof location !== 'undefined' && location.pathname !== startPath) ||
-          activeConversationRoot(document) !== root) {
-        throw new Error('Conversation changed during export. Return to the intended conversation and export again.');
+      const inPrivatePlane = code >= 983040 && code <= 1114109;
+      const isNonCharacter = (code & 65534) === 65534;
+      return inPrivatePlane || isNonCharacter ? " " : pair;
+    }).replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, " ").replace(/[\\/:*?"<>|]+/g, " ").replace(/~+/g, "-").replace(/[\s_]+/g, "-").replace(/^-+|-+$/g, "").slice(0, limit).replace(/-+$/g, "");
+    if (/^\.+$/.test(slug))
+      return null;
+    return slug || null;
+  }
+  async function getConversationMarkdown(settings) {
+    const wantFiles = !!(settings && settings.downloadFiles);
+    try {
+      let assertSameConversation = function() {
+        if (typeof location !== "undefined" && location.pathname !== startPath || activeConversationRoot(document) !== root) {
+          throw new Error("Conversation changed during export. Return to the intended conversation and export again.");
+        }
+      };
+      const root = activeConversationRoot(document);
+      if (!root)
+        return { ok: false, error: "Could not identify the active conversation. Try again after it loads." };
+      const startPath = typeof location !== "undefined" ? location.pathname : "";
+      const conversationId = (startPath.match(/\/c\/([A-Za-z0-9-]+)/) || [])[1] || null;
+      const legacySection = root.querySelector("[data-turn-id]");
+      const modern = !legacySection && modernMessageSections(root).length > 0;
+      const firstSection = legacySection || (modern ? modernMessageSections(root)[0] : null);
+      let md;
+      var scanMeta = null;
+      const panelFilesDuringScan = new Map;
+      const buttonsDuringScan = new Map;
+      if (!firstSection) {
+        md = extractConversationLegacy(root);
+      } else {
+        const container = findScrollContainer(firstSection);
+        if (!container)
+          return { ok: false, error: "Could not find the conversation scroll area." };
+        const scanState = { cancelled: false, captured: 0, observed: 0, elapsedMs: 0 };
+        scanMeta = {};
+        if (typeof window !== "undefined")
+          window.__c2mScan = scanState;
+        const turns = await scanTurns(container, {
+          readSections: function() {
+            assertSameConversation();
+            return modern ? modernMessageSections(root) : root.querySelectorAll("[data-turn-id]");
+          },
+          scrollToStart: modern ? async function(target) {
+            const result = await scrollToConversationStart(target, {
+              readFirstTurn: function(root) {
+                return modernMessageSections(root)[0] || null;
+              },
+              readFirstTurnId: function(root) {
+                const first = modernMessageSections(root)[0];
+                return first ? getSectionTurnId(first) : null;
+              },
+              countTurns: function(root) {
+                return modernMessageSections(root).length;
+              },
+              readPagination: readModernPagination
+            });
+            if (!result.confirmedByPagination) {
+              markPartialScan({ scanMeta }, "history start unverified for this page layout");
+            }
+            return result;
+          } : undefined,
+          extractTurn,
+          isCancelled: function() {
+            return scanState.cancelled === true;
+          },
+          scanMeta,
+          onProgress: function(p) {
+            scanState.captured = p.captured;
+            scanState.observed = p.observed;
+            scanState.elapsedMs = p.elapsedMs;
+          },
+          onMounted: wantFiles ? function() {
+            for (const file of listArtifactPanelFiles(root)) {
+              if (!panelFilesDuringScan.has(file.name)) {
+                panelFilesDuringScan.set(file.name, file);
+              }
+            }
+            for (const entry of downloadButtonsInPage(root, [])) {
+              if (!buttonsDuringScan.has(entry.label)) {
+                buttonsDuringScan.set(entry.label, entry);
+              }
+            }
+          } : null
+        });
+        md = buildConversationMarkdown(turns);
+        if (scanMeta.partial)
+          md = prefixPartialNotice(md, scanMeta.reason);
       }
-    }
-    const legacySection = root.querySelector('[data-turn-id]');
-    const modern = !legacySection && modernMessageSections(root).length > 0;
-    const firstSection = legacySection || (modern ? modernMessageSections(root)[0] : null);
-    let md;
-    var scanMeta = null;
-    // Artefact rows collected while the scan holds each scroll position. Keyed
-    // by file name: the same row can mount repeatedly as the walk passes it.
-    const panelFilesDuringScan = new Map();
-    // Download buttons collected on the same walk. A button found while scrolled
-    // away stays clickable — the click path calls scrollIntoView on it first —
-    // so there is no reason to traverse the conversation a second time to find
-    // them. Keyed by label, since one button can mount repeatedly.
-    const buttonsDuringScan = new Map();
-    if (!firstSection) {
-      md = extractConversationLegacy(root);
-    } else {
-      const container = findScrollContainer(firstSection);
-      if (!container) return { ok: false, error: 'Could not find the conversation scroll area.' };
-      // The popup cannot hold a live channel into the page across
-      // executeScript calls, so cancellation and progress ride on a window
-      // flag it can set and read with a separate one-liner injection. Guarded
-      // because this function is also exercised outside a browser window.
-      const scanState = { cancelled: false, captured: 0, observed: 0, elapsedMs: 0 };
-      scanMeta = {};
-      if (typeof window !== 'undefined') window.__c2mScan = scanState;
-      const turns = await scanTurns(container, {
-        readSections: function() {
-          assertSameConversation();
-          return modern ? modernMessageSections(root) : root.querySelectorAll('[data-turn-id]');
-        },
-        scrollToStart: modern ? async function(target) {
-          const result = await scrollToConversationStart(target, {
-            readFirstTurn: function(root) { return modernMessageSections(root)[0] || null; },
-            readFirstTurnId: function(root) {
-              const first = modernMessageSections(root)[0];
-              return first ? getSectionTurnId(first) : null;
-            },
-            countTurns: function(root) { return modernMessageSections(root).length; },
-            readPagination: readModernPagination,
+      if (!md)
+        return rateLimitPageError(document) || { ok: false, error: "No conversation found on this page." };
+      let attachmentsIncomplete = false;
+      if (wantFiles) {
+        const controller = typeof AbortController === "function" ? new AbortController : null;
+        const phaseBudget = settings && settings.artifactTimeoutMs !== undefined ? settings.artifactTimeoutMs : 30000;
+        let phaseTimer;
+        const resolvedSoFar = [];
+        const lookup = {
+          stage: "starting",
+          requests: 0,
+          statuses: {},
+          candidates: null,
+          offered: 0,
+          failures: {},
+          rejectedHosts: [],
+          reason: "unresolved"
+        };
+        try {
+          md = await Promise.race([
+            appendPanelArtifacts(md, {
+              doc: root,
+              conversationId,
+              scannedPanelFiles: firstSection ? Array.from(panelFilesDuringScan.values()) : undefined,
+              scannedButtons: firstSection ? Array.from(buttonsDuringScan.values()) : undefined,
+              clickDownloads: false,
+              reportUnresolvedButtons: true,
+              onInventory: function(artifacts) {
+                lookup.candidates = artifacts === null ? null : artifacts.length;
+                lookup.offered = (artifacts || []).filter(function(a) {
+                  return a.priority === 0;
+                }).length;
+                lookup.stage = "panel";
+              },
+              onResolved: function(entry) {
+                resolvedSoFar.push(entry);
+              },
+              onFailure: function(kind, host) {
+                lookup.failures[kind] = (lookup.failures[kind] || 0) + 1;
+                if (host && lookup.rejectedHosts.indexOf(host) === -1)
+                  lookup.rejectedHosts.push(host);
+              },
+              onIncomplete: function() {
+                attachmentsIncomplete = true;
+              },
+              fetchImpl: typeof fetch === "function" ? async function(url, init) {
+                assertSameConversation();
+                if (controller && controller.signal.aborted)
+                  throw new Error("lookup cancelled");
+                lookup.stage = String(url).indexOf("/api/auth/session") !== -1 ? "session" : String(url).indexOf("/interpreter/download") !== -1 || String(url).indexOf("/files/download/") !== -1 ? "file-link" : "conversation";
+                lookup.requests += 1;
+                const response = await fetch(url, Object.assign({}, init, controller ? { signal: controller.signal } : {}));
+                const code = response && Number.isInteger(response.status) ? response.status : 0;
+                lookup.statuses[code] = (lookup.statuses[code] || 0) + 1;
+                return response;
+              } : undefined
+            }),
+            new Promise(function(_resolve, reject) {
+              phaseTimer = setTimeout(function() {
+                lookup.reason = "timeout";
+                if (controller)
+                  controller.abort();
+                reject(new Error("attachment lookup timed out"));
+              }, phaseBudget);
+            })
+          ]);
+        } catch (_error) {
+          attachmentsIncomplete = true;
+          if (lookup.reason !== "timeout")
+            lookup.reason = "exception";
+          const names = Array.from(new Set(Array.from(panelFilesDuringScan.values()).map(function(f) {
+            return f.name;
+          }).concat(Array.from(buttonsDuringScan.values()).map(function(b) {
+            return b.label;
+          }))));
+          const available = resolvedSoFar.filter(function(entry) {
+            return entry.resolved && entry.resolved.url;
           });
-          // Unknown layouts stay uncertain; the measured history boundary can
-          // now positively certify arrival instead of warning on every export.
-          if (!result.confirmedByPagination) {
-            markPartialScan({ scanMeta: scanMeta }, 'history start unverified for this page layout');
-          }
-          return result;
-        } : undefined,
-        extractTurn: extractTurn,
-        isCancelled: function() { return scanState.cancelled === true; },
-        scanMeta: scanMeta,
-        onProgress: function(p) {
-          scanState.captured = p.captured;
-          scanState.observed = p.observed;
-          scanState.elapsedMs = p.elapsedMs;
-        },
-        // Harvest artefact rows AT EVERY SCROLL POSITION, while the scan holds
-        // the page there. Measured from the live markup: the rows are not in a
-        // sidebar, they are nested INSIDE the turn —
-        //
-        //   <div class="…agent-turn">
-        //     <div data-message-author-role="assistant" …>
-        //     <div class="w-full max-w-[480px]">      <- the artefact panel
-        //
-        // so a row is mounted only while its own turn is, and `scanTurns`
-        // restores the original scroll position in its `finally`. Reading after
-        // the scan therefore sees whichever turn happens to be on screen: the
-        // panel showed TZ-01..TZ-04 while the export carried 89_articles plus
-        // TZ-02..TZ-04, two different sets of four, because they were read at
-        // two different scroll positions. Collected during the walk, every
-        // turn's files are seen while that turn exists.
-        onMounted: wantFiles ? function() {
-          for (const file of listArtifactPanelFiles(root)) {
-            if (!panelFilesDuringScan.has(file.name)) {
-              panelFilesDuringScan.set(file.name, file);
-            }
-          }
-          // Same walk, same reason. The separate button traversal that used to
-          // run after the scan was guarded by "found nothing here", and the
-          // guard failed the moment ANY behavior-btn happened to be on screen:
-          // measured on a live thread, the landing position showed 2 buttons
-          // (both editing suggestions — "Make the opening more concrete"), so
-          // the traversal never ran and all 5 real download buttons were missed.
-          // Collected during the walk there is no guard to get wrong.
-          for (const entry of downloadButtonsInPage(root, [])) {
-            if (!buttonsDuringScan.has(entry.label)) {
-              buttonsDuringScan.set(entry.label, entry);
-            }
-          }
-        } : null,
-      });
-      md = buildConversationMarkdown(turns);
-      if (scanMeta.partial) md = prefixPartialNotice(md, scanMeta.reason);
-    }
-    if (!md) return { ok: false, error: 'No conversation found on this page.' };
-    // Generated (code-interpreter) files render in a panel outside the message
-    // tree with no href and no testid, so the per-turn scan above cannot see
-    // them. Appending them here puts them in the markdown, which is where the
-    // popup's downloader looks for artefacts.
-    let attachmentsIncomplete = false;
-    if (wantFiles) {
-      // What the walk saw wins: those rows were read while their own turn was
-      // mounted. appendPanelArtifacts still reads the panel itself, and merges,
-      // so a conversation whose panel IS a sidebar keeps working unchanged.
-      // Content scripts execute in an isolated world. Patching that world's
-      // anchor.click/window.open cannot intercept a handler owned by the page.
-      // Never click its download buttons: an escaped native download can close
-      // the popup before the conversation is saved. Keep unresolved names.
-      const controller = typeof AbortController === 'function' ? new AbortController() : null;
-      const phaseBudget = settings && settings.artifactTimeoutMs !== undefined
-        ? settings.artifactTimeoutMs : 30000;
-      let phaseTimer;
-      const resolvedSoFar = [];
-      const lookup = { stage: 'starting', requests: 0, statuses: {}, candidates: null, offered: 0, failures: {}, rejectedHosts: [], reason: 'unresolved' };
-      try {
-        md = await Promise.race([
-          appendPanelArtifacts(md, {
-            doc: root,
-            conversationId: conversationId,
-            scannedPanelFiles: firstSection ? Array.from(panelFilesDuringScan.values()) : undefined,
-            scannedButtons: firstSection ? Array.from(buttonsDuringScan.values()) : undefined,
-            clickDownloads: false,
-            reportUnresolvedButtons: true,
-            onInventory: function(artifacts) {
-              lookup.candidates = artifacts === null ? null : artifacts.length;
-              lookup.offered = (artifacts || []).filter(function(a) { return a.priority === 0; }).length;
-              lookup.stage = 'panel';
-            },
-            onResolved: function(entry) { resolvedSoFar.push(entry); },
-            onFailure: function(kind, host) {
-              lookup.failures[kind] = (lookup.failures[kind] || 0) + 1;
-              if (host && lookup.rejectedHosts.indexOf(host) === -1) lookup.rejectedHosts.push(host);
-            },
-            onIncomplete: function() { attachmentsIncomplete = true; },
-            fetchImpl: typeof fetch === 'function' ? async function(url, init) {
-              // Only stage names and status counts leave this wrapper. Never
-              // include URLs, headers, response bodies or exception messages.
-              assertSameConversation();
-              if (controller && controller.signal.aborted) throw new Error('lookup cancelled');
-              lookup.stage = String(url).indexOf('/api/auth/session') !== -1 ? 'session' :
-                ((String(url).indexOf('/interpreter/download') !== -1 ||
-                  String(url).indexOf('/files/download/') !== -1) ? 'file-link' : 'conversation');
-              lookup.requests += 1;
-              const response = await fetch(url, Object.assign({}, init, controller ? { signal: controller.signal } : {}));
-              const code = response && Number.isInteger(response.status) ? response.status : 0;
-              lookup.statuses[code] = (lookup.statuses[code] || 0) + 1;
-              return response;
-            } : undefined,
-          }),
-          new Promise(function(_resolve, reject) {
-            phaseTimer = setTimeout(function() {
-              lookup.reason = 'timeout';
-              if (controller) controller.abort();
-              reject(new Error('attachment lookup timed out'));
-            }, phaseBudget);
-          }),
-        ]);
-      } catch (_error) {
+          const recoveredLinks = available.map(function(entry) {
+            return markdownLink(entry.file.name, entry.resolved.url);
+          });
+          const recoveredNames = new Set(available.map(function(entry) {
+            return entry.file.name;
+          }));
+          const missingNames = names.filter(function(name) {
+            return !recoveredNames.has(name);
+          });
+          md += `
+
+---
+
+## Files` + (recoveredLinks.length ? `
+
+` + recoveredLinks.join(`
+`) : "") + `
+
+> Attachment lookup failed or timed out; ` + "the conversation text was preserved. Re-run to retrieve files." + (missingNames.length ? `
+
+> Could not retrieve a download link for: ` + missingNames.join(", ") : "");
+        } finally {
+          clearTimeout(phaseTimer);
+        }
+        if (attachmentsIncomplete) {
+          md += `
+
+> Attachment diagnostics: reason=` + lookup.reason + "; stage=" + lookup.stage + "; requests=" + lookup.requests + "; HTTP=" + JSON.stringify(lookup.statuses) + "; candidates=" + (lookup.candidates === null ? "unknown" : lookup.candidates) + "; resolved=" + resolvedSoFar.filter(function(entry) {
+            return entry.resolved;
+          }).length + "; offered=" + lookup.offered + "; linkFailures=" + JSON.stringify(lookup.failures) + "; rejectedHosts=" + JSON.stringify(lookup.rejectedHosts) + ".";
+        }
+      }
+      if (wantFiles && /\(referenced file; not downloaded\)/.test(md)) {
         attachmentsIncomplete = true;
-        if (lookup.reason !== 'timeout') lookup.reason = 'exception';
-        // The text was already captured. Attachment failure must not erase it.
-        const names = Array.from(new Set(
-          Array.from(panelFilesDuringScan.values()).map(function(f) { return f.name; })
-            .concat(Array.from(buttonsDuringScan.values()).map(function(b) { return b.label; }))));
-        const available = resolvedSoFar.filter(function(entry) { return entry.resolved && entry.resolved.url; });
-        const recoveredLinks = available.map(function(entry) { return markdownLink(entry.file.name, entry.resolved.url); });
-        const recoveredNames = new Set(available.map(function(entry) { return entry.file.name; }));
-        const missingNames = names.filter(function(name) { return !recoveredNames.has(name); });
-        md += '\n\n---\n\n## Files' +
-          (recoveredLinks.length ? '\n\n' + recoveredLinks.join('\n') : '') +
-          '\n\n> Attachment lookup failed or timed out; ' +
-          'the conversation text was preserved. Re-run to retrieve files.' +
-          (missingNames.length ? '\n\n> Could not retrieve a download link for: ' + missingNames.join(', ') : '');
-      } finally {
-        clearTimeout(phaseTimer);
+        md += `
+
+> Library files cited in this conversation were not downloaded. ` + "Download them from ChatGPT Library before treating this export as complete.";
       }
-      if (attachmentsIncomplete) {
-        md += '\n\n> Attachment diagnostics: reason=' + lookup.reason +
-          '; stage=' + lookup.stage + '; requests=' + lookup.requests +
-          '; HTTP=' + JSON.stringify(lookup.statuses) +
-          '; candidates=' + (lookup.candidates === null ? 'unknown' : lookup.candidates) +
-          '; resolved=' + resolvedSoFar.filter(function(entry) { return entry.resolved; }).length +
-          '; offered=' + lookup.offered + '; linkFailures=' + JSON.stringify(lookup.failures) +
-          '; rejectedHosts=' + JSON.stringify(lookup.rejectedHosts) + '.';
+      assertSameConversation();
+      const title = extractConversationTitle();
+      if (title)
+        md = "# " + title + `
+
+` + md;
+      return {
+        ok: true,
+        md,
+        partial: !!scanMeta && scanMeta.partial === true || attachmentsIncomplete,
+        partialReason: scanMeta && scanMeta.partial ? scanMeta.reason : attachmentsIncomplete ? "attachments-unavailable" : null,
+        title,
+        slug: slugifyTitle(title),
+        lines: md.split(`
+`).length,
+        words: md.split(/\s+/).filter(Boolean).length
+      };
+    } catch (error) {
+      return { ok: false, error: error.message || String(error), stack: error && error.stack || null };
+    }
+  }
+  async function fetchImageDataUrls(urls) {
+    const results = [];
+    for (const url of urls) {
+      try {
+        const parsed = new URL(url);
+        if (parsed.protocol !== "https:" || !["chatgpt.com", "chat.openai.com", "files.oaiusercontent.com"].includes(parsed.hostname)) {
+          results.push(null);
+          continue;
+        }
+        const response = await fetch(url);
+        if (!response.ok) {
+          results.push(null);
+          continue;
+        }
+        const blob = await response.blob();
+        const dataUrl = await new Promise(function(resolve, reject) {
+          const reader = new FileReader;
+          reader.onload = function() {
+            resolve(reader.result);
+          };
+          reader.onerror = function() {
+            reject(reader.error);
+          };
+          reader.readAsDataURL(blob);
+        });
+        results.push({ url, dataUrl });
+      } catch (_e) {
+        results.push(null);
       }
     }
-    // A Library citation is an offered file, even though its preview button
-    // exposes no download URL. Keep the inline name, but do not bank the export
-    // as complete when saving files was requested. Otherwise batch resume skips
-    // the conversation forever despite never saving those cited documents.
-    if (wantFiles && /\(referenced file; not downloaded\)/.test(md)) {
-      attachmentsIncomplete = true;
-      md += '\n\n> Library files cited in this conversation were not downloaded. ' +
-        'Download them from ChatGPT Library before treating this export as complete.';
+    return results;
+  }
+  function turnsOnRoot(root) {
+    if (!root || !root.querySelectorAll)
+      return [];
+    var legacy = root.querySelectorAll("[data-turn-id]");
+    if (legacy && legacy.length) {
+      return orderCapturedTurns(Array.from(legacy).map(function(section, index) {
+        return extractTurn(section, index);
+      }).filter(Boolean));
     }
-    assertSameConversation();
-    const title = extractConversationTitle();
-    if (title) md = '# ' + title + '\n\n' + md;
+    var modern = modernMessageSections(root);
+    return orderCapturedTurns(modern.map(function(section, index) {
+      return extractTurn(section, index);
+    }).filter(Boolean));
+  }
+  function dedupeNamed(items, readName) {
+    var seen = {};
+    var out = [];
+    for (var i = 0;i < items.length; i++) {
+      var name = readName(items[i]);
+      if (!name || seen[name])
+        continue;
+      seen[name] = true;
+      out.push(items[i]);
+    }
+    return out;
+  }
+  function exportActiveSessionHtml(doc, options) {
+    var opts = options || {};
+    var site = opts.site || null;
+    if (!site || typeof site.layoutStaticSite !== "function") {
+      return { ok: false, error: "HTML exporter is unavailable." };
+    }
+    var root = activeConversationRoot(doc);
+    if (!root)
+      return { ok: false, error: "Could not identify the active conversation. Try again after it loads." };
+    var turns = turnsOnRoot(root);
+    if (!turns.length)
+      return rateLimitPageError(doc) || { ok: false, error: "No conversation found on this page." };
+    var saved = [];
+    var missing = [];
+    var partial = !!opts.partial;
+    var renderedTurns = [];
+    for (var i = 0;i < turns.length; i++) {
+      var bound = site.bindRetrievedFiles(turns[i].markdown, opts.retrieved || []);
+      renderedTurns.push({ role: turns[i].role, markdown: bound.markdown });
+      saved = saved.concat(bound.saved);
+      missing = missing.concat(bound.missing);
+      if (bound.partial)
+        partial = true;
+    }
+    var session = {
+      id: opts.id || null,
+      title: opts.title || "Conversation",
+      slug: opts.slug || "conversation",
+      projectId: opts.projectId || null,
+      projectTitle: opts.projectTitle || null,
+      projectSlug: opts.projectSlug || null,
+      turns: renderedTurns,
+      saved: dedupeNamed(saved, function(file) {
+        return file.name;
+      }),
+      missing: dedupeNamed(missing, function(name) {
+        return name;
+      }),
+      partial
+    };
+    var laid = site.layoutStaticSite([session]);
+    if (opts.outputDir)
+      site.writeStaticSite(opts.outputDir, laid);
+    var page = null;
+    for (var f = 0;f < laid.files.length; f++) {
+      if (laid.files[f].role === "chat")
+        page = laid.files[f];
+    }
     return {
       ok: true,
-      md: md,
-      partial: (!!scanMeta && scanMeta.partial === true) || attachmentsIncomplete,
-      partialReason: scanMeta && scanMeta.partial ? scanMeta.reason :
-        (attachmentsIncomplete ? 'attachments-unavailable' : null),
-      title: title,
-      slug: slugifyTitle(title),
-      lines: md.split('\n').length,
-      words: md.split(/\s+/).filter(Boolean).length,
+      html: page ? page.body : "",
+      pagePath: page ? page.path : null,
+      partial: session.partial,
+      missing: session.missing,
+      files: laid.files,
+      title: session.title
     };
-  } catch (error) {
-    return { ok: false, error: error.message || String(error) };
   }
-}
 
-/** Fetch remote artifact bytes as data URLs using fetch().
- *  Extension host_permissions for declared hosts bypass CORS.
- *  Returns {url, dataUrl} for successfully fetched artifacts; null on error. */
-async function fetchImageDataUrls(urls) {
-  const results = [];
-  for (const url of urls) {
-    try {
-      const response = await fetch(url);
-      if (!response.ok) { results.push(null); continue; }
-      const blob = await response.blob();
-      const dataUrl = await new Promise(function(resolve, reject) {
-        const reader = new FileReader();
-        reader.onload = function() { resolve(reader.result); };
-        reader.onerror = function() { reject(reader.error); };
-        reader.readAsDataURL(blob);
-      });
-      results.push({ url: url, dataUrl: dataUrl });
-    } catch (_e) {
-      results.push(null);
-    }
-  }
-  return results;
-}
+  // src/content/index.mjs
+  globalThis.__c2mContentApi = exports_export;
+  Object.assign(globalThis, exports_export);
+})();
 
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {
-    buildConversationMarkdown: buildConversationMarkdown,
-    extractAttachments: extractAttachments,
-    extractAttachmentsDetailed: extractAttachmentsDetailed,
-    ATTACHMENT_CHIP_SELECTORS: ATTACHMENT_CHIP_SELECTORS,
-    extractConversationTitle: extractConversationTitle,
-    extractImages: extractImages,
-    fetchImageDataUrls: fetchImageDataUrls,
-    listSidebarConversations: listSidebarConversations,
-    collectSidebarConversations: collectSidebarConversations,
-    findSidebarScroller: findSidebarScroller,
-    findShowMoreControl: findShowMoreControl,
-    fetchSessionToken: fetchSessionToken,
-    fetchConversationArtifacts: fetchConversationArtifacts,
-    resolveSandboxDownloadUrl: resolveSandboxDownloadUrl,
-    listArtifactPanelFiles: listArtifactPanelFiles,
-    resolveArtifactPanelFiles: resolveArtifactPanelFiles,
-    appendPanelArtifacts: appendPanelArtifacts,
-    sandboxFilesFromMarkdown: sandboxFilesFromMarkdown,
-    sandboxPathsFromApiMessage: sandboxPathsFromApiMessage,
-    foldForNameMatching: foldForNameMatching,
-    downloadButtonsInPage: downloadButtonsInPage,
-    filterButtonsAgainstPanel: filterButtonsAgainstPanel,
-    collectButtonDownloads: collectButtonDownloads,
-    findButtonsByScrolling: findButtonsByScrolling,
-    downloadNameFromUrl: downloadNameFromUrl,
-    dismissViewerOverlay: dismissViewerOverlay,
-    escapeKeydownEvent: escapeKeydownEvent,
-    UNPREVIEWABLE_FORMATS: UNPREVIEWABLE_FORMATS,
-    waitForArtifactPanel: waitForArtifactPanel,
-    scrollToConversationStart: scrollToConversationStart,
-    readModernPagination: readModernPagination,
-    findCollapsedProjectRows: findCollapsedProjectRows,
-    projectRowContainer: projectRowContainer,
-    stripSidebarLabelSuffix: stripSidebarLabelSuffix,
-    knownProjectName: knownProjectName,
-    slugifyTitle: slugifyTitle,
-    extractTurn: extractTurn,
-    fetchConversationMetadata: fetchConversationMetadata,
-    findScrollContainer: findScrollContainer,
-    getConversationMarkdown: getConversationMarkdown,
-    largestCoverageGap: largestCoverageGap,
-    nodeToMarkdown: nodeToMarkdown,
-    orderCapturedTurns: orderCapturedTurns,
-    parseTurnOrder: parseTurnOrder,
-    prefixPartialNotice: prefixPartialNotice,
-    scanTurns: scanTurns,
-    titleFromSidebarLink: titleFromSidebarLink,
-    waitForConversationReady: waitForConversationReady,
-  };
-}
+if (typeof module !== 'undefined' && module.exports) module.exports = { ...globalThis.__c2mContentApi, exportActiveSessionHtml: (doc, opts) => globalThis.__c2mContentApi.exportActiveSessionHtml(doc, { ...opts, site: require('./site.js') }) };

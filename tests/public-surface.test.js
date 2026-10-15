@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 const { execFileSync } = require('node:child_process');
 
 const root = path.resolve(__dirname, '..');
@@ -75,10 +76,35 @@ test('uses a neutral public identity throughout the extension', () => {
   // call), so every access is guarded; and PRIVACY.md previously promised the
   // extension "deliberately stores no state of its own", which this makes false
   // and which was rewritten in the same change rather than left to drift.
+  // `sidePanel` was added so the export UI is a side panel rather than a
+  // popup. A popup document is destroyed when the user clicks the page, and
+  // the batch running in it dies with the document. The permission does not
+  // grant host access; it only allows the panel to stay open beside the tab.
   assert.deepEqual(
     [...manifest.permissions].sort(),
-    ['clipboardWrite', 'downloads', 'scripting', 'storage'],
+    ['clipboardWrite', 'downloads', 'scripting', 'sidePanel', 'storage'],
   );
+  assert.equal(manifest.side_panel && manifest.side_panel.default_path, 'popup.html');
+  assert.equal(manifest.background && manifest.background.service_worker, 'background.js');
+  assert.equal(manifest.action.default_popup, undefined);
+  // The manifest only names the panel document. Drive the worker entrypoint:
+  // a string match can pass while the toolbar click still does nothing.
+  const listeners = {};
+  const calls = [];
+  vm.runInNewContext(read('background.js'), { chrome: {
+    runtime: {
+      onInstalled: { addListener(fn) { listeners.installed = fn; } },
+      onStartup: { addListener(fn) { listeners.startup = fn; } },
+    },
+    sidePanel: { setPanelBehavior(options) {
+      calls.push(options.openPanelOnActionClick);
+      return Promise.resolve();
+    } },
+  } }, { filename: path.join(root, 'background.js') });
+  assert.deepEqual(calls, [true], 'the first click works when the worker starts');
+  listeners.installed();
+  listeners.startup();
+  assert.deepEqual(calls, [true, true, true]);
 });
 
 test('README states independence and non-affiliation', () => {
@@ -189,6 +215,7 @@ test('every tracked file is declared in the allowlist', () => {
 test('shipped JavaScript has no network, storage, or analytics calls', () => {
   const popupJs = read('popup.js');
   const contentJs = read('content.js');
+  const backgroundJs = read('background.js');
   const forbidden = [
     /\bXMLHttpRequest\b/,
     /\bWebSocket\b/,
@@ -198,6 +225,7 @@ test('shipped JavaScript has no network, storage, or analytics calls', () => {
   for (const pattern of forbidden) {
     assert.doesNotMatch(popupJs, pattern, `popup.js matches ${pattern}`);
     assert.doesNotMatch(contentJs, pattern, `content.js matches ${pattern}`);
+    assert.doesNotMatch(backgroundJs, pattern, `background.js matches ${pattern}`);
   }
 
   // `chrome.storage` is permitted in popup.js from 1.2.0 — the export index —
@@ -222,7 +250,7 @@ test('shipped JavaScript has no network, storage, or analytics calls', () => {
   assert.match(contentJs, /fetchImageDataUrls/, 'fetch must be wrapped in fetchImageDataUrls');
 });
 
-test('CI is read-only and pins every action by full commit SHA', () => {
+test('PR quality CI is read-only and pins every action by full commit SHA', () => {
   const workflow = read('.github/workflows/ci.yml');
   assert.match(workflow, /permissions:\s*\n\s+contents: read/);
   assert.doesNotMatch(workflow, /pull_request_target/);
@@ -311,12 +339,15 @@ test('the feature checklist covers every option the popup offers', () => {
   const options = [
     ['chk-images', /All attachment types|Files are opt-in/],
     ['chk-batch', /Whole-Project export/],
+    ['chk-html', /static HTML|local server/],
   ];
 
   for (const [id, expected] of options) {
     assert.match(popupHtml, new RegExp('id="' + id + '"'), `popup.html must still offer ${id}`);
     assert.match(features, expected, `FEATURES.md must describe the ${id} option`);
   }
+  assert.match(popupHtml, /id="status"[^>]*role="status"[^>]*aria-live="polite"/,
+    'export results must be announced to screen-reader users');
 
   // The stamp is no longer an option, so the checklist must not describe one —
   // otherwise the list grows stale in the direction nothing detects: an item that

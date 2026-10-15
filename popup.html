@@ -8,7 +8,8 @@
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
-      width: 280px;
+      width: 100%;
+      min-width: 240px;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       background: #0d0d0d;
       color: #e8e8e8;
@@ -75,6 +76,19 @@
 
     #btn-cancel:hover { color: #e05252; border-color: #e0525266; }
     #btn-cancel.visible { display: block; }
+    #btn-show-folder {
+      display: none;
+      width: 100%;
+      margin-top: 8px;
+      padding: 9px 16px;
+      background: transparent;
+      color: #ddd;
+      border: 1px solid #3a3a3a;
+      border-radius: 10px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    #btn-show-folder.visible { display: block; }
     #btn-pause {
       display: none;
       width: 100%;
@@ -169,13 +183,13 @@
     </div>
   </div>
 
-  <button id="btn-copy">Copy as Markdown</button>
+  <button id="btn-copy">Save Markdown</button>
   <button id="btn-pause">Pause</button>
   <button id="btn-cancel">Stop scanning</button>
+  <button id="btn-show-folder" type="button">Show export folder</button>
 
-  <!-- Two options, not three. "Re-export with a date-time stamp" was removed in
-       1.3.0: it changed the FILENAME and nothing else, which read as if it made
-       re-exporting work somehow differently. Every export is stamped now. -->
+  <!-- "Re-export with a date-time stamp" was removed in 1.3.0: it changed the
+       FILENAME and nothing else. Every export is stamped now. -->
   <label class="toggle">
     <input type="checkbox" id="chk-images" checked />
     <span>Save .md + files to chatgpt-export/</span>
@@ -183,16 +197,22 @@
 
   <label class="toggle">
     <input type="checkbox" id="chk-batch" />
-    <span>Export all sidebar conversations (project batch)</span>
+    <span>Sync new and updated chats from the sidebar</span>
   </label>
 
-  <p id="batch-warning" class="batch-warning">Keep this popup open until the batch finishes. Closing it cancels the run; restart to resume — conversations already exported are skipped. Only conversations the sidebar lists can be exported, so scroll it to the end first.</p>
+  <label class="toggle">
+    <input type="checkbox" id="chk-html" />
+    <span>Save a static HTML site</span>
+  </label>
 
-  <div id="status"></div>
+  <p id="batch-warning" class="batch-warning">Sync saves chats that are new, updated, or unfinished. Unchanged chats stay on disk. Pause keeps the list: you can close the panel and resume on another day. Resume also checks the open sidebar, so a chat that appeared later is included, and a chat already on the list is not dropped. Scroll the sidebar to the end first.</p>
+
+  <div id="status" role="status" aria-live="polite" aria-atomic="true"></div>
 
   <p class="hint">Open a ChatGPT conversation or project,<br>then click the button.</p>
 
   <script src="zip.js"></script>
+  <script src="site.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

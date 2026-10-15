@@ -1,11 +1,18 @@
 {
   "name": "conversation-to-markdown",
-  "version": "1.6.9",
+  "version": "1.7.1",
   "private": true,
   "description": "Copy a complete ChatGPT conversation as clean Markdown.",
   "type": "commonjs",
   "scripts": {
+    "build": "bun scripts/build-runtime.mjs",
+    "pretest": "bun scripts/build-runtime.mjs --check",
     "test": "node --test tests/*.test.js",
-    "check": "node --check content.js && node --check popup.js && node --check zip.js"
+    "format": "biome check --write src scripts",
+    "lint": "biome lint src scripts",
+    "check": "bun scripts/build-runtime.mjs --check && biome check src scripts && node --check content.js && node --check popup.js && node --check background.js && node --check zip.js && node --check site.js && node --check server.js"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.15"
   }
 }

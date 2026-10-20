@@ -364,12 +364,64 @@ with the reason, so an incomplete export never looks complete.
 **Local rewriting.** A downloaded file's link in the Markdown is replaced by its
 local path, so the signed URL does not survive in the document.
 
-**Link hygiene.** Query parameters are stripped from page links; attachment URLs
-keep the parameters their host requires. Verify no `sig=`/`token=` reaches a
-saved page link.
+**Static HTML site.** *(fixture-only)* Checking **Save a static HTML site** writes
+the active conversation as static HTML: user and assistant text, links, code,
+tables, and images. Turns that exist only on an inactive retained app-shell page
+are left out. Text is escaped, so a message cannot become a script on the saved
+page. Retrieved files sit in that chat's directory and the page refers to them
+with relative URLs. A file that was not retrieved is named on the page, and that
+export stays incomplete. Ordinary web links stay links. A product photo on a
+host the extension is not allowed to fetch keeps its name and outbound address,
+without query parameters. The saved page presents that photo as a link rather
+than requesting it when the page opens.
+Chrome accepting the HTML download is not completion: the file address stays
+open until the write finishes, and a refused or interrupted write is reported
+as not saved. Each page carries its own styles for turns, code, tables, and
+images, so opening the file shows a readable page without a separate stylesheet.
+The chat directory also contains `conversation.md`, the same text the page
+shows. The page has **Get in markdown**, a link to that file, and **Copy path
+to markdown version**, which copies the file's path inside the saved site.
+Opened from disk, that button copies the markdown file's own path instead.
+A saved attachment already named `conversation.md` keeps that name, and the
+note is written as `conversation-export.md`. The copy control is a fixed
+script; conversation text is not placed in it. Each code block has **Copy
+code**. The script reads the code from the page when the button is clicked
+and does not contain the conversation. The archive index has a search box,
+and a chat saved incompletely is marked on that index. An index written by a
+later run still links to chat pages already downloaded and keeps their incomplete
+badges until a page and newer completion marker both land. A chat page is written
+when that chat finishes, before the next conversation is scanned. A conversation
+whose Markdown is already on disk is still written as HTML until its page and
+a newer `export-complete.txt` are both present. The status line names
+`chatgpt-export/html/` and the log file, and **Show export folder** reveals
+the download.
+
+**Execution log.** *(fixture-only)* A run that saves files writes
+`chatgpt-export/logs/<run>.json` and, for an HTML site, `export-log.json` in
+that folder. The file is overwritten as the run proceeds, so a crash keeps the
+last flush. It records the phase, the outcome, counts, the conversation id and
+title, and a sanitized error. It does not contain message text, signed URLs,
+or the session token. A clipboard-only copy does not write the file.
+
+**Project structure in the HTML archive.** *(fixture-only)* Chats that belong to
+a project are grouped under that project. Chats with no project stay in their
+own directories and remain addressable from the index. The index links to a
+project page, and that page links to each of its chats. Project directories
+include the project id, so namesakes remain separate. Two chats with the same
+title do not share a directory: the folder name ends with `~` and that chat's
+id, the same boundary a batch Markdown filename uses, so the later chat does
+not replace the earlier one. The Markdown folder layout is unchanged.
+
+**Link hygiene.** Query parameters are stripped from ordinary page and external
+image links; ChatGPT attachment URLs keep the parameters their host requires.
+Verify no `sig=`/`token=` reaches an ordinary saved page link, and opening the
+saved page does not request an external image host.
 
 **Saving is enabled by default.** Each popup opens with the save option checked.
-Uncheck it for clipboard-only output. With the save option unticked, a plain copy makes **no
+Uncheck it for clipboard-only output. The action button names the choice:
+**Save Markdown** when that option is on, **Save HTML site** when only the
+static HTML option is on, **Save Markdown and HTML** when both are on, and
+**Copy as Markdown** when neither is on. With the save option unticked, a plain copy makes **no
 network request of any kind** — enforced by a test as well as by the privacy
 policy.
 
@@ -398,43 +450,108 @@ navigating mid-run: the .md must land.
 
 ## Batch export (Projects)
 
+**Backup sync.** *(fixture-only)* With the sidebar sync ticked, the run saves
+chats that are new, that gained or lost messages, or whose last save was
+incomplete. A chat whose update time, newest message, and message count match
+the index stays on disk and is reported as unchanged. Without an index entry,
+the chat is exported again when no finished file is on disk. A finished file
+whose metadata cannot be read is left closed and is not recorded as unchanged.
+The next run that can read the metadata still compares it. A finished file with
+readable metadata and no index entry is exported once. An attachment that cannot be retrieved or whose download
+is interrupted, and a failed HTML page or index, leave the chat retryable instead
+of banking it as complete. Resuming a paused backup walks the open sidebar
+again and appends chats in the saved job's projects that were not on the saved list.
+A chat that was already on the list stays there when this sidebar does not show
+it. Separate panels keep separate unfinished lists; reopening a Project offers
+its matching saved job. For personal chats, resume uses the saved list and a new
+sync is needed to discover later chats because the sidebar alone cannot prove
+the account is the same. Pause appears after the list is stored; a storage failure warns that closing
+the panel cannot resume it. A failed or partial run retains its saved list. Verify
+by pausing, then adding a conversation and resuming: the new chat is
+exported, an unchanged chat is not written again, and a chat that was on the
+saved list but is absent from the sidebar is still exported. If no sidebar scroll
+container can be found, the run reports that list coverage was not confirmed.
+
 **Whole-Project export.** Every conversation in a Project exports in one run,
 each into its own folder, optionally bundled into one `.zip`. Choosing a batch
-switches file saving on and holds it there: an archive built without it contains
-signed, short-lived LINKS rather than files, so it looks complete on the day it
-runs and is empty hours later. Verify the save option is ticked and disabled the
-moment the batch box is ticked, and released when it is unticked.
+while the HTML option is off switches file saving on and holds it there: a
+markdown archive built without it contains signed, short-lived LINKS rather
+than files, so it looks complete on the day it runs and is empty hours later.
+Verify the save option is ticked and disabled the moment that batch box is
+ticked, and released when it is unticked. With **Save a static HTML site**
+ticked, the markdown option stays the user's. A refused markdown write must
+still leave that chat's HTML page: the page used to be recorded only after
+the markdown file succeeded, so the forced markdown path dropped it.
 
 **List completeness.** The virtualized sidebar is walked to the end and every row
 verified as observed with no gaps. An unconfirmed walk is reported as
 unconfirmed. Verify on a Project of 100+ conversations — an unmatched pagination
 control used to make a partial list report as complete.
 
+**Sidebar history Retry (opt-in).** *(fixture-only)* When ChatGPT shows a settled
+**Retry** control in the sidebar history list, the walk stops and reports the
+list as incomplete unless **When history shows Retry, wait and click it (up to
+5×)** is ticked. With that option on, the walk waits one minute per attempt and
+clicks Retry up to five times, then continues if the control disappears. Verify
+with the fixture: default off leaves `history-rate-limited`; opt-in reveals the
+hidden rows.
+
+**ChatGPT Retry screen.** *(fixture-only)* A conversation page with no messages
+and one Retry button in the main focus area, or a sidebar history status with a
+Retry button, means ChatGPT refused the read after too many page opens. The
+export waits one minute, clicks that button, and continues when the thread is
+on the page. It tries up to five times. If the screen remains, the batch stops
+and the saved job stays resumable, so a later run can export the chats that
+were not opened. The page shows no countdown. The one minute is the batch's
+existing call window; the time ChatGPT needs to recover was not measured. A
+live check needs a page ChatGPT is currently refusing.
+
 **Any interface language.** Pagination, titles and download controls are located
 by page structure, not English wording. Verify with the browser language set to
 Russian **and** to one other language: ChatGPT translates its UI by browser
 locale, not by account setting.
 
-**Long-run survival.** Transient failures retry with capped backoff; a dropped
-network or unreachable site pauses the run instead of consuming the remaining
-list; pause, resume and cancel all work, and cancelling keeps what landed.
+**Long-run survival.** *(fixture-only)* The toolbar button opens a side panel.
+Clicking the page does not close it, so the export keeps running. Transient
+failures retry with capped backoff. A dropped network, an unreachable site, or
+an HTTP rate-limit response holds the run instead of skipping the conversation.
+The on-page Retry screen is waited out and clicked; if it stays, the run stops
+before the next chat. The batch starts at most 30 ChatGPT calls per minute, counted as 4 for each page
+load plus the extension's own metadata and file reads. A continuous export
+began receiving errors after about 50 sessions; the rate that still succeeds
+was not measured, and 30 sits under that burst. Pause stores the batch. Closing
+the panel and coming back later, including on another day, offers **Resume
+saved export**. Resume checks the open sidebar for chats added to the saved
+job's projects since the pause. A finished run hides Pause. A resumed run stamps new files with the time of that resume,
+so a chat that grew during the pause is written beside the earlier file.
+Cancel keeps what landed.
 
-**Navigation correctness.** Each conversation is navigated to, the content script
-re-injected into the new document, and the thread confirmed rendered before
-capture. Verify the exported count matches the conversations actually saved —
-before 1.2.0 the counter counted attempts, and a whole batch could write nothing
-while reporting progress.
+**Navigation correctness.** *(fixture-only)* A conversation that still needs a
+file is navigated to, the content script re-injected into the new document, and
+the thread confirmed rendered before capture. A chat whose finished file is
+already on disk is not opened when its metadata matches the index, or when that
+metadata cannot be read. Verify the exported count matches the conversations
+actually saved — before 1.2.0 the counter counted attempts, and a whole batch
+could write nothing while reporting progress.
 
-**Resume.** A restarted export skips what already landed, identifying each
-conversation by its ChatGPT id, so conversations sharing a title (several called
-"Untitled") never mask one another. Verify by deleting one exported file and
-re-running: that conversation must be re-exported, the rest skipped.
+**Resume.** *(fixture-only)* A restarted export continues with chats that have
+no finished file before it reopens chats that already have one, identifying
+each conversation by its ChatGPT id, so conversations sharing a title (several
+called "Untitled") never mask one another. The metadata check uses the open
+tab and does not open a chat only to make the check. A finished file whose
+metadata cannot be read is left closed and is not reported as unchanged.
+Verify by deleting one exported file and re-running: that conversation must be
+re-exported, the rest skipped. Verify a stop on the Retry screen, then resume:
+chats already on disk stay closed, and a chat that was never saved is opened.
 
-**Unchanged conversations are skipped.** A conversation whose metadata matches
-what was recorded is skipped without being re-read. Verify the run reports them
-as unchanged. This decision reads the export INDEX, never a filename — with every
-export stamped, a rebuilt filename can never match, so a build that fell back to
-name matching would re-export the whole project on every run.
+**Unchanged conversations are skipped.** *(fixture-only)* A conversation whose
+metadata matches what was recorded, and whose finished file is still in download
+history, is skipped without opening its page. Verify the run reports them as
+unchanged. This decision reads the export INDEX, never a filename alone — with
+every export stamped, a rebuilt filename can never match, so a build that fell
+back to name matching would re-export the whole project on every run. A missing
+file is still exported when the index matches, because a deleted download is
+not a finished backup.
 
 **Grown conversations get a new dated copy.** A conversation that gained messages
 is written beside the earlier file under its own stamp; the old file is
@@ -442,8 +559,8 @@ untouched, because a Chrome extension cannot append to a file. Verify by adding 
 message to an exported conversation and re-running: two files, both readable.
 
 **Every export is stamped.** The filename always carries the date and time the
-export was taken, so a folder of backups is readable without opening the files
-and no export silently replaces another. Verify that a second run of the same
+export was taken plus a unique suffix, so two Markdown exports in the same minute
+keep separate filenames. Verify that a second run of the same
 project produces new dated files and leaves the earlier ones untouched. The
 separator is a DOUBLE hyphen: `slugifyTitle` turns spaces into single hyphens, so
 a single one would be indistinguishable from a word break in the title.
@@ -484,17 +601,24 @@ one version number with no way to tell them apart from the browser.
 
 ## Privacy and permissions
 
-**Local only.** No telemetry, no analytics, no server, no third party. The
-developer has no access to conversations, files or clipboard.
+**Local only.** The extension sends no telemetry and no analytics, and it starts
+no server. A separate local server, `server.js`, can host the saved HTML folder
+on this computer. It listens on 127.0.0.1, answers GET and HEAD, and accepts no
+uploads. It does not contact ChatGPT or any third party. The developer has no
+access to conversations, files or clipboard.
 
 **Permission set.** Exactly `clipboardWrite`, `scripting`, `downloads`,
-`storage`. Locked by an exact-set test: an added permission must be a deliberate
-edit. Verify the Web Store listing's permission warnings match.
+`storage`, `sidePanel`. Locked by an exact-set test: an added permission must
+be a deliberate edit. `sidePanel` keeps the export UI open beside the page. It
+does not grant host access. Verify the Web Store listing's permission warnings
+match.
 
 **The export index.** Five scalars per exported conversation, in
 `chrome.storage.local`, never `sync`. No conversation content, markdown or title
-is stored — enforced by test. Verify the index survives a browser restart and
-that removing the extension discards it.
+is stored in the index — enforced by test. A paused batch stores the
+conversation id, page address, and title in a separate record, and does not
+store message text. Verify the index survives a browser restart and that
+removing the extension discards both records.
 
 **Privacy policy accuracy.** `PRIVACY.md` describes every declared permission; a
 test fails if one is undocumented.

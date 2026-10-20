@@ -15,3 +15,6 @@ coverage/
 # Build output: the submission package is attached to a GitHub Release,
 # not tracked in git.
 dist/
+
+# Local page dumps. They can contain a real conversation.
+inbox/

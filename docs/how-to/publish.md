@@ -25,14 +25,25 @@ attachment backup or universal ChatGPT-layout coverage.
 1. Compare the version in the [store listing](https://chromewebstore.google.com/detail/conversation-to-markdown/jhnhkmnignbhmcjbhoihdbjhjfljpili), the publisher dashboard (including pending submissions), and `manifest.json`. Use a version greater than the preceding store package.
 2. Keep `manifest.json`, `package.json`, `CHANGELOG.md`, and `FEATURES.md` consistent. One release gets one version bump; local verification builds are not evidence of a store release.
 3. Review the [feature checklist](../../FEATURES.md) against the live site. Test a long conversation, uploaded files, generated files, clipboard mode, and the batch modes being advertised. Check actual file bytes and links, not only download acceptance or unit tests.
-4. Run `npm test` and `npm run check`. Stage any new files before testing because the public-surface gate reads tracked files. Review every skipped test.
-5. Commit the reviewed changes and record the exact release revision. Merge through the repository's normal pull-request process, then tag that revision.
+4. Run `mise run setup`, then `npm test` and `npm run check`. Stage any new files before testing because the public-surface gate reads tracked files. Review every skipped test.
+5. Commit the reviewed changes and record the exact release revision. Merge through the repository's normal pull-request process. Update the top `CHANGELOG.md` entry with dated Web Store status; the release uses that entry as its notes.
+6. Assign an annotated `vVERSION` tag to that commit on `main` and push the tag to the release repository. This is the publication step after the manual checks:
+
+   ```sh
+   git tag -a vVERSION MAIN_COMMIT_SHA -m "Release vVERSION"
+   git push origin vVERSION
+   ```
+
+   The release workflow verifies the tag, runs tests, packages that exact commit,
+   and publishes a stable GitHub release marked Latest with its ZIP and checksum.
+   A tag on another branch or with a version mismatch fails before publication.
 
 ## Build the upload package
 
 From a clean checkout of the intended committed revision:
 
 ```sh
+mise run setup
 npm test
 npm run check
 bash package-extension.sh HEAD
@@ -56,9 +67,11 @@ On macOS, verify a downloaded release asset from its containing directory:
 shasum -a 256 -c conversation-to-markdown-vVERSION.zip.sha256
 ```
 
-Replace `VERSION` with the release version. Attach this same ZIP and checksum — the file you upload to the store — to the
-GitHub release for the same commit. Include verified behavior, known limitations,
-and test results in the release notes. This package is for the standard ZIP
+Replace `VERSION` with the release version. After the tag workflow succeeds,
+download its ZIP and checksum from GitHub Releases, verify them, and upload that
+exact ZIP to the Web Store. The local build above is a preflight check. Keep
+verified behavior, known limitations, test results, and dated store status in
+the top CHANGELOG entry before tagging. This package is for the standard ZIP
 upload flow; if the store item already uses Verified CRX Uploads, follow the
 [official signing instructions](https://developer.chrome.com/docs/webstore/update#protect-your-package-updates)
 using the existing signing key instead.
@@ -124,17 +137,20 @@ translated interface. Its permission-justification fields are separate from the
 store description. Complete every field shown for the uploaded package before
 submitting the update. In particular, use this justification for `storage`:
 
-> The storage permission keeps an export metadata index and the latest error in
-> chrome.storage.local. The index supports resuming batch exports and finding
-> conversations updated since their last export. The error record supports
+> The storage permission keeps an export metadata index, one paused batch, and
+> the latest error in chrome.storage.local. The index supports resuming batch
+> exports and finding conversations updated since their last export. The paused
+> batch keeps conversation ids, addresses, and titles so a run can continue on
+> a later day. Message text is not stored. The error record supports
 > troubleshooting. Conversation text, attachment contents, and authentication
 > tokens are not stored. This data stays on the user's device and is not synced
 > or sent to the developer.
 
 The other declared permissions have distinct purposes: `scripting` runs the
 exporter in the ChatGPT tab, `clipboardWrite` copies Markdown when clipboard
-mode is selected, and `downloads` saves exported files and checks export
-download history for batch resume. The declared ChatGPT and file-service hosts
+mode is selected, `downloads` saves exported files and checks export
+download history for batch resume, and `sidePanel` shows the controls in a
+side panel so a click on the page does not cancel a running export. The declared ChatGPT and file-service hosts
 are used to read conversations and retrieve supported attachments with the
 user's existing session. State the single purpose as exporting ChatGPT
 conversations and supported attachments to local Markdown files or the

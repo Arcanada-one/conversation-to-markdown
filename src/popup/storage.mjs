@@ -180,11 +180,18 @@ function mergeBackupConversations(saved, discovered) {
   return { conversations: out, added: added };
 }
 
-async function readSidebarConversations(tabId) {
+async function readSidebarConversations(tabId, walkOptions) {
+  var supplied = walkOptions || {};
+  var maxHistoryRetryClicks =
+    typeof supplied.maxHistoryRetryClicks === 'number'
+      ? supplied.maxHistoryRetryClicks
+      : supplied.autoHistoryRetry
+        ? 5
+        : 0;
   await chrome.scripting.executeScript({ target: { tabId: tabId }, files: ['content.js'] });
   var listResult = await chrome.scripting.executeScript({
     target: { tabId: tabId },
-    func: async function () {
+    func: async function (retryBudget) {
       // Stop during the history Retry wait reads this flag. The walk sleeps
       // in one-second slices, so the flag has to exist before the first slice.
       if (typeof window !== 'undefined') {
@@ -194,13 +201,14 @@ async function readSidebarConversations(tabId) {
       // reader is the fallback only: it can return a subset, and a subset
       // exported as "the whole Project" is invisible to the user.
       if (typeof collectSidebarConversations === 'function') {
-        return await collectSidebarConversations();
+        return await collectSidebarConversations({ maxHistoryRetryClicks: retryBudget });
       }
       if (typeof listSidebarConversations === 'function') {
         return { conversations: listSidebarConversations(), complete: false, reason: 'no-collector' };
       }
       return { conversations: [], complete: false, reason: 'no-collector' };
     },
+    args: [maxHistoryRetryClicks],
   });
   var listed = listResult?.[0]?.result || {};
   return {

@@ -488,6 +488,14 @@ verified as observed with no gaps. An unconfirmed walk is reported as
 unconfirmed. Verify on a Project of 100+ conversations — an unmatched pagination
 control used to make a partial list report as complete.
 
+**Sidebar history Retry (opt-in).** *(fixture-only)* When ChatGPT shows a settled
+**Retry** control in the sidebar history list, the walk stops and reports the
+list as incomplete unless **When history shows Retry, wait and click it (up to
+5×)** is ticked. With that option on, the walk waits one minute per attempt and
+clicks Retry up to five times, then continues if the control disappears. Verify
+with the fixture: default off leaves `history-rate-limited`; opt-in reveals the
+hidden rows.
+
 **ChatGPT Retry screen.** *(fixture-only)* A conversation page with no messages
 and one Retry button in the main focus area, or a sidebar history status with a
 Retry button, means ChatGPT refused the read after too many page opens. The
@@ -622,7 +630,7 @@ match the CHANGELOG's top entry, and users must never see a gap. The last entry
 below is the version being shipped; a test checks this line against the CHANGELOG
 so a release cannot be added without revisiting this file.
 
-Version history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8, 1.6.0, 1.6.1, 1.6.2, 1.6.3, 1.6.4, 1.6.5, 1.6.6, 1.6.7, 1.6.8, 1.6.9, 1.7.0, 1.7.1
+Version history: 1.1.2, 1.1.6, 1.1.7, 1.1.8, 1.4.0, 1.5.0, 1.5.1, 1.5.2, 1.5.3, 1.5.4, 1.5.5, 1.5.6, 1.5.7, 1.5.8, 1.6.0, 1.6.1, 1.6.2, 1.6.3, 1.6.4, 1.6.5, 1.6.6, 1.6.7, 1.6.8, 1.6.9
 
 The latest entry identifies the prepared local build; it does not imply Chrome
 Web Store publication. Attachment retrieval is unchanged in 1.6.0.

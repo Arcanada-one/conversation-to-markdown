@@ -87,6 +87,7 @@ test('uses a neutral public identity throughout the extension', () => {
   assert.equal(manifest.side_panel && manifest.side_panel.default_path, 'popup.html');
   assert.equal(manifest.background && manifest.background.service_worker, 'background.js');
   assert.equal(manifest.action.default_popup, undefined);
+  assert.equal(manifest.minimum_chrome_version, '114');
   // The manifest only names the panel document. Drive the worker entrypoint:
   // a string match can pass while the toolbar click still does nothing.
   const listeners = {};
@@ -340,6 +341,7 @@ test('the feature checklist covers every option the popup offers', () => {
     ['chk-images', /All attachment types|Files are opt-in/],
     ['chk-batch', /Whole-Project export/],
     ['chk-html', /static HTML|local server/],
+    ['chk-history-retry', /history Retry|sidebar Retry/i],
   ];
 
   for (const [id, expected] of options) {

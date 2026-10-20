@@ -44,6 +44,11 @@ function safeUrl(url) {
   return /^https?:\/\//i.test(value);
 }
 
+function linkRel(url) {
+  var value = String(url || '');
+  return value.indexOf('./') === 0 ? '' : ' rel="noopener noreferrer"';
+}
+
 function fileNameFromUrl(url) {
   try {
     var pathname = new URL(url).pathname;
@@ -159,7 +164,8 @@ function renderInline(src) {
         var imageLabel = image[1].replace(/\\([\[\]\\])/g, '$1');
         out += imageUrl.indexOf('./') === 0
           ? '<img alt="' + escapeHtml(imageLabel) + '" src="' + escapeHtml(imageUrl) + '">'
-          : '<a href="' + escapeHtml(imageUrl) + '">Open image: ' + escapeHtml(imageLabel || 'image') + '</a>';
+          : '<a href="' + escapeHtml(imageUrl) + '"' + linkRel(imageUrl) + '>Open image: ' +
+            escapeHtml(imageLabel || 'image') + '</a>';
         i += image[0].length;
         continue;
       }
@@ -168,7 +174,8 @@ function renderInline(src) {
       var link = /^\[((?:\\.|[^\]\\])*)\]\((?:<([^<>]+)>|([^)\s]+))\)/.exec(text.slice(i));
       var linkUrl = link && (link[2] || link[3]);
       if (link && safeUrl(linkUrl)) {
-        out += '<a href="' + escapeHtml(linkUrl) + '">' + escapeHtml(link[1].replace(/\\([\[\]\\])/g, '$1')) + '</a>';
+        out += '<a href="' + escapeHtml(linkUrl) + '"' + linkRel(linkUrl) + '>' +
+          escapeHtml(link[1].replace(/\\([\[\]\\])/g, '$1')) + '</a>';
         i += link[0].length;
         continue;
       }
@@ -300,6 +307,9 @@ function documentStyle() {
 
 function documentShell(title, body, tail) {
   return '<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n' +
+    '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; ' +
+    'style-src \'unsafe-inline\'; img-src data: https: file:; script-src \'unsafe-inline\'; ' +
+    'base-uri \'none\'; form-action \'none\'">\n' +
     '<meta name="viewport" content="width=device-width, initial-scale=1">\n' +
     '<title>' + escapeHtml(title) + '</title>\n' + documentStyle() +
     '\n</head>\n<body>\n<h1>' + escapeHtml(title) + '</h1>\n' + body +

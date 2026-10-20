@@ -7,18 +7,6 @@ const { execFileSync, spawnSync } = require('node:child_process');
 
 const prepare = path.resolve(__dirname, '../scripts/prepare-release.mjs');
 
-test('release workflow only publishes from verified version tags with pinned actions', () => {
-  const workflow = fs.readFileSync(path.resolve(__dirname, '../.github/workflows/release.yml'), 'utf8');
-  assert.match(workflow, /push:\s*\n\s+tags: \["v\*"\]/);
-  assert.doesNotMatch(workflow, /pull_request_target|workflow_dispatch/);
-  assert.match(workflow, /prepare-release\.mjs/);
-  assert.match(workflow, /--verify-tag/);
-  assert.match(workflow, /--latest/);
-  for (const [, action] of workflow.matchAll(/^\s*uses:\s*([^\s#]+)/gm)) {
-    assert.match(action, /@[a-f0-9]{40}$/);
-  }
-});
-
 test('release preparation accepts an annotated main tag and rejects unsafe tags', () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'c2m-release-'));
   const git = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();

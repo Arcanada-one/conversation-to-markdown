@@ -5,6 +5,7 @@ const status = document.getElementById('status');
 const chkImages = document.getElementById('chk-images');
 const chkBatch = document.getElementById('chk-batch');
 const chkHtml = document.getElementById('chk-html');
+const chkHistoryRetry = document.getElementById('chk-history-retry');
 const batchWarning = document.getElementById('batch-warning');
 const btnShowFolder = document.getElementById('btn-show-folder');
 
@@ -95,6 +96,7 @@ export {
   btnPause,
   btnShowFolder,
   chkBatch,
+  chkHistoryRetry,
   chkHtml,
   chkImages,
   exportButtonLabel,

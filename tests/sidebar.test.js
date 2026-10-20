@@ -1211,7 +1211,6 @@ test('a sidebar that still shows history Retry is not a complete list', async ()
     quietRounds: 1,
     finalSweep: false,
     expandProjects: false,
-    maxHistoryRetryClicks: 0,
   });
   assert.equal(walked.complete, false);
   assert.equal(walked.reason, 'history-rate-limited');

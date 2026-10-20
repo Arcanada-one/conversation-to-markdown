@@ -34,6 +34,7 @@ import {
   btnCancel,
   btnPause,
   chkBatch,
+  chkHistoryRetry,
   chkHtml,
   chkImages,
   refreshExportButtonLabel,
@@ -287,6 +288,7 @@ async function resumeSavedBatch() {
       batchStamp: formatExportTimestamp(),
       buildZip: true,
       downloadHtml: !!job.downloadHtml,
+      autoHistoryRetry: !!job.autoHistoryRetry,
       conversations: job.conversations,
       discover: true,
       onProgress: function (index, total, title) {
@@ -400,6 +402,7 @@ btn.addEventListener('click', async () => {
         batchStamp: batchStamp,
         buildZip: true,
         downloadHtml: !!(chkHtml && chkHtml.checked),
+        autoHistoryRetry: !!(chkHistoryRetry && chkHistoryRetry.checked),
         onProgress: function (index, total, title) {
           btn.textContent = 'Exporting ' + formatBatchProgress(index, total, title);
         },

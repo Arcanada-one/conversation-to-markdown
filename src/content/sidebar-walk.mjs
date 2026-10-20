@@ -55,7 +55,9 @@ async function collectSidebarConversations(options) {
   // measured on 2026-10-14; the page shows a Retry button and no countdown.
   // Kept here because this walk runs in the page, not the popup.
   const rateLimitWaitMs = supplied.rateLimitWaitMs == null ? 60000 : supplied.rateLimitWaitMs;
-  const maxHistoryRetryClicks = supplied.maxHistoryRetryClicks == null ? 5 : supplied.maxHistoryRetryClicks;
+  // Default off: auto-clicking ChatGPT's history Retry looks like automated
+  // traffic. The popup passes a positive budget only when the user opts in.
+  const maxHistoryRetryClicks = supplied.maxHistoryRetryClicks == null ? 0 : supplied.maxHistoryRetryClicks;
   // Projects start collapsed; opening one is a click plus a fetch.
   const expandProjects = supplied.expandProjects !== false;
   const maxProjectExpansions = supplied.maxProjectExpansions === undefined ? 40 : supplied.maxProjectExpansions;

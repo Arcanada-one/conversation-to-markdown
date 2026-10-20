@@ -1,78 +1,74 @@
 (() => {
   var __defProp = Object.defineProperty;
-  var __returnValue = (v) => v;
-  function __exportSetter(name, newValue) {
-    this[name] = __returnValue.bind(null, newValue);
-  }
   var __export = (target, all) => {
     for (var name in all)
       __defProp(target, name, {
         get: all[name],
         enumerable: true,
         configurable: true,
-        set: __exportSetter.bind(all, name)
+        set: (newValue) => all[name] = () => newValue
       });
   };
 
   // src/content/export.mjs
   var exports_export = {};
   __export(exports_export, {
-    ATTACHMENT_CHIP_SELECTORS: () => ATTACHMENT_CHIP_SELECTORS,
-    RATE_LIMIT_PAGE_ERROR: () => RATE_LIMIT_PAGE_ERROR,
-    UNPREVIEWABLE_FORMATS: () => UNPREVIEWABLE_FORMATS,
-    activeConversationRoot: () => activeConversationRoot,
-    appendPanelArtifacts: () => appendPanelArtifacts,
-    buildConversationMarkdown: () => buildConversationMarkdown,
-    clickConversationRetry: () => clickConversationRetry,
-    collectButtonDownloads: () => collectButtonDownloads,
-    collectSidebarConversations: () => collectSidebarConversations,
-    dedupeNamed: () => dedupeNamed,
-    dismissViewerOverlay: () => dismissViewerOverlay,
-    downloadButtonsInPage: () => downloadButtonsInPage,
-    downloadNameFromUrl: () => downloadNameFromUrl,
-    escapeKeydownEvent: () => escapeKeydownEvent,
-    exportActiveSessionHtml: () => exportActiveSessionHtml,
-    extractAttachments: () => extractAttachments,
-    extractAttachmentsDetailed: () => extractAttachmentsDetailed,
-    extractConversationTitle: () => extractConversationTitle,
-    extractImages: () => extractImages,
-    extractTurn: () => extractTurn,
-    fetchConversationArtifacts: () => fetchConversationArtifacts,
-    fetchConversationMetadata: () => fetchConversationMetadata,
-    fetchImageDataUrls: () => fetchImageDataUrls,
-    fetchSessionToken: () => fetchSessionToken,
-    filterButtonsAgainstPanel: () => filterButtonsAgainstPanel,
-    findButtonsByScrolling: () => findButtonsByScrolling,
-    findCollapsedProjectRows: () => findCollapsedProjectRows,
-    findConversationRetryControl: () => findConversationRetryControl,
-    findHistoryRetryControl: () => findHistoryRetryControl,
-    findScrollContainer: () => findScrollContainer,
-    findShowMoreControl: () => findShowMoreControl,
-    findSidebarScroller: () => findSidebarScroller,
-    foldForNameMatching: () => foldForNameMatching,
-    getConversationMarkdown: () => getConversationMarkdown,
-    knownProjectName: () => knownProjectName,
-    largestCoverageGap: () => largestCoverageGap,
-    listArtifactPanelFiles: () => listArtifactPanelFiles,
-    listSidebarConversations: () => listSidebarConversations,
-    nodeToMarkdown: () => nodeToMarkdown,
-    orderCapturedTurns: () => orderCapturedTurns,
-    parseTurnOrder: () => parseTurnOrder,
-    prefixPartialNotice: () => prefixPartialNotice,
-    projectRowContainer: () => projectRowContainer,
-    readModernPagination: () => readModernPagination,
-    resolveArtifactPanelFiles: () => resolveArtifactPanelFiles,
-    resolveSandboxDownloadUrl: () => resolveSandboxDownloadUrl,
-    sandboxFilesFromMarkdown: () => sandboxFilesFromMarkdown,
-    sandboxPathsFromApiMessage: () => sandboxPathsFromApiMessage,
-    scanTurns: () => scanTurns,
-    scrollToConversationStart: () => scrollToConversationStart,
-    slugifyTitle: () => slugifyTitle,
-    stripSidebarLabelSuffix: () => stripSidebarLabelSuffix,
-    titleFromSidebarLink: () => titleFromSidebarLink,
-    turnsOnRoot: () => turnsOnRoot,
+    waitForConversationReady: () => waitForConversationReady,
     waitForArtifactPanel: () => waitForArtifactPanel,
-    waitForConversationReady: () => waitForConversationReady
+    turnsOnRoot: () => turnsOnRoot,
+    titleFromSidebarLink: () => titleFromSidebarLink,
+    stripSidebarLabelSuffix: () => stripSidebarLabelSuffix,
+    slugifyTitle: () => slugifyTitle,
+    scrollToConversationStart: () => scrollToConversationStart,
+    scanTurns: () => scanTurns,
+    sandboxPathsFromApiMessage: () => sandboxPathsFromApiMessage,
+    sandboxFilesFromMarkdown: () => sandboxFilesFromMarkdown,
+    resolveSandboxDownloadUrl: () => resolveSandboxDownloadUrl,
+    resolveArtifactPanelFiles: () => resolveArtifactPanelFiles,
+    readModernPagination: () => readModernPagination,
+    projectRowContainer: () => projectRowContainer,
+    prefixPartialNotice: () => prefixPartialNotice,
+    parseTurnOrder: () => parseTurnOrder,
+    orderCapturedTurns: () => orderCapturedTurns,
+    nodeToMarkdown: () => nodeToMarkdown,
+    listSidebarConversations: () => listSidebarConversations,
+    listArtifactPanelFiles: () => listArtifactPanelFiles,
+    largestCoverageGap: () => largestCoverageGap,
+    knownProjectName: () => knownProjectName,
+    getConversationMarkdown: () => getConversationMarkdown,
+    foldForNameMatching: () => foldForNameMatching,
+    findSidebarScroller: () => findSidebarScroller,
+    findShowMoreControl: () => findShowMoreControl,
+    findScrollContainer: () => findScrollContainer,
+    findHistoryRetryControl: () => findHistoryRetryControl,
+    findConversationRetryControl: () => findConversationRetryControl,
+    findCollapsedProjectRows: () => findCollapsedProjectRows,
+    findButtonsByScrolling: () => findButtonsByScrolling,
+    filterButtonsAgainstPanel: () => filterButtonsAgainstPanel,
+    fetchSessionToken: () => fetchSessionToken,
+    fetchImageDataUrls: () => fetchImageDataUrls,
+    fetchConversationMetadata: () => fetchConversationMetadata,
+    fetchConversationArtifacts: () => fetchConversationArtifacts,
+    extractTurn: () => extractTurn,
+    extractImages: () => extractImages,
+    extractConversationTitle: () => extractConversationTitle,
+    extractAttachmentsDetailed: () => extractAttachmentsDetailed,
+    extractAttachments: () => extractAttachments,
+    exportActiveSessionHtml: () => exportActiveSessionHtml,
+    escapeKeydownEvent: () => escapeKeydownEvent,
+    downloadNameFromUrl: () => downloadNameFromUrl,
+    downloadButtonsInPage: () => downloadButtonsInPage,
+    dismissViewerOverlay: () => dismissViewerOverlay,
+    dedupeNamed: () => dedupeNamed,
+    collectSidebarConversations: () => collectSidebarConversations,
+    collectButtonDownloads: () => collectButtonDownloads,
+    clickConversationRetry: () => clickConversationRetry,
+    buildConversationMarkdown: () => buildConversationMarkdown,
+    appendPanelArtifacts: () => appendPanelArtifacts,
+    activeConversationRoot: () => activeConversationRoot,
+    UNPREVIEWABLE_FORMATS: () => UNPREVIEWABLE_FORMATS,
+    RATE_LIMIT_PAGE_ERROR: () => RATE_LIMIT_PAGE_ERROR,
+    ATTACHMENT_CHIP_SELECTORS: () => ATTACHMENT_CHIP_SELECTORS
   });
 
   // src/content/markdown.mjs
@@ -640,8 +636,8 @@ $$
       if (role !== "user" && !isAssistantInstruction) {
         for (const found of sandboxPathsFromApiMessage(message)) {
           const key = "sbx:" + found.sandboxPath;
-          const parts = (message.content || {}).parts || [];
-          const chunks = (Array.isArray(parts) ? parts : []).concat((message.content || {}).text || "");
+          const parts2 = (message.content || {}).parts || [];
+          const chunks = (Array.isArray(parts2) ? parts2 : []).concat((message.content || {}).text || "");
           const offered = chunks.some(function(part) {
             return typeof part === "string" && part.indexOf("sandbox:" + found.sandboxPath) !== -1;
           });
@@ -750,7 +746,8 @@ $$
         let host = "";
         try {
           host = new URL(resolved).hostname;
-        } catch (_e) {}
+        } catch (_e) {
+        }
         return fail("rejected-url", host);
       }
       return {
@@ -1447,7 +1444,8 @@ $$
     if (Ctor) {
       try {
         return new Ctor("keydown", init);
-      } catch (_e) {}
+      } catch (_e) {
+      }
     }
     return Object.assign({ type: "keydown" }, init);
   }
@@ -1464,7 +1462,8 @@ $$
           target.dispatchEvent(escapeKeydownEvent(win));
           return true;
         }
-      } catch (_e) {}
+      } catch (_e) {
+      }
       return false;
     }
     try {
@@ -1479,7 +1478,8 @@ $$
           break;
         }
       }
-    } catch (_e) {}
+    } catch (_e) {
+    }
     if (!closed) {
       try {
         const target = root.body || root;
@@ -1487,7 +1487,8 @@ $$
           target.dispatchEvent(escapeKeydownEvent(win));
           closed = true;
         }
-      } catch (_e) {}
+      } catch (_e) {
+      }
     }
     return closed;
   }
@@ -1518,7 +1519,8 @@ $$
     let first = null;
     try {
       first = root.querySelector ? root.querySelector("[data-turn-id]") : null;
-    } catch (_e) {}
+    } catch (_e) {
+    }
     const scroller = opts.scroller || (typeof findScrollContainer === "function" && first ? findScrollContainer(first) : null);
     if (!scroller)
       return downloadButtonsInPage(root, opts.panelNames);
@@ -1551,7 +1553,8 @@ $$
     } finally {
       try {
         scroller.scrollTop = originalTop;
-      } catch (_e) {}
+      } catch (_e) {
+      }
     }
     return Array.from(byLabel.values());
   }
@@ -1582,7 +1585,8 @@ $$
             if (rect.bottom > bandBottom)
               bandBottom = rect.bottom;
           }
-        } catch (_e) {}
+        } catch (_e) {
+        }
       }
       if (isExplicitlyUnsupportedTurn(section))
         continue;
@@ -1732,7 +1736,8 @@ $$
         if (settings.onMounted) {
           try {
             settings.onMounted(container);
-          } catch (_e) {}
+          } catch (_e) {
+          }
         }
         const movedDown = Math.abs(logicalTop - lastProgressTop) >= 1;
         if (observation.newIds > 0 || movedDown) {
@@ -2137,9 +2142,9 @@ $$
     candidates.push('a[data-active][href*="/c/"]');
     for (const selector of candidates) {
       const link = root.querySelector(selector);
-      const title = titleFromSidebarLink(link);
-      if (title)
-        return title;
+      const title2 = titleFromSidebarLink(link);
+      if (title2)
+        return title2;
     }
     const title = (root.title || "").trim();
     if (!title)
@@ -2381,7 +2386,8 @@ $$
       try {
         if (typeof window !== "undefined" && window.__c2mScan && window.__c2mScan.cancelled)
           return false;
-      } catch (_e) {}
+      } catch (_e) {
+      }
       const step = Math.min(left, 1000);
       await sleep(step);
       left -= step;
@@ -2398,7 +2404,7 @@ $$
     const maxShowMoreClicks = supplied.maxShowMoreClicks === undefined ? 60 : supplied.maxShowMoreClicks;
     const showMoreSettleMs = supplied.showMoreSettleMs || 1200;
     const rateLimitWaitMs = supplied.rateLimitWaitMs == null ? 60000 : supplied.rateLimitWaitMs;
-    const maxHistoryRetryClicks = supplied.maxHistoryRetryClicks == null ? 5 : supplied.maxHistoryRetryClicks;
+    const maxHistoryRetryClicks = supplied.maxHistoryRetryClicks == null ? 0 : supplied.maxHistoryRetryClicks;
     const expandProjects = supplied.expandProjects !== false;
     const maxProjectExpansions = supplied.maxProjectExpansions === undefined ? 40 : supplied.maxProjectExpansions;
     const projectSettleMs = supplied.projectSettleMs || 1400;
@@ -2559,7 +2565,8 @@ $$
             clickedAny = true;
             await sleep(projectSettleMs);
             absorb();
-          } catch (_e) {}
+          } catch (_e) {
+          }
         }
         if (!clickedAny)
           break;
@@ -2711,7 +2718,8 @@ $$
     }
     try {
       scroller.scrollTop = startTop;
-    } catch (_e) {}
+    } catch (_e) {
+    }
     let reason;
     if (complete) {
       reason = "reached-end";
@@ -2915,15 +2923,15 @@ $$
           },
           scrollToStart: modern ? async function(target) {
             const result = await scrollToConversationStart(target, {
-              readFirstTurn: function(root) {
-                return modernMessageSections(root)[0] || null;
+              readFirstTurn: function(root2) {
+                return modernMessageSections(root2)[0] || null;
               },
-              readFirstTurnId: function(root) {
-                const first = modernMessageSections(root)[0];
+              readFirstTurnId: function(root2) {
+                const first = modernMessageSections(root2)[0];
                 return first ? getSectionTurnId(first) : null;
               },
-              countTurns: function(root) {
-                return modernMessageSections(root).length;
+              countTurns: function(root2) {
+                return modernMessageSections(root2).length;
               },
               readPagination: readModernPagination
             });

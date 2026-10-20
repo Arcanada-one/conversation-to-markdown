@@ -113,6 +113,14 @@ async function runBatchExport(tab, options) {
   var listComplete;
   var listReason;
   var discovered = 0;
+  var sidebarWalk = {
+    maxHistoryRetryClicks:
+      typeof options.maxHistoryRetryClicks === 'number'
+        ? options.maxHistoryRetryClicks
+        : options.autoHistoryRetry
+          ? 5
+          : 0,
+  };
   // A saved list alone is the paused backup. `discover` walks the open sidebar
   // and appends chats that were not on that list. The saved rows are never
   // dropped: the page open days later may be a different project, and following
@@ -121,7 +129,7 @@ async function runBatchExport(tab, options) {
     var found = [];
     var walk = { complete: false, reason: 'unknown' };
     try {
-      walk = await readSidebarConversations(tab.id);
+      walk = await readSidebarConversations(tab.id, sidebarWalk);
       var projects = Object.create(null);
       for (var savedRow of options.conversations) {
         if (savedRow.projectId) projects[String(savedRow.projectId)] = true;
@@ -149,7 +157,7 @@ async function runBatchExport(tab, options) {
     listComplete = options.listComplete !== false;
     listReason = 'saved-job';
   } else {
-    var listed = await readSidebarConversations(tab.id);
+    var listed = await readSidebarConversations(tab.id, sidebarWalk);
     conversations = scopeKnown
       ? listed.conversations.filter(function (row) {
           return (row.projectId || null) === (projectId || null);
@@ -268,6 +276,7 @@ async function runBatchExport(tab, options) {
     batchStamp: batchStamp || runLog.runId,
     downloadImages: !!downloadImages,
     downloadHtml: wantHtmlRun,
+    autoHistoryRetry: !!options.autoHistoryRetry,
     listComplete: listComplete,
     conversations: conversations.map(conversationJobRecord),
   });

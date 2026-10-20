@@ -2,7 +2,6 @@
 .github/CODEOWNERS
 .github/dependabot.yml
 .github/workflows/ci.yml
-.github/workflows/release.yml
 .gitignore
 AGENTS.md
 CHANGELOG.md
@@ -29,6 +28,7 @@ icons/icon48.png
 manifest.json
 mise.toml
 package-extension.sh
+bun.lock
 package-lock.json
 package.json
 popup.html

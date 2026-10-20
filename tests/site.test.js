@@ -182,7 +182,7 @@ test('active session export writes escaped HTML and omits the inactive page', ()
     assert.match(html, /ACTIVE-ASSISTANT-LINE/);
     assert.match(html, /<h2>You said<\/h2>/);
     assert.match(html, /<h2>ChatGPT said<\/h2>/);
-    assert.match(html, /<a href="https:\/\/example.com\/spec">spec<\/a>/);
+    assert.match(html, /<a href="https:\/\/example\.com\/spec" rel="noopener noreferrer">spec<\/a>/);
     assert.match(html, /<pre><code>const active = true;<\/code><\/pre>/);
     assert.match(html, /<td>ACTIVE-CELL<\/td>/);
     assert.match(html, /<img alt="chart" src="\.\/chart\.png">/);
@@ -579,6 +579,18 @@ test('a refused markdown write still leaves the HTML page', async () => {
   } finally {
     fs.rmSync(outputDir, { recursive: true, force: true });
   }
+});
+
+test('exported HTML pages use CSP and noopener on outbound links', () => {
+  const site = require('../site.js');
+  const chat = site.renderSessionHtml({
+    title: 'Links',
+    markdown: 'See [docs](https://example.com/docs) and [local](./note.md).',
+  }).html;
+  assert.match(chat, /Content-Security-Policy/);
+  assert.match(chat, /https:\/\/example\.com\/docs" rel="noopener noreferrer"/);
+  assert.match(chat, /href="\.\/note\.md"/);
+  assert.doesNotMatch(chat, /\.\/note\.md" rel="noopener/);
 });
 
 test('chat pages and the index carry styles for turns, code, tables, and images', () => {

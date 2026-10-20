@@ -1,14 +1,99 @@
+function unescapeMarkdownLabel(raw) {
+  let out = '';
+  const text = String(raw || '');
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '\\' && i + 1 < text.length) {
+      const next = text[i + 1];
+      if (next === '\\' || next === '[' || next === ']') {
+        out += next;
+        i += 1;
+        continue;
+      }
+    }
+    out += ch;
+  }
+  return out;
+}
+
+function readBracketLabel(text, start) {
+  let i = start;
+  let raw = '';
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '\\') {
+      if (i + 1 < text.length) {
+        raw += ch + text[i + 1];
+        i += 2;
+        continue;
+      }
+      raw += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === ']') return { raw, end: i };
+    raw += ch;
+    i += 1;
+  }
+  return null;
+}
+
+function readHttpMarkdownDestination(text, start) {
+  if (text[start] !== '(') return null;
+  let i = start + 1;
+  let url = '';
+  if (text[i] === '<') {
+    i += 1;
+    const urlStart = i;
+    while (i < text.length && text[i] !== '>' && !/\s/.test(text[i])) i += 1;
+    if (text[i] !== '>') return null;
+    url = text.slice(urlStart, i);
+    i += 1;
+    if (text[i] !== ')') return null;
+    i += 1;
+  } else {
+    const urlStart = i;
+    while (i < text.length && text[i] !== ')' && !/\s/.test(text[i])) i += 1;
+    if (text[i] !== ')') return null;
+    url = text.slice(urlStart, i);
+    i += 1;
+  }
+  if (!/^https?:\/\//i.test(url)) return null;
+  return { url, end: i };
+}
+
 /** Read HTTP Markdown references, including escaped labels and angle URLs. */
 function markdownHttpRefs(md) {
   const refs = [];
-  const re = /(!?)\[((?:\\.|[^\]])*)\]\((?:<(https?:\/\/[^>\s]+)>|(https?:\/\/[^)\s]+))\)/g;
-  let match;
-  while ((match = re.exec(md)) !== null) {
+  const text = String(md || '');
+  let i = 0;
+  while (i < text.length) {
+    let image = false;
+    const linkStart = i;
+    if (text[i] === '!' && text[i + 1] === '[') {
+      image = true;
+      i += 2;
+    } else if (text[i] === '[') {
+      i += 1;
+    } else {
+      i += 1;
+      continue;
+    }
+    const label = readBracketLabel(text, i);
+    if (!label) {
+      i = linkStart + 1;
+      continue;
+    }
+    i = label.end + 1;
+    if (text[i] !== '(') continue;
+    const dest = readHttpMarkdownDestination(text, i);
+    if (!dest) continue;
     refs.push({
-      image: match[1] === '!',
-      label: match[2].replace(/\\([\\\[\]])/g, '$1'),
-      url: match[3] || match[4],
+      image,
+      label: unescapeMarkdownLabel(label.raw),
+      url: dest.url,
     });
+    i = dest.end;
   }
   return refs;
 }

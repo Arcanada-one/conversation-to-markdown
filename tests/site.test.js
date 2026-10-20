@@ -581,6 +581,15 @@ test('a refused markdown write still leaves the HTML page', async () => {
   }
 });
 
+test('bindRetrievedFiles finishes quickly on pathological markdown link input', () => {
+  const site = require('../site.js');
+  const evil = '![' + '\\'.repeat(8000);
+  const started = Date.now();
+  const bound = site.bindRetrievedFiles(evil, []);
+  assert.equal(bound.saved.length, 0);
+  assert.ok(Date.now() - started < 500, 'collectMarkdownRefs must not use exponential backtracking');
+});
+
 test('exported HTML pages use CSP and noopener on outbound links', () => {
   const site = require('../site.js');
   const chat = site.renderSessionHtml({

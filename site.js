@@ -76,17 +76,109 @@ function isConversationFileUrl(url) {
   return false;
 }
 
+function unescapeMarkdownLabelSite(raw) {
+  var out = '';
+  var text = String(raw || '');
+  for (var i = 0; i < text.length; i++) {
+    var ch = text.charAt(i);
+    if (ch === '\\' && i + 1 < text.length) {
+      var next = text.charAt(i + 1);
+      if (next === '\\' || next === '[' || next === ']') {
+        out += next;
+        i += 1;
+        continue;
+      }
+    }
+    out += ch;
+  }
+  return out;
+}
+
+function readBracketLabelSite(text, start) {
+  var i = start;
+  var raw = '';
+  while (i < text.length) {
+    var ch = text.charAt(i);
+    if (ch === '\\') {
+      if (i + 1 < text.length) {
+        raw += ch + text.charAt(i + 1);
+        i += 2;
+        continue;
+      }
+      raw += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === ']') return { raw: raw, end: i };
+    raw += ch;
+    i += 1;
+  }
+  return null;
+}
+
+function readHttpMarkdownDestinationSite(text, start) {
+  if (text.charAt(start) !== '(') return null;
+  var i = start + 1;
+  var url = '';
+  if (text.charAt(i) === '<') {
+    i += 1;
+    var urlStart = i;
+    while (i < text.length && text.charAt(i) !== '>' && !/\s/.test(text.charAt(i))) i += 1;
+    if (text.charAt(i) !== '>') return null;
+    url = text.slice(urlStart, i);
+    i += 1;
+    if (text.charAt(i) !== ')') return null;
+    i += 1;
+  } else {
+    var urlStartPlain = i;
+    while (i < text.length && text.charAt(i) !== ')' && !/\s/.test(text.charAt(i))) i += 1;
+    if (text.charAt(i) !== ')') return null;
+    url = text.slice(urlStartPlain, i);
+    i += 1;
+  }
+  if (!/^https?:\/\//i.test(url)) return null;
+  return { url: url, end: i };
+}
+
 /** Image and link URLs in already-captured Markdown. */
 function collectMarkdownRefs(markdown) {
   var refs = [];
   var seen = {};
-  var pattern = /(!?)\[((?:\\.|[^\]\\])*)\]\((?:<(https?:\/\/[^<>]+)>|(https?:\/\/[^)\s]+))\)/g;
-  var match;
-  while ((match = pattern.exec(String(markdown || ''))) !== null) {
-    var url = match[3] || match[4];
-    if (seen[url]) continue;
-    seen[url] = true;
-    refs.push({ image: match[1] === '!', label: match[2].replace(/\\([\[\]\\])/g, '$1'), url: url, raw: match[0] });
+  var text = String(markdown || '');
+  var i = 0;
+  while (i < text.length) {
+    var image = false;
+    var linkStart = i;
+    if (text.charAt(i) === '!' && text.charAt(i + 1) === '[') {
+      image = true;
+      i += 2;
+    } else if (text.charAt(i) === '[') {
+      i += 1;
+    } else {
+      i += 1;
+      continue;
+    }
+    var label = readBracketLabelSite(text, i);
+    if (!label) {
+      i = linkStart + 1;
+      continue;
+    }
+    i = label.end + 1;
+    if (text.charAt(i) !== '(') continue;
+    var dest = readHttpMarkdownDestinationSite(text, i);
+    if (!dest) continue;
+    if (seen[dest.url]) {
+      i = dest.end;
+      continue;
+    }
+    seen[dest.url] = true;
+    refs.push({
+      image: image,
+      label: unescapeMarkdownLabelSite(label.raw),
+      url: dest.url,
+      raw: text.slice(linkStart, dest.end),
+    });
+    i = dest.end;
   }
   return refs;
 }

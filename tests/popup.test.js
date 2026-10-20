@@ -691,6 +691,19 @@ test('parseFileRefs collects downloadable attachment links but not arbitrary URL
   assert.equal(popup.isDownloadableFileUrl('http://files.oaiusercontent.com/report.pdf'), false);
 });
 
+test('attachment ref parsing finishes quickly on pathological bracket input', () => {
+  const danglingBackslashes = '[' + '\\'.repeat(8000);
+  const started = Date.now();
+  assert.equal(popup.parseFileRefs(danglingBackslashes).length, 0);
+  assert.equal(popup.parseImageRefs(danglingBackslashes).length, 0);
+  assert.ok(Date.now() - started < 500, 'dangling backslashes must not stall the parser');
+
+  const almostLinks = '[' + '\\]'.repeat(4000);
+  const started2 = Date.now();
+  assert.equal(popup.parseFileRefs(almostLinks).length, 0);
+  assert.ok(Date.now() - started2 < 500, 'repeated escaped brackets must not stall the parser');
+});
+
 test('parses escaped Markdown labels and parenthesized attachment destinations', () => {
   const url = 'https://files.oaiusercontent.com/report(final).pdf';
   const md = '[report \\[final\\].pdf](<' + url + '>)';

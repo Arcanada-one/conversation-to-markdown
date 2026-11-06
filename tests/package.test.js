@@ -31,9 +31,10 @@ function optionalCommandPath(name) {
 test('the submission package builds when Info-ZIP is unavailable', (t) => {
   // The fallback can only be exercised where the fallback tool exists. Skipping
   // is honest here; asserting would report the host's toolchain as a defect in
-  // the packaging script. CI installs 7z, so the path stays covered there.
-  if (!optionalCommandPath('7z')) {
-    t.skip('7z is not installed on this host; the Info-ZIP fallback cannot be exercised');
+  // the packaging script. Homebrew installs 7zz; other hosts may provide 7z.
+  const sevenzip = optionalCommandPath('7z') ? '7z' : optionalCommandPath('7zz') ? '7zz' : null;
+  if (!sevenzip) {
+    t.skip('7-Zip is not installed on this host; the Info-ZIP fallback cannot be exercised');
     return;
   }
   const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'c2m-package-bin-'));
@@ -41,7 +42,7 @@ test('the submission package builds when Info-ZIP is unavailable', (t) => {
   const checksum = `${archive}.sha256`;
   const commands = [
     'bash', 'basename', 'cat', 'dirname', 'git', 'head', 'mkdir', 'mktemp', 'node',
-    'rm', 'sed', 'shasum', 'tar', '7z',
+    'rm', 'sed', 'shasum', 'tar', sevenzip,
   ];
 
   try {
@@ -49,7 +50,16 @@ test('the submission package builds when Info-ZIP is unavailable', (t) => {
       fs.symlinkSync(commandPath(command), path.join(bin, command));
     }
 
-    const output = execFileSync(path.join(root, 'package-extension.sh'), ['HEAD'], {
+    // Package an isolated snapshot of the shipped files; the real index and
+    // unrelated untracked files remain untouched while a branch is developed.
+    const gitEnv = { ...process.env, GIT_INDEX_FILE: path.join(bin, 'index') };
+    execFileSync('git', ['read-tree', 'HEAD'], { cwd: root, env: gitEnv });
+    execFileSync('git', ['add', '-A', '--',
+      'manifest.json', 'package.json', 'background.js', 'content.js', 'popup.js',
+      'popup.html', 'zip.js', 'site.js', 'icons',
+    ], { cwd: root, env: gitEnv });
+    const ref = execFileSync('git', ['write-tree'], { cwd: root, env: gitEnv, encoding: 'utf8' }).trim();
+    const output = execFileSync(path.join(root, 'package-extension.sh'), [ref], {
       cwd: root,
       encoding: 'utf8',
       env: { ...process.env, PATH: bin },
@@ -66,6 +76,7 @@ test('the submission package builds when Info-ZIP is unavailable', (t) => {
       encoding: 'utf8',
     }).trim().split('\n');
     assert.deepEqual(entries.sort(), [
+      'background.js',
       'content.js',
       'icons/',
       'icons/icon128.png',
@@ -75,6 +86,7 @@ test('the submission package builds when Info-ZIP is unavailable', (t) => {
       'manifest.json',
       'popup.html',
       'popup.js',
+      'site.js',
       'zip.js',
     ].sort());
   } finally {

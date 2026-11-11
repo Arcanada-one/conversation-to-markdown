@@ -28,8 +28,10 @@ git archive --format=tar "$ref" | tar -x -C "$stage"
 
 # The runtime file list. zip.js is REQUIRED: popup.html loads it, and popup.js
 # guards on `typeof buildStoreZip === 'function'`, so omitting it disables the
-# archive feature silently instead of failing loudly.
-files=(manifest.json content.js popup.js popup.html zip.js icons)
+# archive feature silently instead of failing loudly. site.js is REQUIRED for
+# the same reason: popup.html loads it for the static HTML site. server.js is
+# not part of the extension; the user starts it with Node against a saved folder.
+files=(manifest.json background.js content.js popup.js popup.html zip.js site.js icons)
 for f in "${files[@]}"; do
   [ -e "$stage/$f" ] || { echo "missing from $ref: $f" >&2; exit 1; }
 done
@@ -42,6 +44,8 @@ done
   const want=[...Object.values(m.icons||{}),
               ...Object.values((m.action||{}).default_icon||{}),
               ...(m.content_scripts||[]).flatMap(c=>c.js||[]),
+              (m.background||{}).service_worker,
+              (m.side_panel||{}).default_path,
               (m.action||{}).default_popup].filter(Boolean);
   const html=fs.readFileSync("popup.html","utf8");
   for (const s of [...html.matchAll(/src="([^"]+)"/g)].map(x=>x[1])) want.push(s);
@@ -58,12 +62,18 @@ rm -f "$zip_path"
 # across machines. Some release hosts have 7-Zip but not Info-ZIP, so keep a
 # second, explicit ZIP writer instead of making release packaging depend on one
 # host-specific binary. The input list is identical in both branches.
+sevenzip=
+if command -v 7z >/dev/null 2>&1; then
+  sevenzip=7z
+elif command -v 7zz >/dev/null 2>&1; then
+  sevenzip=7zz
+fi
 if command -v zip >/dev/null 2>&1; then
   ( cd "$stage" && zip -rqX "$zip_path" "${files[@]}" -x '.*' -x '__MACOSX/*' )
-elif command -v 7z >/dev/null 2>&1; then
-  ( cd "$stage" && 7z a -tzip -mx=9 "$zip_path" "${files[@]}" >/dev/null )
+elif [ -n "$sevenzip" ]; then
+  ( cd "$stage" && "$sevenzip" a -tzip -mx=9 "$zip_path" "${files[@]}" >/dev/null )
 else
-  echo "cannot build submission package: install zip or 7z" >&2
+  echo "cannot build submission package: install zip or 7z/7zz" >&2
   exit 1
 fi
 ( cd "$out" && shasum -a 256 "$(basename "$zip_path")" > "$(basename "$zip_path").sha256" )
@@ -72,8 +82,8 @@ echo "built $zip_path"
 if command -v unzip >/dev/null 2>&1; then
   unzip -t "$zip_path"
   unzip -l "$zip_path"
-elif command -v 7z >/dev/null 2>&1; then
-  7z t "$zip_path" >/dev/null
-  7z l -ba "$zip_path"
+elif [ -n "$sevenzip" ]; then
+  "$sevenzip" t "$zip_path" >/dev/null
+  "$sevenzip" l -ba "$zip_path"
 fi
 cat "$zip_path.sha256"

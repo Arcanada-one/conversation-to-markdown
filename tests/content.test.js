@@ -32,16 +32,16 @@ test('content.js survives being injected twice into one document', () => {
     module: undefined,
   });
 
-  vm.runInContext(source, context, { filename: 'content.js#1' });
-  // Positive control: the first injection must actually define the binding the
-  // second one would collide with, or this test passes over an empty file.
+  vm.runInContext(source, context, { filename: path.join(__dirname, '..', 'content.js') });
+  // Positive control: the first injection must expose the API used by popup
+  // callbacks, or this test passes over an empty bundle.
   assert.equal(
     context.ATTACHMENT_CHIP_SELECTORS === undefined, false,
-    'the first injection must define the top-level bindings',
+    'the first injection must expose the content API',
   );
 
   assert.doesNotThrow(
-    () => vm.runInContext(source, context, { filename: 'content.js#2' }),
+    () => vm.runInContext(source, context, { filename: path.join(__dirname, '..', 'content.js') }),
     're-injecting into a document that already has the script must be a no-op',
   );
 });
@@ -1871,7 +1871,7 @@ test('derives a filename for an estuary URL that carries no extension', () => {
     decodeURIComponent,
     btoa,
   };
-  vm.runInNewContext(require('fs').readFileSync(popupPath, 'utf8'), context);
+  vm.runInNewContext(require('fs').readFileSync(popupPath, 'utf8'), context, { filename: popupPath });
   const popup = context.module.exports;
 
   const estuary = 'https://chatgpt.com/backend-api/estuary/content?id=file_synth_0002&ts=1&p=fs';
@@ -2512,6 +2512,40 @@ test('preserves sandbox Code Interpreter links visibly in markdown', () => {
   }
 });
 
+test('file links keep bracketed names and parenthesized URLs readable by the downloader', () => {
+  const previousNode = global.Node;
+  const previousLocation = global.location;
+  global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
+  global.location = { href: 'https://' + 'chatgpt.com/c/example' };
+  try {
+    const link = element('a', [textNode('report [final].pdf')], {
+      href: 'https://files.oaiusercontent.com/report(final).pdf',
+    });
+    assert.equal(parser.nodeToMarkdown(link),
+      '[report \\[final\\].pdf](<https://files.oaiusercontent.com/report(final).pdf>)');
+  } finally {
+    global.Node = previousNode;
+    global.location = previousLocation;
+  }
+});
+
+test('external image query strings do not enter exported Markdown', () => {
+  const previousNode = global.Node;
+  const previousLocation = global.location;
+  global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
+  global.location = { href: 'https://' + 'chatgpt.com/c/example' };
+  try {
+    const external = element('img', [], { src: 'https://example.com/picture.png?secret=abc', alt: 'photo' });
+    const signedUrl = 'https://files.oaiusercontent.com/picture.png?' + ['sig', 'abc'].join('=');
+    const attachment = element('img', [], { src: signedUrl, alt: 'file' });
+    assert.equal(parser.nodeToMarkdown(external), '![photo](https://example.com/picture.png)\n\n');
+    assert.equal(parser.nodeToMarkdown(attachment), '![file](' + signedUrl + ')\n\n');
+  } finally {
+    global.Node = previousNode;
+    global.location = previousLocation;
+  }
+});
+
 test('emits visible placeholders for silent-loss media elements', () => {
   const previousNode = global.Node;
   global.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 };
@@ -2717,6 +2751,40 @@ test('lists conversations that live inside a Project', () => {
   assert.equal(listed[0].title, 'Перевод i18n JSON для сайта');
   assert.equal(listed[0].slug, 'Перевод-i18n-JSON-для-сайта');
   assert.equal(listed[1].projectId, null);
+  assert.equal(listed[0].projectTitle, null);
+  assert.equal(listed[1].projectTitle, null);
+});
+
+test('a project conversation takes its folder name from the project row', () => {
+  const projectId = 'g-p-6954db053ec481919faff2151c140cb6';
+  const row = { textContent: 'Qoople' };
+  const container = {
+    querySelector(selector) {
+      return String(selector).indexOf('project-unfurl-row') !== -1 ? row : null;
+    },
+  };
+  const link = {
+    getAttribute(name) {
+      if (name === 'href') return '/g/' + projectId + '/c/chat-1';
+      if (name === 'aria-label') return 'Spec';
+      return null;
+    },
+    querySelector: () => null,
+    textContent: 'Spec',
+    parentElement: container,
+  };
+  container.parentElement = null;
+  const doc = {
+    querySelectorAll(selector) {
+      if (String(selector).indexOf('/c/') === -1) return [];
+      return [link];
+    },
+  };
+  const listed = parser.listSidebarConversations(doc);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].projectId, projectId);
+  assert.equal(listed[0].projectTitle, 'Qoople');
+  assert.equal(listed[0].title, 'Spec');
 });
 
 test('waitForConversationReady resolves when message content mounts', async () => {
@@ -2737,6 +2805,146 @@ test('waitForConversationReady resolves when message content mounts', async () =
       pollMs: 10,
     });
     assert.equal(result.ready, true);
+  } finally {
+    global.document = previousDocument;
+    global.location = previousLocation;
+  }
+});
+
+function conversationRetryDocument(withTurn) {
+  const button = {
+    textContent: 'Retry',
+    disabled: false,
+    clicked: 0,
+    click() {
+      button.clicked += 1;
+    },
+    querySelector() {
+      return null;
+    },
+    getAttribute() {
+      return null;
+    },
+  };
+  const focus = {
+    querySelector() {
+      return null;
+    },
+    querySelectorAll(selector) {
+      return selector === 'button' ? [button] : [];
+    },
+  };
+  const page = {
+    getAttribute(name) {
+      return name === 'data-app-shell-active-page' ? 'true' : null;
+    },
+    querySelector(selector) {
+      if (selector === '[data-app-shell-focus-area="main"]') return focus;
+      if (withTurn && (selector === '[data-turn-id]' || selector === '[data-message-author-role]')) return { id: 't' };
+      return null;
+    },
+    querySelectorAll(selector) {
+      if (selector === 'button') return [button];
+      return [];
+    },
+  };
+  return {
+    button,
+    querySelector(selector) {
+      return selector === '[data-app-shell-active-page]' ? page : null;
+    },
+    querySelectorAll(selector) {
+      return selector === '[data-app-shell-active-page]' ? [page] : [];
+    },
+  };
+}
+
+test('the conversation Retry screen is a rate limit, and a loaded thread is not', async () => {
+  const previousDocument = global.document;
+  const previousLocation = global.location;
+  const retrying = conversationRetryDocument(false);
+  global.location = { pathname: '/c/conv123' };
+  global.document = retrying;
+  try {
+    assert.equal(parser.findConversationRetryControl(retrying), retrying.button);
+    const limited = await parser.waitForConversationReady({
+      conversationId: 'conv123',
+      timeoutMs: 2000,
+      pollMs: 20,
+    });
+    assert.equal(limited.ready, false);
+    assert.equal(limited.rateLimited, true);
+    assert.match(limited.error, /rate limit/);
+    assert.equal(parser.clickConversationRetry(), true);
+    assert.equal(retrying.button.clicked, 1);
+
+    // Positive control: the same panel with a turn is the conversation, and
+    // must not be reported as a limit or clicked.
+    const loaded = conversationRetryDocument(true);
+    global.document = loaded;
+    assert.equal(parser.findConversationRetryControl(loaded), null);
+    const ready = await parser.waitForConversationReady({
+      conversationId: 'conv123',
+      timeoutMs: 2000,
+      pollMs: 20,
+    });
+    assert.equal(ready.ready, true);
+    assert.equal(ready.rateLimited, undefined);
+  } finally {
+    global.document = previousDocument;
+    global.location = previousLocation;
+  }
+});
+
+test('getConversationMarkdown reports the Retry screen instead of an empty conversation', async () => {
+  const previousDocument = global.document;
+  const previousLocation = global.location;
+  const retrying = conversationRetryDocument(false);
+  global.location = { pathname: '/c/conv123' };
+  global.document = retrying;
+  try {
+    const result = await parser.getConversationMarkdown({ downloadFiles: false });
+    assert.equal(result.ok, false);
+    assert.equal(result.rateLimited, true);
+    assert.match(result.error, /rate limit/);
+  } finally {
+    global.document = previousDocument;
+    global.location = previousLocation;
+  }
+});
+
+test('a zero content timeout does not wait out an empty page', { timeout: 1000 }, async () => {
+  // `timeoutMs: 0` is the single-export probe. Treating 0 as "missing" waits
+  // the 30s default on every conversation that has not mounted yet.
+  const previousDocument = global.document;
+  const previousLocation = global.location;
+  global.location = { pathname: '/c/conv123' };
+  global.document = {
+    querySelector() {
+      return null;
+    },
+    querySelectorAll() {
+      return [];
+    },
+  };
+  try {
+    const empty = await parser.waitForConversationReady({
+      conversationId: 'conv123',
+      timeoutMs: 0,
+      pollMs: 50,
+    });
+    assert.equal(empty.ready, false);
+    assert.equal(empty.rateLimited, undefined);
+    assert.match(empty.error, /did not load/);
+
+    // Positive control: messages already on the page are ready at once.
+    global.document = conversationRetryDocument(true);
+    const ready = await parser.waitForConversationReady({
+      conversationId: 'conv123',
+      timeoutMs: 0,
+      pollMs: 50,
+    });
+    assert.equal(ready.ready, true);
   } finally {
     global.document = previousDocument;
     global.location = previousLocation;
@@ -3968,6 +4176,11 @@ test('unreadable metadata returns null rather than a shape that reads as unchang
   });
   assert.equal(httpError, null, 'an HTTP error means no answer');
 
+  const emptySuccess = await parser.fetchConversationMetadata('conv-1', {
+    token: 't', fetchImpl: async () => ({ ok: true, json: async () => ({}) }),
+  });
+  assert.equal(emptySuccess, null, 'a 200 response with no metadata cannot prove unchanged');
+
   const threw = await parser.fetchConversationMetadata('conv-1', {
     fetchImpl: async () => { throw new Error('offline'); },
   });
@@ -3977,6 +4190,76 @@ test('unreadable metadata returns null rather than a shape that reads as unchang
     fetchImpl: async () => ({ ok: true, json: async () => ({ accessToken: 't' }) }),
   });
   assert.equal(noId, null, 'no conversation id means no answer');
+});
+
+test('metadata falls back to the app-shell endpoint and does not count a partial page', async () => {
+  const calls = [];
+  const modern = await parser.fetchConversationMetadata('conv-1', {
+    token: 't',
+    fetchImpl: async (url) => {
+      calls.push(url);
+      if (String(url).indexOf('/backend-api/conversations/') !== -1) {
+        return {
+          ok: true,
+          json: async () => ({
+            update_time: 40,
+            current_node: 'node-modern',
+            messages: [{ id: 'm1' }, { id: 'm2' }],
+            page_info: { has_previous_page: false, has_next_page: false },
+          }),
+        };
+      }
+      return { ok: false, status: 404 };
+    },
+  });
+  assert.equal(modern.updateTime, 40);
+  assert.equal(modern.currentNode, 'node-modern');
+  assert.equal(modern.messageCount, 2);
+  assert.ok(calls.some((url) => String(url).indexOf('/backend-api/conversations/') !== -1));
+
+  // Positive control: the legacy body already answered, so the paged endpoint
+  // is not asked. A fallback that always ran would still produce the count
+  // above and hide a deleted fallback.
+  const legacyCalls = [];
+  const legacy = await parser.fetchConversationMetadata('conv-1', {
+    token: 't',
+    fetchImpl: async (url) => {
+      legacyCalls.push(url);
+      return {
+        ok: true,
+        json: async () => ({
+          update_time: 10,
+          current_node: 'node-legacy',
+          mapping: { a: { message: { id: 'a' } } },
+        }),
+      };
+    },
+  });
+  assert.equal(legacy.messageCount, 1);
+  assert.equal(
+    legacyCalls.some((url) => String(url).indexOf('/backend-api/conversations/') !== -1),
+    false,
+    legacyCalls.join(' | '),
+  );
+
+  const paged = await parser.fetchConversationMetadata('conv-1', {
+    token: 't',
+    fetchImpl: async (url) => {
+      if (String(url).indexOf('/backend-api/conversations/') === -1) return { ok: false, status: 404 };
+      return {
+        ok: true,
+        json: async () => ({
+          update_time: 50,
+          current_node: 'node-page',
+          messages: [{ id: 'only-page' }],
+          page_info: { has_previous_page: true, has_next_page: false },
+        }),
+      };
+    },
+  });
+  assert.equal(paged.updateTime, 50);
+  assert.equal(paged.currentNode, 'node-page');
+  assert.equal(paged.messageCount, null, 'a partial page must not become the stored message count');
 });
 
 test('a sandbox: link in the message body is resolved and downloaded', async () => {
@@ -5498,7 +5781,7 @@ test('modern DOM: real export preserves both sides per turn-key without toolbar 
     getComputedStyle: () => ({ overflowY: 'visible' }),
     setTimeout: fn => { fn(); return 0; }, clearTimeout() {},
   });
-  vm.runInContext(source, context);
+  vm.runInContext(source, context, { filename: path.join(__dirname, '..', 'content.js') });
   assert.equal(document.querySelectorAll('[data-turn-id]').length, 0);
   assert.equal(document.querySelectorAll('[data-message-author-role]').length, 0);
   assert.equal(document.querySelectorAll('[data-user-message-bubble]').length, 2);
@@ -5526,7 +5809,7 @@ test('modern file-saving export stays partial when a Library citation has no byt
       String(url).includes('/api/auth/session') ? { accessToken: 'fixture' } : { mapping: {} } }),
     setTimeout: fn => { fn(); return 0; }, clearTimeout() {},
   });
-  vm.runInContext(source, context);
+  vm.runInContext(source, context, { filename: path.join(__dirname, '..', 'content.js') });
   const result = await context.getConversationMarkdown({ downloadFiles: true });
   assert.equal(result.ok, true, result.error);
   assert.equal(result.partial, true);
@@ -5569,7 +5852,8 @@ test('modern DOM: export scans separately mounted exchanges and restores scroll 
     getComputedStyle: () => ({ overflowY: 'visible' }),
     setTimeout: fn => { fn(); return 0; }, clearTimeout() {},
   });
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8'), context,
+    { filename: path.join(__dirname, '..', 'content.js') });
   // Positive control: the initially mounted pair contains no first question.
   assert.equal(document.querySelectorAll('[data-chatgpt-search-unit-key]').length, 2);
   assert.match(document.querySelectorAll('[data-chatgpt-search-unit-key]')[0].textContent, /Вопрос 1/);
@@ -5599,7 +5883,8 @@ test('modern history boundary: exhausted history avoids the blanket partial warn
       getComputedStyle: () => ({ overflowY: 'visible' }),
       setTimeout: fn => { fn(); return 0; }, clearTimeout() {},
     });
-    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8'), context);
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8'), context,
+      { filename: path.join(__dirname, '..', 'content.js') });
     const result = await context.getConversationMarkdown({ downloadFiles: false });
     assert.equal(result.ok, true, result.error);
     assert.equal((result.md.match(/#### You said:/g) || []).length, 2);
@@ -5638,7 +5923,8 @@ function retainedExportContext(fixture, overrides = {}) {
       String(url).includes('/api/auth/session') ? { accessToken: 'fixture' } : { mapping: {} } }),
     setTimeout: (fn, ms) => { if (ms < 10000) fn(); return 0; }, clearTimeout() {}, ...overrides,
   });
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'content.js'), 'utf8'), context,
+    { filename: path.join(__dirname, '..', 'content.js') });
   return context;
 }
 

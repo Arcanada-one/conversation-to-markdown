@@ -13,7 +13,7 @@
     "check": "bun scripts/build-runtime.mjs --check && biome check src scripts && node --check content.js && node --check popup.js && node --check background.js && node --check zip.js && node --check site.js && node --check server.js"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.15",
-    "bun": "^1.2.2"
+    "@biomejs/biome": "2.6.6",
+    "bun": "^1.4.4"
   }
 }

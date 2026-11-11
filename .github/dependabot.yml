@@ -9,6 +9,10 @@ updates:
       github-actions:
         patterns:
           - "*"
+    # Keep majors out of the weekly noise; review them deliberately.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     labels:
       - dependencies
   - package-ecosystem: "npm"
@@ -23,3 +27,7 @@ updates:
     groups:
       minor-and-patch:
         update-types: ["minor", "patch"]
+    # Majors are ignored so Dependabot does not reopen one-by-one noise.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]

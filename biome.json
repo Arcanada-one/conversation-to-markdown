@@ -1,0 +1,54 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "files": {
+    "includes": ["src/**/*.mjs", "scripts/**/*.mjs"]
+  },
+  "formatter": {
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 120
+  },
+  "javascript": {
+    "globals": [
+      "Bun",
+      "chrome",
+      "clickConversationRetry",
+      "buildStoreZip",
+      "bytesToDataUrl",
+      "collectSidebarConversations",
+      "extractConversationTitle",
+      "extractImageDataUrls",
+      "fetchConversationMetadata",
+      "fetchImageDataUrls",
+      "getConversationMarkdown",
+      "htmlChatDirFromDownloadPath",
+      "htmlCompleteDirFromDownloadPath",
+      "layoutChatFiles",
+      "layoutIndexFiles",
+      "layoutStaticSite",
+      "listSidebarConversations",
+      "mergeChatLinks",
+      "sessionDirectory",
+      "sessionFromExport",
+      "slugifyTitle",
+      "waitForConversationReady",
+      "writeStaticSite"
+    ],
+    "formatter": {
+      "quoteStyle": "single",
+      "trailingCommas": "es5"
+    }
+  },
+  "linter": {
+    "rules": {
+      "recommended": false,
+      "correctness": {
+        "noUndeclaredVariables": "error",
+        "noUnusedImports": "error"
+      },
+      "suspicious": {
+        "noDebugger": "error"
+      }
+    }
+  }
+}

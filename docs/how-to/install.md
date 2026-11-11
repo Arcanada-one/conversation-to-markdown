@@ -23,8 +23,9 @@ cd conversation-to-markdown
 ```
 
 Source ZIPs contain an outer repository folder. Select the inner folder that
-actually contains `manifest.json`, `content.js`, `popup.html`, `popup.js`,
-`zip.js`, and `icons/`. Do not select the ZIP itself or the `icons/` folder.
+actually contains `manifest.json`, `background.js`, `content.js`, `popup.html`,
+`popup.js`, `site.js`, `zip.js`, and `icons/`. Do not select the ZIP itself or
+the `icons/` folder.
 Source on a development branch may be newer than the latest tested release.
 
 ## Load the extension
@@ -34,7 +35,7 @@ Source on a development branch may be newer than the latest tested release.
 3. Click **Load unpacked** and select the extracted folder containing `manifest.json`.
 4. Find **Conversation to Markdown** and check the displayed version against that folder's `manifest.json`.
 5. Open Chrome's Extensions toolbar menu and pin **Conversation to Markdown**.
-6. Reload an already-open ChatGPT tab before testing. Wait for messages to appear, then open the extension popup.
+6. Reload an already-open ChatGPT tab before testing. Wait for messages to appear, then click the toolbar button. The export controls open in the side panel.
 
 Keep the extracted folder in place: Chrome loads the extension from that folder.
 Do not delete it after installation. If a store copy is also installed, disable

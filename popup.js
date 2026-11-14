@@ -1,87 +1,91 @@
 (() => {
   var __defProp = Object.defineProperty;
+  var __returnValue = (v) => v;
+  function __exportSetter(name, newValue) {
+    this[name] = __returnValue.bind(null, newValue);
+  }
   var __export = (target, all) => {
     for (var name in all)
       __defProp(target, name, {
         get: all[name],
         enumerable: true,
         configurable: true,
-        set: (newValue) => all[name] = () => newValue
+        set: __exportSetter.bind(all, name)
       });
   };
 
   // src/popup/controls.mjs
   var exports_controls = {};
   __export(exports_controls, {
-    writeBatchJob: () => writeBatchJob,
-    waitWhilePaused: () => waitWhilePaused,
-    waitForLoadedConversation: () => waitForLoadedConversation,
-    waitForDownloadComplete: () => waitForDownloadComplete,
-    syncBatchOptions: () => syncBatchOptions,
-    stampsInPaths: () => stampsInPaths,
-    splitFilenameExtension: () => splitFilenameExtension,
-    showSavedBatch: () => showSavedBatch,
-    searchCompletedDownloadPaths: () => searchCompletedDownloadPaths,
-    saveConversationExport: () => saveConversationExport,
-    sanitizeLogText: () => sanitizeLogText,
-    sanitizeFilenamePart: () => sanitizeFilenamePart,
-    runBatchExport: () => runBatchExport,
-    revealExportFolder: () => revealExportFolder,
-    resumeSavedBatch: () => resumeSavedBatch,
-    reportFailure: () => reportFailure,
-    rememberBatchJob: () => rememberBatchJob,
-    recordExportedConversation: () => recordExportedConversation,
-    readExportIndex: () => readExportIndex,
-    readBatchJob: () => readBatchJob,
-    projectIdFromLocation: () => projectIdFromLocation,
-    parseImageRefs: () => parseImageRefs,
-    parseFileRefs: () => parseFileRefs,
-    parseArtifactRefs: () => parseArtifactRefs,
-    noteExportDownload: () => noteExportDownload,
-    mergeBackupConversations: () => mergeBackupConversations,
-    mdStem: () => mdStem,
-    mdDownloadPath: () => mdDownloadPath,
-    isDownloadableFileUrl: () => isDownloadableFileUrl,
-    formatExportTimestamp: () => formatExportTimestamp,
-    formatBatchProgress: () => formatBatchProgress,
-    foldExceptId: () => foldExceptId,
-    filterPendingConversations: () => filterPendingConversations,
-    exportPath: () => exportPath,
-    executeBatch: () => executeBatch,
-    downloadStaticSite: () => downloadStaticSite,
-    downloadOne: () => downloadOne,
-    createCallQuota: () => createCallQuota,
-    conversationJobRecord: () => conversationJobRecord,
-    conversationIdFromLocation: () => conversationIdFromLocation,
-    conversationFolderPath: () => conversationFolderPath,
-    conversationFolderFromPath: () => conversationFolderFromPath,
-    classifyBatchFailure: () => classifyBatchFailure,
-    classifyAgainstIndex: () => classifyAgainstIndex,
-    candidateExportNames: () => candidateExportNames,
-    bytesToDownloadUrl: () => bytesToDownloadUrl,
-    bytesToBase64DataUrl: () => bytesToBase64DataUrl,
-    buildSaveStatus: () => buildSaveStatus,
-    buildMdFilename: () => buildMdFilename,
-    batchRootPath: () => batchRootPath,
-    batchMdFilename: () => batchMdFilename,
-    backoffDelayMs: () => backoffDelayMs,
-    artifactFilename: () => artifactFilename,
-    addZipEntry: () => addZipEntry,
-    ZIP_WRITE_TIMEOUT_MS: () => ZIP_WRITE_TIMEOUT_MS,
-    ZIP_BYTE_BUDGET: () => ZIP_BYTE_BUDGET,
-    RATE_LIMIT_RETRY_WAIT_MS: () => RATE_LIMIT_RETRY_WAIT_MS,
-    RATE_LIMIT_RETRY_CLICKS: () => RATE_LIMIT_RETRY_CLICKS,
-    OPENAI_PAGE_LOAD_CALLS: () => OPENAI_PAGE_LOAD_CALLS,
-    OPENAI_METADATA_CALLS: () => OPENAI_METADATA_CALLS,
-    OPENAI_FILE_LOOKUP_CALLS: () => OPENAI_FILE_LOOKUP_CALLS,
-    OPENAI_CALL_WINDOW_MS: () => OPENAI_CALL_WINDOW_MS,
-    OPENAI_CALLS_PER_MINUTE: () => OPENAI_CALLS_PER_MINUTE,
-    MD_WRITE_TIMEOUT_MS: () => MD_WRITE_TIMEOUT_MS,
-    LAST_ERROR_KEY: () => LAST_ERROR_KEY,
-    INDEX_KEY: () => INDEX_KEY,
-    INDEX_BYTE_BUDGET: () => INDEX_BYTE_BUDGET,
+    BATCH_JOB_KEY: () => BATCH_JOB_KEY,
     ID_MARKER: () => ID_MARKER,
-    BATCH_JOB_KEY: () => BATCH_JOB_KEY
+    INDEX_BYTE_BUDGET: () => INDEX_BYTE_BUDGET,
+    INDEX_KEY: () => INDEX_KEY,
+    LAST_ERROR_KEY: () => LAST_ERROR_KEY,
+    MD_WRITE_TIMEOUT_MS: () => MD_WRITE_TIMEOUT_MS,
+    OPENAI_CALLS_PER_MINUTE: () => OPENAI_CALLS_PER_MINUTE,
+    OPENAI_CALL_WINDOW_MS: () => OPENAI_CALL_WINDOW_MS,
+    OPENAI_FILE_LOOKUP_CALLS: () => OPENAI_FILE_LOOKUP_CALLS,
+    OPENAI_METADATA_CALLS: () => OPENAI_METADATA_CALLS,
+    OPENAI_PAGE_LOAD_CALLS: () => OPENAI_PAGE_LOAD_CALLS,
+    RATE_LIMIT_RETRY_CLICKS: () => RATE_LIMIT_RETRY_CLICKS,
+    RATE_LIMIT_RETRY_WAIT_MS: () => RATE_LIMIT_RETRY_WAIT_MS,
+    ZIP_BYTE_BUDGET: () => ZIP_BYTE_BUDGET,
+    ZIP_WRITE_TIMEOUT_MS: () => ZIP_WRITE_TIMEOUT_MS,
+    addZipEntry: () => addZipEntry,
+    artifactFilename: () => artifactFilename,
+    backoffDelayMs: () => backoffDelayMs,
+    batchMdFilename: () => batchMdFilename,
+    batchRootPath: () => batchRootPath,
+    buildMdFilename: () => buildMdFilename,
+    buildSaveStatus: () => buildSaveStatus,
+    bytesToBase64DataUrl: () => bytesToBase64DataUrl,
+    bytesToDownloadUrl: () => bytesToDownloadUrl,
+    candidateExportNames: () => candidateExportNames,
+    classifyAgainstIndex: () => classifyAgainstIndex,
+    classifyBatchFailure: () => classifyBatchFailure,
+    conversationFolderFromPath: () => conversationFolderFromPath,
+    conversationFolderPath: () => conversationFolderPath,
+    conversationIdFromLocation: () => conversationIdFromLocation,
+    conversationJobRecord: () => conversationJobRecord,
+    createCallQuota: () => createCallQuota,
+    downloadOne: () => downloadOne,
+    downloadStaticSite: () => downloadStaticSite,
+    executeBatch: () => executeBatch,
+    exportPath: () => exportPath,
+    filterPendingConversations: () => filterPendingConversations,
+    foldExceptId: () => foldExceptId,
+    formatBatchProgress: () => formatBatchProgress,
+    formatExportTimestamp: () => formatExportTimestamp,
+    isDownloadableFileUrl: () => isDownloadableFileUrl,
+    mdDownloadPath: () => mdDownloadPath,
+    mdStem: () => mdStem,
+    mergeBackupConversations: () => mergeBackupConversations,
+    noteExportDownload: () => noteExportDownload,
+    parseArtifactRefs: () => parseArtifactRefs,
+    parseFileRefs: () => parseFileRefs,
+    parseImageRefs: () => parseImageRefs,
+    projectIdFromLocation: () => projectIdFromLocation,
+    readBatchJob: () => readBatchJob,
+    readExportIndex: () => readExportIndex,
+    recordExportedConversation: () => recordExportedConversation,
+    rememberBatchJob: () => rememberBatchJob,
+    reportFailure: () => reportFailure,
+    resumeSavedBatch: () => resumeSavedBatch,
+    revealExportFolder: () => revealExportFolder,
+    runBatchExport: () => runBatchExport,
+    sanitizeFilenamePart: () => sanitizeFilenamePart,
+    sanitizeLogText: () => sanitizeLogText,
+    saveConversationExport: () => saveConversationExport,
+    searchCompletedDownloadPaths: () => searchCompletedDownloadPaths,
+    showSavedBatch: () => showSavedBatch,
+    splitFilenameExtension: () => splitFilenameExtension,
+    stampsInPaths: () => stampsInPaths,
+    syncBatchOptions: () => syncBatchOptions,
+    waitForDownloadComplete: () => waitForDownloadComplete,
+    waitForLoadedConversation: () => waitForLoadedConversation,
+    waitWhilePaused: () => waitWhilePaused,
+    writeBatchJob: () => writeBatchJob
   });
 
   // src/popup/options.mjs
@@ -103,8 +107,7 @@
       const manifest = typeof chrome !== "undefined" && chrome.runtime && typeof chrome.runtime.getManifest === "function" ? chrome.runtime.getManifest() : null;
       if (manifest && manifest.version)
         el.textContent = "v" + manifest.version;
-    } catch (_e) {
-    }
+    } catch (_e) {}
   })();
   function exportButtonLabel() {
     var saveMd = !!(chkImages && chkImages.checked);
@@ -337,8 +340,7 @@
           ext = fromPath.ext.replace(/^\./, "");
           originalStem = fromPath.stem;
         }
-      } catch (_e) {
-      }
+      } catch (_e) {}
     }
     if (kind === "image") {
       ext = ext.replace(/^jpe?g$/i, "jpg");
@@ -475,9 +477,9 @@
     }
     return conversations.filter(function(conv) {
       var names = candidateExportNames(conv, projectSlug, stamps);
-      var every2 = names.owned.concat(names.legacy);
-      for (var a = 0;a < every2.length; a++) {
-        if (landed.has(every2[a]) && claimants[every2[a]] === 1)
+      var every = names.owned.concat(names.legacy);
+      for (var a = 0;a < every.length; a++) {
+        if (landed.has(every[a]) && claimants[every[a]] === 1)
           return false;
       }
       return true;
@@ -778,8 +780,7 @@
         area.set({ [LAST_ERROR_KEY]: detail }, function() {
           chrome.runtime.lastError;
         });
-    } catch (_e) {
-    }
+    } catch (_e) {}
   }
   function buildSaveStatus(parts) {
     var saved = parts.saved || {};
@@ -1134,13 +1135,11 @@ Re-run to complete it.` : "")
         revoke: function(url) {
           try {
             URL.revokeObjectURL(url);
-          } catch (_e) {
-          }
+          } catch (_e) {}
         }
       };
     }
-    return { url: bytesToBase64DataUrl(bytes, mimeType), revoke: function() {
-    } };
+    return { url: bytesToBase64DataUrl(bytes, mimeType), revoke: function() {} };
   }
   function textToUtf8Bytes(text) {
     if (typeof TextEncoder !== "undefined")
@@ -1181,8 +1180,7 @@ Re-run to complete it.` : "")
         clearTimeout(timer);
         try {
           chrome.downloads.onChanged.removeListener(listener);
-        } catch (_e) {
-        }
+        } catch (_e) {}
         resolve(done);
       };
       var listener = function(delta) {
@@ -1209,8 +1207,7 @@ Re-run to complete it.` : "")
             else if (item.state === "complete" && item.exists === true)
               finish(true);
           });
-        } catch (_e) {
-        }
+        } catch (_e) {}
       }
     });
   }
@@ -1259,8 +1256,7 @@ Re-run to complete it.` : "")
           const seconds = Math.round((state2.elapsedMs || 0) / 1000);
           btn.textContent = "Scanning… " + state2.captured + " messages · " + seconds + "s";
         }
-      } catch (_e) {
-      }
+      } catch (_e) {}
     }, 1000);
   }
   function stopProgressPolling() {
@@ -1292,18 +1288,18 @@ Re-run to complete it.` : "")
       dlTotal = refs.length;
       var extracted = [];
       if (refs.length > 0) {
-        var urls = refs.map(function(r2) {
-          return r2.url;
+        var urls = refs.map(function(r) {
+          return r.url;
         });
         try {
           var extractResult = await chrome.scripting.executeScript({
             target: { tabId },
-            func: async function(urls2) {
+            func: async function(urls) {
               if (typeof fetchImageDataUrls === "function")
-                return await fetchImageDataUrls(urls2);
+                return await fetchImageDataUrls(urls);
               if (typeof extractImageDataUrls === "function")
-                return await extractImageDataUrls(urls2);
-              return urls2.map(function() {
+                return await extractImageDataUrls(urls);
+              return urls.map(function() {
                 return null;
               });
             },
@@ -1594,9 +1590,9 @@ Re-run to complete it.` : "")
     for (var m = 0;m < markdownPending.length; m++) {
       markdownPendingKeys[markdownPending[m].id || markdownPending[m].slug] = true;
     }
-    function requestedFilesLanded(conv2) {
-      var htmlMissing = wantHtmlRun && (!htmlHistoryKnown || !htmlChatLanded(conv2, htmlCompletePaths));
-      var markdownMissing = wantMarkdown && markdownPendingKeys[conv2.id || conv2.slug];
+    function requestedFilesLanded(conv) {
+      var htmlMissing = wantHtmlRun && (!htmlHistoryKnown || !htmlChatLanded(conv, htmlCompletePaths));
+      var markdownMissing = wantMarkdown && markdownPendingKeys[conv.id || conv.slug];
       return !htmlMissing && !markdownMissing;
     }
     var notYetSaved = [];
@@ -1702,7 +1698,7 @@ Re-run to complete it.` : "")
         poll();
       });
     }
-    async function readConversationMetadata(tabId, conv2) {
+    async function readConversationMetadata(tabId, conv) {
       try {
         await callQuota.take(OPENAI_METADATA_CALLS);
         await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
@@ -1713,23 +1709,23 @@ Re-run to complete it.` : "")
               return null;
             return await fetchConversationMetadata(conversationId, {});
           },
-          args: [conv2.id]
+          args: [conv.id]
         });
         return out && out[0] && out[0].result || null;
       } catch (_e) {
         return null;
       }
     }
-    async function attemptConversation(conv2) {
+    async function attemptConversation(conv) {
       await callQuota.take(OPENAI_PAGE_LOAD_CALLS);
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: function(href) {
           window.location.href = href;
         },
-        args: [conv2.href]
+        args: [conv.href]
       });
-      var navigated = await waitForTabNavigation(tab.id, conv2.id, 30000);
+      var navigated = await waitForTabNavigation(tab.id, conv.id, 30000);
       if (!navigated)
         return { ok: false, error: "did not load" };
       await chrome.scripting.executeScript({
@@ -1737,7 +1733,7 @@ Re-run to complete it.` : "")
         files: ["content.js"]
       });
       state.scanningTabId = tab.id;
-      var ready = await waitForLoadedConversation(tab.id, conv2.id, {
+      var ready = await waitForLoadedConversation(tab.id, conv.id, {
         isCancelled: controls.isCancelled,
         isPaused: controls.isPaused,
         onWait: function() {
@@ -2351,8 +2347,7 @@ Errors: ` + batchResult.errors.join("; ");
       btnPause.classList.add("visible");
       btnPause.textContent = "Resume saved export";
       showStatus("warning", "A saved backup is waiting (" + job.conversations.length + " conversations). Resume checks the open sidebar for chats added since, then saves new and updated ones.");
-    }).catch(function() {
-    });
+    }).catch(function() {});
   }
   btnCancel.addEventListener("click", async () => {
     if (state.scanningTabId === null)
@@ -2368,8 +2363,7 @@ Errors: ` + batchResult.errors.join("; ");
             window.__c2mScan.cancelled = true;
         }
       });
-    } catch (_e) {
-    }
+    } catch (_e) {}
   });
   btn.addEventListener("click", async () => {
     state.lastExportDownloadId = null;

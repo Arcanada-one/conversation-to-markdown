@@ -261,6 +261,19 @@ test('PR quality CI is read-only and pins every action by full commit SHA', () =
   for (const action of uses) assert.match(action, /@[a-f0-9]{40}$/);
 });
 
+test('advanced CodeQL workflow is self-hosted, least-permissioned, and SHA-pinned', () => {
+  const workflow = read('.github/workflows/codeql.yml');
+  assert.match(workflow, /runs-on:\s*\[self-hosted,\s*Linux,\s*X64,\s*ci-general\]/);
+  assert.match(workflow, /permissions:\s*\n\s+contents: read/);
+  assert.match(workflow, /security-events:\s*write/);
+  assert.doesNotMatch(workflow, /pull_request_target/);
+  assert.doesNotMatch(workflow, /\/tmp\//);
+
+  const uses = [...workflow.matchAll(/^\s*uses:\s*([^\s#]+)/gm)].map((match) => match[1]);
+  assert.ok(uses.length > 0, 'codeql workflow must use at least one action');
+  for (const action of uses) assert.match(action, /@[a-f0-9]{40}$/);
+});
+
 test('PRIVACY.md describes every permission the manifest declares', () => {
   // The document said the extension "deliberately stores no state of its own"
   // while a change was adding the `storage` permission. A privacy policy that

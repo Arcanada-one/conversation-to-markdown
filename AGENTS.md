@@ -187,3 +187,8 @@ and share the obvious nouns (`status`, `button`).
 - Never commit a real conversation URL: a repository test scans for
   `chatgpt.com/c/<id>` and treats it as a privacy leak. Split the literal if a
   fixture needs to look like one.
+
+## Post-merge cleanup
+After a merge to `main` and its deploy, delete the merged branch, local worktrees and clones, build outputs, and unused CI artifacts.
+Never delete unmerged work; finish it into `main`.
+See [the ecosystem mandate](https://github.com/Arcanada-one/arcanada-workspace/blob/main/documentation/mandates/post-merge-cleanup-mandate.md).
